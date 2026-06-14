@@ -22,11 +22,47 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(VolkswagenReader.range_tile_center(root), (281, 1270))
 
+    def test_english_range_tile(self):
+        root = ET.fromstring(
+            """<hierarchy><node content-desc="Overview range. Battery range: 126 kilometres. Open details" bounds="[55,1044][507,1496]"/></hierarchy>"""
+        )
+        self.assertEqual(VolkswagenReader.range_tile_center(root), (281, 1270))
+
     def test_lock_state_parsing_is_case_insensitive(self):
         self.assertFalse(VolkswagenReader.parse_locked("Fahrzeug. Wird entriegelt."))
         self.assertTrue(VolkswagenReader.parse_locked("Fahrzeug. Wird verriegelt."))
         self.assertFalse(VolkswagenReader.parse_locked("ENTRIEGELT"))
+        self.assertFalse(VolkswagenReader.parse_locked("Vehicle. Unlocking."))
+        self.assertTrue(VolkswagenReader.parse_locked("Vehicle. Locked."))
         self.assertIsNone(VolkswagenReader.parse_locked("Fahrzeugstatus unbekannt"))
+
+    def test_english_overview_values(self):
+        self.assertEqual(VolkswagenReader.parse_sync_age("Synced 2 hours 5 minutes"), 125)
+        self.assertEqual(VolkswagenReader.parse_sync_age("Just synced"), 0)
+        self.assertEqual(
+            VolkswagenReader.parse_sync_age("Synchronised just now"), 0
+        )
+        self.assertFalse(VolkswagenReader.parse_climater("Air conditioning. Off."))
+        self.assertFalse(VolkswagenReader.parse_climater("Climate control. Off."))
+        self.assertTrue(VolkswagenReader.parse_climater("Air conditioning. On."))
+
+    def test_current_german_sync_text(self):
+        self.assertEqual(
+            VolkswagenReader.parse_sync_age(
+                "Ihr Fahrzeug: ID.7 Tourer Pro. Gerade synchronisiert. "
+                "Synchronisiert gerade"
+            ),
+            0,
+        )
+
+    def test_real_english_state_of_charge(self):
+        self.assertEqual(
+            VolkswagenReader.parse_soc(
+                "Charging status. Battery charge level: 45 per cent. "
+                "Currently charging"
+            ),
+            45,
+        )
 
     def test_charging_details(self):
         result = VehicleData()
@@ -50,6 +86,21 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(result.targetSoc, 80)
         self.assertIsNone(result.remainingChargeMinutes)
+
+    def test_english_charging_details(self):
+        result = VehicleData()
+        VolkswagenReader.parse_charging_details(
+            "Charging details. 27 hours and. 20 minutes of charging time left. "
+            "Charging speed: 6 kilometres per hour. "
+            "Charging capacity: 1 kilowatt. Target charge level: 80 per cent. "
+            "Charging method. Immediate charging. Change charging method",
+            result,
+        )
+        self.assertEqual(result.remainingChargeMinutes, 1640)
+        self.assertEqual(result.chargeRateKmH, 6)
+        self.assertEqual(result.chargePowerKw, 1)
+        self.assertEqual(result.targetSoc, 80)
+        self.assertEqual(result.chargingMode, "Immediate charging")
 
     def test_target_temperature_uses_center_value(self):
         root = ET.fromstring(

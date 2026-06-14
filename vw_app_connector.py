@@ -428,28 +428,89 @@ class VolkswagenReader:
 
     @classmethod
     def described_node_center(cls, root: ET.Element, prefix: str) -> tuple[int, int]:
+        return cls.described_node_center_any(root, (prefix,))
+
+    @classmethod
+    def described_node_center_any(
+        cls, root: ET.Element, prefixes: tuple[str, ...]
+    ) -> tuple[int, int]:
         for node in root.iter():
             description = node.attrib.get("content-desc", "")
             text = node.attrib.get("text", "")
-            if prefix not in description and prefix not in text:
+            if not any(
+                prefix.casefold() in description.casefold()
+                or prefix.casefold() in text.casefold()
+                for prefix in prefixes
+            ):
                 continue
             center = cls.node_center(node)
             if center:
                 return center
-        raise RuntimeError(f"Volkswagen UI element not found: {prefix}")
+        raise RuntimeError(
+            f"Volkswagen UI element not found: {' / '.join(prefixes)}"
+        )
 
     @classmethod
     def range_tile_center(cls, root: ET.Element) -> tuple[int, int]:
-        return cls.described_node_center(root, "Batteriereichweite:")
+        return cls.described_node_center_any(
+            root, ("Batteriereichweite:", "Battery range:", "Electric range:")
+        )
 
     @staticmethod
     def parse_locked(text: str) -> bool | None:
         lowered = text.casefold()
-        if "entriegelt" in lowered:
+        if "entriegelt" in lowered or "unlocked" in lowered or "unlocking" in lowered:
             return False
-        if "verriegelt" in lowered:
+        if "verriegelt" in lowered or "locked" in lowered or "locking" in lowered:
             return True
         return None
+
+    @staticmethod
+    def parse_sync_age(text: str) -> int | None:
+        match = re.search(
+            r"(?:Synchronisiert vor|Synced|Synchronised|Updated)\s*"
+            r"(?:(\d+)\s*(?:Stunden?|hours?)\s*)?"
+            r"(?:(\d+)\s*(?:Minuten?|minutes?))?(?:\s*ago)?",
+            text,
+            re.IGNORECASE,
+        )
+        if match and any(match.groups()):
+            return int(match.group(1) or 0) * 60 + int(match.group(2) or 0)
+        if re.search(
+            r"Gerade (?:eben )?synchronisiert|Just synced|Synced just now|"
+            r"Synchronised just now|Just updated",
+            text,
+            re.IGNORECASE,
+        ):
+            return 0
+        return None
+
+    @staticmethod
+    def parse_climater(text: str) -> bool | None:
+        if not re.search(
+            r"Vorklimatisierung|Air conditioning|Climate control",
+            text,
+            re.IGNORECASE,
+        ):
+            return None
+        return not bool(
+            re.search(
+                r"(?:Vorklimatisierung|Air conditioning|Climate control)"
+                r"[.\s:]*(?:Aus|Off)\b",
+                text,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def parse_soc(text: str) -> int | None:
+        match = re.search(
+            r"(?:Batterie(?:ladung)?|Battery(?: charge level| charge| level)?|"
+            r"State of charge):?\s*(\d+)\s*(?:%|Prozent|per cent|percent)",
+            text,
+            re.IGNORECASE,
+        )
+        return int(match.group(1)) if match else None
 
     @staticmethod
     def parse_target_temperature(root: ET.Element) -> float:
@@ -470,12 +531,16 @@ class VolkswagenReader:
     @staticmethod
     def parse_charging_details(text: str, result: VehicleData) -> None:
         details_match = re.search(
-            r"(\d+)\s*Stunden?\s+und\.?\s*(\d+)\s*Minuten?\s+Ladezeit"
-            r".*?Ladegeschwindigkeit:\s*(\d+)\s*Kilometer pro Stunde"
-            r".*?Ladeleistung:\s*(\d+)\s*Kilowatt"
-            r".*?Zielladestand:\s*(\d+)\s*Prozent",
+            r"(\d+)\s*(?:Stunden?|hours?)\s+(?:und\.?|and\.?)\s*"
+            r"(\d+)\s*(?:Minuten?|minutes?)"
+            r".*?(?:Ladegeschwindigkeit|Charging speed):\s*(\d+)\s*"
+            r"(?:Kilometer pro Stunde|kilometres? per hour|km/h)"
+            r".*?(?:Ladeleistung|Charging power|Charging capacity):\s*(\d+)\s*"
+            r"(?:Kilowatt|kW)"
+            r".*?(?:Zielladestand|Target charge level|Target charge):\s*(\d+)\s*"
+            r"(?:Prozent|per cent|percent|%)",
             text,
-            re.DOTALL,
+            re.DOTALL | re.IGNORECASE,
         )
         if details_match:
             hours, minutes, rate, power, target = map(int, details_match.groups())
@@ -484,12 +549,22 @@ class VolkswagenReader:
             result.chargePowerKw = power
             result.targetSoc = target
 
-        target_match = re.search(r"Zielladestand:?\s*(\d+)\s*Prozent", text)
+        target_match = re.search(
+            r"(?:Zielladestand|Target charge level|Target charge):?\s*(\d+)\s*"
+            r"(?:Prozent|per cent|percent|%)",
+            text,
+            re.IGNORECASE,
+        )
         if target_match:
             result.targetSoc = int(target_match.group(1))
 
         mode_match = re.search(
-            r"Ladeverfahren\.\s*([^.]+)\.\s*Ladeverfahren ändern", text
+            r"(?:Ladeverfahren|Charging mode|Charging type|Charging method)\.\s*"
+            r"([^.]+)\.\s*"
+            r"(?:Ladeverfahren ändern|Change charging mode|Change charging type|"
+            r"Change charging method)",
+            text,
+            re.IGNORECASE,
         )
         if mode_match:
             result.chargingMode = mode_match.group(1).strip()
@@ -637,25 +712,17 @@ class VolkswagenReader:
             observedAt=datetime.now().astimezone().isoformat(timespec="seconds")
         )
 
-        range_match = re.search(r"Batteriereichweite:\s*(\d+)\s*Kilometer", overview_text)
+        range_match = re.search(
+            r"(?:Batteriereichweite|Battery range|Electric range):\s*(\d+)\s*"
+            r"(?:Kilometer|kilometres?|km)",
+            overview_text,
+            re.IGNORECASE,
+        )
         if range_match:
             result.range = int(range_match.group(1))
 
-        sync_match = re.search(
-            r"Synchronisiert vor\s*(?:(\d+)\s*Stunden?\s*)?"
-            r"(?:(\d+)\s*Minuten?)?",
-            overview_text,
-        )
-        if sync_match and any(sync_match.groups()):
-            result.syncAgeMinutes = (
-                int(sync_match.group(1) or 0) * 60 + int(sync_match.group(2) or 0)
-            )
-        elif "Gerade eben synchronisiert" in overview_text:
-            result.syncAgeMinutes = 0
-
-        result.climater = not bool(
-            re.search(r"Vorklimatisierung\.\s*Aus", overview_text)
-        )
+        result.syncAgeMinutes = self.parse_sync_age(overview_text)
+        result.climater = self.parse_climater(overview_text)
         result.locked = self.parse_locked(overview_text)
 
         x, y = self.range_tile_center(overview)
@@ -663,16 +730,23 @@ class VolkswagenReader:
         time.sleep(self.detail_wait)
 
         detail_text = "\n".join(self.strings(self.dump_ui("vw-detail.xml")))
-        soc_match = re.search(
-            r"Batterie(?:ladung)?:?\s*(\d+)\s*(?:%|Prozent)", detail_text
-        )
-        if not soc_match:
+        result.soc = self.parse_soc(detail_text)
+        if result.soc is None:
             raise RuntimeError("Volkswagen state of charge not found")
-        result.soc = int(soc_match.group(1))
         self.parse_charging_details(detail_text, result)
 
         lowered = detail_text.casefold()
-        if any(value in lowered for value in ("laden stoppen", "wird geladen", "lädt")):
+        if any(
+            value in lowered
+            for value in (
+                "laden stoppen",
+                "wird geladen",
+                "lädt",
+                "stop charging",
+                "is charging",
+                "charging in progress",
+            )
+        ):
             result.status = "C"
         elif any(
             value in lowered
@@ -680,6 +754,9 @@ class VolkswagenReader:
                 "laden starten",
                 "ladestation zeigt den aktuellen status",
                 "ladekabel verbunden",
+                "start charging",
+                "charging station shows the current status",
+                "charging cable connected",
             )
         ):
             result.status = "B"
@@ -695,9 +772,11 @@ class VolkswagenReader:
             current_text = "\n".join(self.strings(overview))
             current = self.parse_locked(current_text)
             if current is desired:
-                return self._read()
+                return self.with_retries(self._read, "ACTION_VERIFY")
 
-            x, y = self.described_node_center(overview, "Fahrzeug.")
+            x, y = self.described_node_center_any(
+                overview, ("Fahrzeug.", "Vehicle.")
+            )
             self.shell("input", "tap", str(x), str(y))
             time.sleep(self.detail_wait)
             if desired:
@@ -707,12 +786,12 @@ class VolkswagenReader:
             time.sleep(2)
 
             pin_text = "\n".join(self.strings(self.dump_ui("vw-pin.xml")))
-            if "S-PIN" not in pin_text:
+            if not re.search(r"S-?PIN", pin_text, re.IGNORECASE):
                 raise RuntimeError("Volkswagen S-PIN dialog not found")
             self.shell("input", "tap", "260", "1020")
             self.shell("input", "text", self.spin)
             time.sleep(8)
-            return self._read()
+            return self.with_retries(self._read, "ACTION_VERIFY")
 
     def read_location(self) -> LocationData:
         with self.screen_session():
@@ -735,7 +814,11 @@ class VolkswagenReader:
                 observedAt=datetime.now().astimezone().isoformat(timespec="seconds")
             )
             for value in self.strings(details):
-                if "\nGeparkt seit " not in value:
+                if not re.search(
+                    r"\n(?:Geparkt seit|Parked since|Parked for)\s+",
+                    value,
+                    re.IGNORECASE,
+                ):
                     continue
                 result.address, result.parkedDuration = value.split("\n", 1)
                 break
@@ -767,30 +850,43 @@ class VolkswagenReader:
             time.sleep(self.detail_wait)
             detail = self.dump_ui("vw-charge-action.xml")
             text = "\n".join(self.strings(detail))
-            current = "Laden stoppen" in text or "Wird geladen" in text
+            current = bool(
+                re.search(
+                    r"Laden stoppen|Wird geladen|Stop charging|Is charging",
+                    text,
+                    re.IGNORECASE,
+                )
+            )
             if current != desired:
-                label = "Laden starten" if desired else "Laden stoppen"
-                x, y = self.described_node_center(detail, label)
+                labels = (
+                    ("Laden starten", "Start charging")
+                    if desired
+                    else ("Laden stoppen", "Stop charging")
+                )
+                x, y = self.described_node_center_any(detail, labels)
                 self.shell("input", "tap", str(x), str(y))
                 time.sleep(8)
-            return self._read()
+            return self.with_retries(self._read, "ACTION_VERIFY")
 
     def set_climater(self, desired: bool) -> VehicleData:
         with self.screen_session():
             self.launch()
             overview = self.open_overview()
             overview_text = "\n".join(self.strings(overview))
-            current = not bool(re.search(r"Vorklimatisierung\.\s*Aus", overview_text))
+            current = self.parse_climater(overview_text)
             if current != desired:
-                x, y = self.described_node_center(overview, "Vorklimatisierung.")
+                x, y = self.described_node_center_any(
+                    overview,
+                    ("Vorklimatisierung.", "Air conditioning.", "Climate control."),
+                )
                 self.shell("input", "tap", str(x), str(y))
                 time.sleep(self.detail_wait)
                 detail = self.dump_ui("vw-climate-action.xml")
-                label = "Starten" if desired else "Stoppen"
-                x, y = self.described_node_center(detail, label)
+                labels = ("Starten", "Start") if desired else ("Stoppen", "Stop")
+                x, y = self.described_node_center_any(detail, labels)
                 self.shell("input", "tap", str(x), str(y))
                 time.sleep(8)
-            return self._read()
+            return self.with_retries(self._read, "ACTION_VERIFY")
 
     @staticmethod
     def checked_nodes(root: ET.Element) -> list[ET.Element]:
@@ -810,7 +906,10 @@ class VolkswagenReader:
 
     def open_climate(self) -> ET.Element:
         overview = self.open_overview()
-        x, y = self.described_node_center(overview, "Vorklimatisierung.")
+        x, y = self.described_node_center_any(
+            overview,
+            ("Vorklimatisierung.", "Air conditioning.", "Climate control."),
+        )
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
         return self.dump_ui("vw-climate.xml")
@@ -824,14 +923,14 @@ class VolkswagenReader:
         self.launch()
         climate = self.open_climate()
         result.targetTemperatureC = self.parse_target_temperature(climate)
-        x, y = self.described_node_center(climate, "Einstellungen")
+        x, y = self.described_node_center_any(climate, ("Einstellungen", "Settings"))
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
         settings = self.dump_ui("vw-climate-settings.xml")
         switches = self.checked_nodes(settings)
         if len(switches) >= 2:
             result.automaticWindowHeating = switches[1].attrib.get("checked") == "true"
-        x, y = self.described_node_center(settings, "Zonen")
+        x, y = self.described_node_center_any(settings, ("Zonen", "Zones"))
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
         zones = self.checked_nodes(self.dump_ui("vw-climate-zones.xml"))
@@ -841,25 +940,49 @@ class VolkswagenReader:
 
         self.launch()
         overview = self.open_overview()
-        x, y = self.described_node_center(overview, "Fahrzeugzustandsbericht.")
+        x, y = self.described_node_center_any(
+            overview,
+            (
+                "Fahrzeugzustandsbericht.",
+                "Vehicle health report.",
+                "Vehicle status report.",
+            ),
+        )
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
         report_text = "\n".join(self.strings(self.dump_ui("vw-report.xml")))
-        odometer = re.search(r"Gesamtstrecke\s*([\d.]+)\s*km", report_text)
-        service = re.search(r"Nächster Service\s*(\d+)\s*Tage", report_text)
-        report_sync = re.search(r"Synchronisiert:\s*([^\n]+)", report_text)
+        odometer = re.search(
+            r"(?:Gesamtstrecke|Total distance|Odometer)\s*([\d.,]+)\s*km",
+            report_text,
+            re.IGNORECASE,
+        )
+        service = re.search(
+            r"(?:Nächster Service|Next service)\s*(?:in\s*)?(\d+)\s*"
+            r"(?:Tage|days)",
+            report_text,
+            re.IGNORECASE,
+        )
+        report_sync = re.search(
+            r"(?:Synchronisiert|Synced):\s*([^\n]+)",
+            report_text,
+            re.IGNORECASE,
+        )
         result.odometerKm = (
-            int(odometer.group(1).replace(".", "")) if odometer else None
+            int(re.sub(r"[.,]", "", odometer.group(1))) if odometer else None
         )
         result.serviceDays = int(service.group(1)) if service else None
         result.warningStatus = (
-            "Keine Meldungen" if "Keine Meldungen" in report_text else "Meldungen vorhanden"
+            "Keine Meldungen"
+            if re.search(r"Keine Meldungen|No messages|No warnings", report_text, re.IGNORECASE)
+            else "Meldungen vorhanden"
         )
         result.reportSyncAge = report_sync.group(1).strip() if report_sync else ""
 
         self.launch()
         overview = self.open_overview()
-        x, y = self.described_node_center(overview, "Abfahrtszeiten.")
+        x, y = self.described_node_center_any(
+            overview, ("Abfahrtszeiten.", "Departure times.")
+        )
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
         departure = self.dump_ui("vw-departures.xml")
@@ -907,12 +1030,14 @@ class VolkswagenReader:
         with self.screen_session():
             self.launch()
             climate = self.open_climate()
-            x, y = self.described_node_center(climate, "Einstellungen")
+            x, y = self.described_node_center_any(
+                climate, ("Einstellungen", "Settings")
+            )
             self.shell("input", "tap", str(x), str(y))
             time.sleep(self.detail_wait)
             root = self.dump_ui("vw-option-settings.xml")
             if page == "zones":
-                x, y = self.described_node_center(root, "Zonen")
+                x, y = self.described_node_center_any(root, ("Zonen", "Zones"))
                 self.shell("input", "tap", str(x), str(y))
                 time.sleep(self.detail_wait)
                 root = self.dump_ui("vw-option-zones.xml")
