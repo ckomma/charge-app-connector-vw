@@ -63,10 +63,17 @@ Status follows evcc's vehicle convention:
 ## Requirements
 
 - Android phone with the Volkswagen app already signed in
+- Volkswagen app language set to German
 - regular USB debugging
 - Xiaomi devices: `USB debugging (Security settings)` for simulated taps
 - `adb` available to the service user
 - Python 3.11 or newer
+
+The connector currently supports only the German Volkswagen app localization.
+It parses visible labels and accessibility descriptions such as
+`Batteriereichweite`, `Vorklimatisierung`, `Entriegelt`, `Verriegelt` and
+`Zielladestand`. Other app languages are not tested and will cause some or all
+data reads and actions to fail. Multi-language parsing is not implemented yet.
 
 ## Configuration
 
