@@ -1,6 +1,5 @@
-title: ID.7 Volkswagen App
+title: Volkswagen App
 icon: car
-capacity: 77 # kWh
 
 ## required attributes
 

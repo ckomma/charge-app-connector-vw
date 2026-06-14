@@ -1,6 +1,6 @@
 ADB_SERIAL=replace-with-your-adb-serial
 ADB_MODE=usb
-# Optional after pairing the LXC with Android wireless debugging:
+# Optional after pairing the connector host with Android wireless debugging:
 # ADB_WIFI_ADDRESS=192.0.2.10:37123
 LISTEN_ADDRESS=0.0.0.0
 PORT=9920

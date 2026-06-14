@@ -1,6 +1,6 @@
 # Volkswagen App Connector
 
-Fork of [janphkre/charge-app-connector](https://github.com/janphkre/charge-app-connector)
+Based on [janphkre/charge-app-connector](https://github.com/janphkre/charge-app-connector)
 for reading vehicle data from the Volkswagen Android app.
 
 The connector uses ADB and Android's accessibility UI hierarchy. It does not
@@ -131,7 +131,8 @@ non-secure keyguard automatically.
 USB remains the default and most reliable transport. To prepare Wi-Fi:
 
 1. Enable Android developer options and wireless debugging.
-2. Pair once from the evcc LXC with `adb pair PHONE_IP:PAIRING_PORT`.
+2. On the host running the connector, run
+   `adb pair PHONE_IP:PAIRING_PORT`.
 3. Enter the pairing code shown by Android.
 4. Note the separate connection address shown by Android and configure it as
    `ADB_WIFI_ADDRESS=PHONE_IP:CONNECTION_PORT`.
