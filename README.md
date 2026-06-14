@@ -149,3 +149,29 @@ The Android wireless-debugging connection port may change after a phone
 restart or after disabling wireless debugging. In that case update
 `ADB_WIFI_ADDRESS`. `/health` exposes `adbMode`, `adbTransport`,
 `adbWifiConfigured` and the latest connection error.
+
+## Home Assistant
+
+[`examples/vw_app_connector.yaml`](examples/vw_app_connector.yaml)
+provides an example Home Assistant package with REST sensors, a vehicle
+location tracker and authenticated controls for locking, charging and climate.
+
+Replace `CONNECTOR_HOST` with the connector host name or IP address. Add the
+same value configured as `API_KEY` on the connector to Home Assistant's
+`secrets.yaml`:
+
+```yaml
+vw_app_connector_api_key: replace-with-the-connector-api-key
+```
+
+The example assumes that Home Assistant packages are enabled:
+
+```yaml
+homeassistant:
+  packages: !include_dir_named packages
+```
+
+Review the entities and polling intervals before using the example. The
+connector performs background refreshes according to its own rate limits;
+reading its cached HTTP endpoints from Home Assistant does not trigger one
+Volkswagen app operation per request.

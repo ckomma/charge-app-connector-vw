@@ -1,0 +1,268 @@
+# Home Assistant package example for Volkswagen App Connector.
+#
+# Before using this file:
+# 1. Replace CONNECTOR_HOST with the connector host name or IP address.
+# 2. Add `vw_app_connector_api_key` to secrets.yaml.
+# 3. Ensure configuration.yaml contains:
+#
+#    homeassistant:
+#      packages: !include_dir_named packages
+#
+# Copy this file to the Home Assistant packages directory and restart
+# Home Assistant after validating the configuration.
+
+rest:
+  - resource: "http://CONNECTOR_HOST:9920/charge"
+    scan_interval: 120
+    timeout: 10
+    sensor:
+      - name: "Volkswagen App Status"
+        unique_id: volkswagen_app_status
+        value_template: "{{ value_json.status }}"
+        icon: mdi:car-connected
+        json_attributes:
+          - soc
+          - range
+          - remainingChargeMinutes
+          - chargeRateKmH
+          - chargePowerKw
+          - targetSoc
+          - chargingMode
+          - climater
+          - locked
+          - syncAgeMinutes
+          - observedAt
+          - error
+          - errorCategory
+          - stale
+          - lastSuccessfulAt
+          - refreshDurationSeconds
+
+  - resource: "http://CONNECTOR_HOST:9920/details"
+    scan_interval: 300
+    timeout: 10
+    sensor:
+      - name: "Volkswagen App Details"
+        unique_id: volkswagen_app_details
+        value_template: "{{ value_json.warningStatus }}"
+        icon: mdi:car-info
+        json_attributes:
+          - targetTemperatureC
+          - automaticWindowHeating
+          - climateZoneFrontLeft
+          - climateZoneFrontRight
+          - odometerKm
+          - serviceDays
+          - reportSyncAge
+          - departureTimes
+          - observedAt
+          - error
+          - errorCategory
+          - stale
+          - lastSuccessfulAt
+          - refreshDurationSeconds
+
+  - resource: "http://CONNECTOR_HOST:9920/health"
+    scan_interval: 60
+    timeout: 10
+    sensor:
+      - name: "Volkswagen App Connector"
+        unique_id: volkswagen_app_connector
+        value_template: "{{ value_json.status }}"
+        icon: mdi:cellphone-link
+        json_attributes:
+          - adbState
+          - adbMode
+          - adbTransport
+          - adbWifiConfigured
+          - adbLastConnectError
+          - appVersion
+          - phoneBatteryLevel
+          - phoneBatteryTemperatureC
+          - phoneBatteryStatus
+          - phonePowerSource
+          - chargeLastSuccessfulAt
+          - chargeAgeSeconds
+          - chargeRefreshing
+          - detailLastSuccessfulAt
+          - detailAgeSeconds
+          - locationLastSuccessfulAt
+          - locationAgeSeconds
+          - usageBackgroundUsed
+          - usageBackgroundLimit
+          - usageActionsUsed
+          - usageActionsLimit
+          - usageCooldownSeconds
+
+  - resource: "http://CONNECTOR_HOST:9920/location"
+    scan_interval: 900
+    timeout: 10
+    sensor:
+      - name: "Volkswagen App Location"
+        unique_id: volkswagen_app_location
+        value_template: "{{ value_json.address }}"
+        icon: mdi:map-marker
+        json_attributes:
+          - parkedDuration
+          - latitude
+          - longitude
+          - observedAt
+          - error
+          - errorCategory
+          - stale
+          - lastSuccessfulAt
+          - refreshDurationSeconds
+
+rest_command:
+  volkswagen_app_lock:
+    url: "http://CONNECTOR_HOST:9920/action/lock"
+    method: post
+    timeout: 90
+    headers:
+      X-API-Key: !secret vw_app_connector_api_key
+
+  volkswagen_app_unlock:
+    url: "http://CONNECTOR_HOST:9920/action/unlock"
+    method: post
+    timeout: 90
+    headers:
+      X-API-Key: !secret vw_app_connector_api_key
+
+  volkswagen_app_charging_start:
+    url: "http://CONNECTOR_HOST:9920/action/charging/start"
+    method: post
+    timeout: 90
+    headers:
+      X-API-Key: !secret vw_app_connector_api_key
+
+  volkswagen_app_charging_stop:
+    url: "http://CONNECTOR_HOST:9920/action/charging/stop"
+    method: post
+    timeout: 90
+    headers:
+      X-API-Key: !secret vw_app_connector_api_key
+
+  volkswagen_app_climate_start:
+    url: "http://CONNECTOR_HOST:9920/action/climate/start"
+    method: post
+    timeout: 90
+    headers:
+      X-API-Key: !secret vw_app_connector_api_key
+
+  volkswagen_app_climate_stop:
+    url: "http://CONNECTOR_HOST:9920/action/climate/stop"
+    method: post
+    timeout: 90
+    headers:
+      X-API-Key: !secret vw_app_connector_api_key
+
+  volkswagen_app_climate_temperature:
+    url: "http://CONNECTOR_HOST:9920/action/climate/temperature?value={{ value }}"
+    method: post
+    timeout: 120
+    headers:
+      X-API-Key: !secret vw_app_connector_api_key
+
+template:
+  - device_tracker:
+      - name: "Volkswagen App Vehicle Location"
+        unique_id: volkswagen_app_vehicle_location
+        latitude: "{{ state_attr('sensor.volkswagen_app_location', 'latitude') }}"
+        longitude: "{{ state_attr('sensor.volkswagen_app_location', 'longitude') }}"
+        location_accuracy: 10
+
+  - lock:
+      - name: "Volkswagen App Vehicle"
+        unique_id: volkswagen_app_vehicle_lock
+        state: >
+          {% set locked = state_attr('sensor.volkswagen_app_status', 'locked') %}
+          {{ 'locked' if locked is true else 'unlocked' if locked is false else none }}
+        availability: "{{ has_value('sensor.volkswagen_app_status') }}"
+        lock:
+          - action: rest_command.volkswagen_app_lock
+        unlock:
+          - action: rest_command.volkswagen_app_unlock
+
+  - switch:
+      - name: "Volkswagen App Charging"
+        unique_id: volkswagen_app_charging
+        icon: mdi:ev-station
+        state: "{{ is_state('sensor.volkswagen_app_status', 'C') }}"
+        availability: "{{ has_value('sensor.volkswagen_app_status') }}"
+        turn_on:
+          - action: rest_command.volkswagen_app_charging_start
+        turn_off:
+          - action: rest_command.volkswagen_app_charging_stop
+
+      - name: "Volkswagen App Climate"
+        unique_id: volkswagen_app_climate
+        icon: mdi:car-defrost-front
+        state: "{{ state_attr('sensor.volkswagen_app_status', 'climater') is true }}"
+        availability: "{{ has_value('sensor.volkswagen_app_status') }}"
+        turn_on:
+          - action: rest_command.volkswagen_app_climate_start
+        turn_off:
+          - action: rest_command.volkswagen_app_climate_stop
+
+  - number:
+      - name: "Volkswagen App Target Temperature"
+        unique_id: volkswagen_app_target_temperature
+        unit_of_measurement: "°C"
+        icon: mdi:thermometer
+        min: 16
+        max: 30
+        step: 0.5
+        state: "{{ state_attr('sensor.volkswagen_app_details', 'targetTemperatureC') }}"
+        availability: >
+          {{ state_attr('sensor.volkswagen_app_details', 'targetTemperatureC') is number }}
+        set_value:
+          - action: rest_command.volkswagen_app_climate_temperature
+            data:
+              value: "{{ value }}"
+
+  - sensor:
+      - name: "Volkswagen App State of Charge"
+        unique_id: volkswagen_app_state_of_charge
+        state: "{{ state_attr('sensor.volkswagen_app_status', 'soc') }}"
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        availability: >
+          {{ state_attr('sensor.volkswagen_app_status', 'soc') is number }}
+
+      - name: "Volkswagen App Range"
+        unique_id: volkswagen_app_range
+        state: "{{ state_attr('sensor.volkswagen_app_status', 'range') }}"
+        unit_of_measurement: "km"
+        device_class: distance
+        availability: >
+          {{ state_attr('sensor.volkswagen_app_status', 'range') is number }}
+
+      - name: "Volkswagen App Odometer"
+        unique_id: volkswagen_app_odometer
+        state: "{{ state_attr('sensor.volkswagen_app_details', 'odometerKm') }}"
+        unit_of_measurement: "km"
+        device_class: distance
+        state_class: total_increasing
+        availability: >
+          {{ state_attr('sensor.volkswagen_app_details', 'odometerKm') is number }}
+
+      - name: "Volkswagen App Phone Battery"
+        unique_id: volkswagen_app_phone_battery
+        state: "{{ state_attr('sensor.volkswagen_app_connector', 'phoneBatteryLevel') }}"
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        availability: >
+          {{ state_attr('sensor.volkswagen_app_connector', 'phoneBatteryLevel') is number }}
+
+  - binary_sensor:
+      - name: "Volkswagen App Connector Problem"
+        unique_id: volkswagen_app_connector_problem
+        device_class: problem
+        state: >
+          {{ not is_state('sensor.volkswagen_app_connector', 'ok')
+             or state_attr('sensor.volkswagen_app_status', 'stale') is true
+             or (state_attr('sensor.volkswagen_app_connector', 'usageCooldownSeconds') | int(0)) > 0
+             or (state_attr('sensor.volkswagen_app_connector', 'phoneBatteryTemperatureC') | float(0)) >= 40 }}
+        availability: "{{ has_value('sensor.volkswagen_app_connector') }}"
