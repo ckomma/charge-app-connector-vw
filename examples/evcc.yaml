@@ -1,0 +1,46 @@
+# evcc vehicle example for Volkswagen App Connector.
+#
+# Before using this file:
+# 1. Replace CONNECTOR_HOST with the connector host name or IP address.
+# 2. Merge the vehicle entry into the `vehicles` section of evcc.yaml.
+# 3. Reference `volkswagen_app` from the appropriate loadpoint if desired.
+#
+# When evcc and the connector run on the same host, CONNECTOR_HOST can be
+# replaced with 127.0.0.1.
+
+vehicles:
+  - name: volkswagen_app
+    type: custom
+    title: Volkswagen App
+    icon: car
+
+    soc:
+      source: http
+      uri: http://CONNECTOR_HOST:9920/charge
+      method: GET
+      jq: .soc
+      cache: 60s
+      timeout: 10s
+
+    status:
+      source: http
+      uri: http://CONNECTOR_HOST:9920/charge
+      method: GET
+      jq: .status
+      cache: 60s
+      timeout: 10s
+
+    range:
+      source: http
+      uri: http://CONNECTOR_HOST:9920/charge
+      method: GET
+      jq: .range
+      cache: 60s
+      timeout: 10s
+
+# Optional loadpoint assignment:
+#
+# loadpoints:
+#   - title: Garage
+#     charger: your_charger
+#     vehicle: volkswagen_app

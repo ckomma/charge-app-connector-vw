@@ -175,3 +175,24 @@ Review the entities and polling intervals before using the example. The
 connector performs background refreshes according to its own rate limits;
 reading its cached HTTP endpoints from Home Assistant does not trigger one
 Volkswagen app operation per request.
+
+## evcc
+
+[`examples/evcc.yaml`](examples/evcc.yaml) provides a complete custom vehicle
+entry for evcc. It exposes state of charge, connection/charging status and
+estimated range.
+
+Replace `CONNECTOR_HOST` with the connector host name or IP address and merge
+the `vehicles` entry into `evcc.yaml`. If evcc and the connector run on the
+same host, use `127.0.0.1`. The vehicle can then be assigned to a loadpoint:
+
+```yaml
+loadpoints:
+  - title: Garage
+    charger: your_charger
+    vehicle: volkswagen_app
+```
+
+The example only reads cached connector endpoints and does not expose vehicle
+write actions to evcc. Connector-side refresh intervals and usage limits
+remain authoritative.
