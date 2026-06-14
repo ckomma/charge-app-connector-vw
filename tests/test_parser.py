@@ -22,6 +22,12 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(VolkswagenReader.range_tile_center(root), (281, 1270))
 
+    def test_lock_state_parsing_is_case_insensitive(self):
+        self.assertFalse(VolkswagenReader.parse_locked("Fahrzeug. Wird entriegelt."))
+        self.assertTrue(VolkswagenReader.parse_locked("Fahrzeug. Wird verriegelt."))
+        self.assertFalse(VolkswagenReader.parse_locked("ENTRIEGELT"))
+        self.assertIsNone(VolkswagenReader.parse_locked("Fahrzeugstatus unbekannt"))
+
     def test_charging_details(self):
         result = VehicleData()
         VolkswagenReader.parse_charging_details(

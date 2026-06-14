@@ -443,6 +443,15 @@ class VolkswagenReader:
         return cls.described_node_center(root, "Batteriereichweite:")
 
     @staticmethod
+    def parse_locked(text: str) -> bool | None:
+        lowered = text.casefold()
+        if "entriegelt" in lowered:
+            return False
+        if "verriegelt" in lowered:
+            return True
+        return None
+
+    @staticmethod
     def parse_target_temperature(root: ET.Element) -> float:
         candidates: list[tuple[int, float]] = []
         for node in root.iter():
@@ -647,10 +656,7 @@ class VolkswagenReader:
         result.climater = not bool(
             re.search(r"Vorklimatisierung\.\s*Aus", overview_text)
         )
-        if "Entriegelt" in overview_text:
-            result.locked = False
-        elif "Verriegelt" in overview_text:
-            result.locked = True
+        result.locked = self.parse_locked(overview_text)
 
         x, y = self.range_tile_center(overview)
         self.shell("input", "tap", str(x), str(y))
@@ -687,11 +693,7 @@ class VolkswagenReader:
             self.launch()
             overview = self.open_overview()
             current_text = "\n".join(self.strings(overview))
-            current = None
-            if "Entriegelt" in current_text:
-                current = False
-            elif "Verriegelt" in current_text:
-                current = True
+            current = self.parse_locked(current_text)
             if current is desired:
                 return self._read()
 
