@@ -1,0 +1,12 @@
+.env
+.env.*
+*.key
+*.pem
+adbkey
+adbkey.pub
+insecure_shared_adbkey
+insecure_shared_adbkey.pub
+diagnostics/
+usage.json
+__pycache__/
+*.py[cod]

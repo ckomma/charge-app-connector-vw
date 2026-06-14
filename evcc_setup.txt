@@ -1,0 +1,28 @@
+title: ID.7 Volkswagen App
+icon: car
+capacity: 77 # kWh
+
+## required attributes
+
+soc: # state of charge
+  source: http
+  uri: http://127.0.0.1:9920/charge
+  method: GET
+  jq: .soc
+  cache: 60s
+  timeout: 45s
+status: # status [A..F]
+  source: http
+  uri: http://127.0.0.1:9920/charge
+  method: GET
+  jq: .status
+  cache: 60s
+  timeout: 45s
+range: # range
+  source: http
+  uri: http://127.0.0.1:9920/charge
+  method: GET
+  jq: .range
+  cache: 60s
+  timeout: 45s
+# No write actions are exposed.

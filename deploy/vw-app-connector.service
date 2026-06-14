@@ -1,0 +1,16 @@
+[Unit]
+Description=Volkswagen Android App Connector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/default/vw-app-connector
+ExecStartPre=/usr/bin/adb start-server
+ExecStart=/usr/bin/python3 /opt/vw-app-connector/vw_app_connector.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
