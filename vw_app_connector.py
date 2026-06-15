@@ -378,6 +378,27 @@ class VolkswagenReader:
         self.shell("uiautomator", "dump", remote_path, timeout=30)
         return ET.fromstring(self.shell("cat", remote_path, timeout=10))
 
+    @classmethod
+    def is_proximity_overlay(cls, root: ET.Element) -> bool:
+        text = "\n".join(cls.strings(root)).casefold()
+        return any(
+            phrase in text
+            for phrase in (
+                "den kopfhörerbereich nicht abdecken",
+                "don't cover the earphone area",
+                "do not cover the earphone area",
+                "don't cover the top of the screen",
+            )
+        )
+
+    def dump_ui_with_overlay_recovery(self, remote_name: str) -> ET.Element:
+        root = self.dump_ui(remote_name)
+        if self.is_proximity_overlay(root) or not self.strings(root):
+            self.shell("input", "keyevent", "KEYCODE_VOLUME_UP")
+            time.sleep(2)
+            root = self.dump_ui(remote_name)
+        return root
+
     def save_diagnostics(self, category: str, error: Exception) -> None:
         stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
         stem = self.diagnostics_dir / f"{stamp}-{category.casefold()}"
@@ -399,7 +420,7 @@ class VolkswagenReader:
 
     def open_overview(self) -> ET.Element:
         for attempt in range(4):
-            overview = self.dump_ui("vw-overview.xml")
+            overview = self.dump_ui_with_overlay_recovery("vw-overview.xml")
             overview_text = "\n".join(self.strings(overview)).casefold()
             if "too many requests" in overview_text or "zu viele anfragen" in overview_text:
                 raise UsageLimit("Volkswagen app reports too many requests")
@@ -600,15 +621,41 @@ class VolkswagenReader:
             timeout=15,
         )
         time.sleep(self.start_wait)
+        if not self.app_in_foreground():
+            self.shell(
+                "am",
+                "start",
+                "-n",
+                f"{self.package}/.SingleActivity",
+                timeout=15,
+            )
+            time.sleep(self.start_wait)
+        if not self.app_in_foreground():
+            raise RuntimeError("Volkswagen app did not reach the foreground")
         if (
             getattr(self.context, "background", False)
             and self.action_pending.is_set()
         ):
             raise ActionPriority("Background refresh preempted by action")
 
+    def app_in_foreground(self) -> bool:
+        windows = self.shell("dumpsys", "window", "windows", timeout=20)
+        return bool(
+            re.search(
+                rf"(?:mCurrentFocus|mObscuringWindow|mFocusedApp)="
+                rf".*{re.escape(self.package)}",
+                windows,
+            )
+        )
+
     def wake_screen(self) -> None:
         self.shell("input", "keyevent", "KEYCODE_WAKEUP")
         time.sleep(0.5)
+        power = self.shell("dumpsys", "power", timeout=10)
+        if "mWakefulness=Awake" not in power:
+            self.shell("input", "keyevent", "KEYCODE_POWER")
+            time.sleep(1)
+        self.shell("svc", "power", "stayon", "true")
         self.shell("wm", "dismiss-keyguard")
         self.shell("input", "keyevent", "82")
         time.sleep(1)
@@ -800,53 +847,59 @@ class VolkswagenReader:
             time.sleep(8)
             return self.with_retries(self._read, "ACTION_VERIFY")
 
+    def _read_location(self) -> LocationData:
+        self.launch()
+        root = self.dump_ui_with_overlay_recovery("vw-location-start.xml")
+        x, y = self.described_node_center(root, "Navigation Tab")
+        self.shell("input", "tap", str(x), str(y))
+        time.sleep(self.detail_wait)
+
+        map_root = self.dump_ui("vw-location-map.xml")
+        x, y = self.described_node_center(map_root, "Car Locate Button")
+        self.shell("input", "tap", str(x), str(y))
+        time.sleep(self.detail_wait)
+
+        # Car Locate centers the vehicle badge at the stable map viewport center.
+        self.shell("input", "tap", "540", "786")
+        time.sleep(self.detail_wait)
+        details = self.dump_ui("vw-location-details.xml")
+        result = LocationData(
+            observedAt=datetime.now().astimezone().isoformat(timespec="seconds")
+        )
+        for value in self.strings(details):
+            if not re.search(
+                r"\n(?:Geparkt seit|Parked since|Parked for)\s+",
+                value,
+                re.IGNORECASE,
+            ):
+                continue
+            result.address, result.parkedDuration = value.split("\n", 1)
+            break
+        if not result.address:
+            raise RuntimeError("Volkswagen vehicle address not found")
+
+        x, y = self.described_node_center(details, "Route")
+        self.shell("input", "tap", str(x), str(y))
+        time.sleep(self.detail_wait)
+        activity = self.shell("dumpsys", "activity", "activities", timeout=20)
+        result.latitude, result.longitude = self.parse_navigation_coordinates(
+            activity
+        )
+        for _ in range(3):
+            focus = self.shell("dumpsys", "window", "windows", timeout=20)
+            focus_match = re.search(r"mCurrentFocus=([^\n]+)", focus)
+            if focus_match and self.package in focus_match.group(1):
+                break
+            self.shell("input", "keyevent", "KEYCODE_BACK")
+            time.sleep(1)
+        return result
+
     def read_location(self) -> LocationData:
         with self.screen_session():
-            self.launch()
-            root = self.dump_ui("vw-location-start.xml")
-            x, y = self.described_node_center(root, "Navigation Tab")
-            self.shell("input", "tap", str(x), str(y))
-            time.sleep(self.detail_wait)
-
-            map_root = self.dump_ui("vw-location-map.xml")
-            x, y = self.described_node_center(map_root, "Car Locate Button")
-            self.shell("input", "tap", str(x), str(y))
-            time.sleep(self.detail_wait)
-
-            # Car Locate centers the vehicle badge at the stable map viewport center.
-            self.shell("input", "tap", "540", "786")
-            time.sleep(self.detail_wait)
-            details = self.dump_ui("vw-location-details.xml")
-            result = LocationData(
-                observedAt=datetime.now().astimezone().isoformat(timespec="seconds")
+            return self.with_retries(
+                self._read_location,
+                "LOCATION",
             )
-            for value in self.strings(details):
-                if not re.search(
-                    r"\n(?:Geparkt seit|Parked since|Parked for)\s+",
-                    value,
-                    re.IGNORECASE,
-                ):
-                    continue
-                result.address, result.parkedDuration = value.split("\n", 1)
-                break
-            if not result.address:
-                raise RuntimeError("Volkswagen vehicle address not found")
-
-            x, y = self.described_node_center(details, "Route")
-            self.shell("input", "tap", str(x), str(y))
-            time.sleep(self.detail_wait)
-            activity = self.shell("dumpsys", "activity", "activities", timeout=20)
-            result.latitude, result.longitude = self.parse_navigation_coordinates(
-                activity
-            )
-            for _ in range(3):
-                focus = self.shell("dumpsys", "window", "windows", timeout=20)
-                focus_match = re.search(r"mCurrentFocus=([^\n]+)", focus)
-                if focus_match and self.package in focus_match.group(1):
-                    break
-                self.shell("input", "keyevent", "KEYCODE_BACK")
-                time.sleep(1)
-            return result
 
     def set_charging(self, desired: bool) -> VehicleData:
         with self.screen_session():
@@ -1071,6 +1124,7 @@ class BackgroundCache(Generic[T]):
         interval: Callable[[T | None], float],
         empty_factory: Callable[[], T],
         initial_delay: float = 0,
+        error_retry_interval: float = 900,
     ) -> None:
         self.name = name
         self.loader = loader
@@ -1083,8 +1137,10 @@ class BackgroundCache(Generic[T]):
         self.last_error = ""
         self.last_error_category = ""
         self.refreshing = False
+        self.next_attempt_monotonic = 0.0
         self.wakeup = threading.Event()
         self.initial_delay = initial_delay
+        self.error_retry_interval = error_retry_interval
         threading.Thread(target=self._worker, name=f"{name}-refresh", daemon=True).start()
 
     def _worker(self) -> None:
@@ -1092,9 +1148,16 @@ class BackgroundCache(Generic[T]):
             time.sleep(self.initial_delay)
             self.wakeup.clear()
         while True:
-            if self.value is None or self.age() >= self.interval(self.value):
+            now = time.monotonic()
+            with self.lock:
+                retry_wait = max(0.0, self.next_attempt_monotonic - now)
+            due = self.value is None or self.age() >= self.interval(self.value)
+            if due and retry_wait <= 0:
                 self.refresh()
-            delay = max(5.0, self.interval(self.value) - self.age())
+            if retry_wait > 0:
+                delay = max(5.0, retry_wait)
+            else:
+                delay = max(5.0, self.interval(self.value) - self.age())
             self.wakeup.wait(delay)
             self.wakeup.clear()
 
@@ -1126,6 +1189,7 @@ class BackgroundCache(Generic[T]):
                 self.last_success_at = now
                 self.last_error = ""
                 self.last_error_category = ""
+                self.next_attempt_monotonic = 0.0
                 return self.value
         except ActionPriority:
             LOG.info("%s refresh yielded to a pending action", self.name)
@@ -1138,6 +1202,9 @@ class BackgroundCache(Generic[T]):
             with self.lock:
                 self.last_error = str(exc)
                 self.last_error_category = category
+                self.next_attempt_monotonic = (
+                    time.monotonic() + self.error_retry_interval
+                )
                 value = self.value or self.empty_factory()
                 setattr(value, "error", str(exc))
                 setattr(value, "errorCategory", category)
@@ -1199,6 +1266,9 @@ class AppState:
         idle_interval = float(os.getenv("IDLE_INTERVAL_SECONDS", "900"))
         detail_interval = float(os.getenv("DETAIL_INTERVAL_SECONDS", "43200"))
         location_interval = float(os.getenv("LOCATION_INTERVAL_SECONDS", "14400"))
+        error_retry_interval = float(
+            os.getenv("BACKGROUND_ERROR_RETRY_SECONDS", "900")
+        )
 
         def priority_pending() -> bool:
             with self.priority_lock:
@@ -1254,6 +1324,7 @@ class AppState:
             lambda _: detail_interval,
             DetailData,
             initial_delay=600,
+            error_retry_interval=error_retry_interval,
         )
         self.location = BackgroundCache(
             "location",
@@ -1261,6 +1332,7 @@ class AppState:
             lambda _: location_interval,
             LocationData,
             initial_delay=300,
+            error_retry_interval=error_retry_interval,
         )
 
     def action(self, name: str, query: dict[str, list[str]]) -> object:

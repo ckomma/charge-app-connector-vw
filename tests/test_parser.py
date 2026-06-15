@@ -4,7 +4,14 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from vw_app_connector import UsageLimit, UsageLimiter, VehicleData, VolkswagenReader
+from vw_app_connector import (
+    BackgroundCache,
+    LocationData,
+    UsageLimit,
+    UsageLimiter,
+    VehicleData,
+    VolkswagenReader,
+)
 
 
 class ParserTests(unittest.TestCase):
@@ -159,6 +166,116 @@ class ParserTests(unittest.TestCase):
                 limiter.acquire_background(1, yield_to=lambda: next(pending))
                 sleep.assert_called_once_with(0.25)
                 self.assertEqual(limiter.snapshot()["backgroundUsed"], 1)
+
+    def test_failed_cache_refresh_sets_retry_backoff(self):
+        with patch("threading.Thread.start"):
+            cache = BackgroundCache(
+                "test",
+                lambda: (_ for _ in ()).throw(RuntimeError("failed")),
+                lambda _: 60,
+                VehicleData,
+                error_retry_interval=900,
+            )
+        before = __import__("time").monotonic()
+        result = cache.refresh()
+        self.assertEqual(result.error, "failed")
+        self.assertGreaterEqual(cache.next_attempt_monotonic, before + 899)
+
+    def test_location_read_uses_recovery_retries(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "screen_session"),
+                    patch.object(reader, "with_retries", return_value=LocationData())
+                    as retries,
+                ):
+                    reader.read_location()
+                self.assertEqual(retries.call_args.args[1], "LOCATION")
+
+    def test_miui_obscuring_window_counts_as_foreground(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with patch.object(
+                    reader,
+                    "shell",
+                    return_value=(
+                        "mObscuringWindow=Window{123 u0 "
+                        "com.volkswagen.weconnect/.SingleActivity}"
+                    ),
+                ):
+                    self.assertTrue(reader.app_in_foreground())
+
+    def test_xiaomi_proximity_overlay_is_detected(self):
+        root = ET.fromstring(
+            '<hierarchy><node text="Den Kopfhörerbereich nicht abdecken" /></hierarchy>'
+        )
+        self.assertTrue(VolkswagenReader.is_proximity_overlay(root))
+        self.assertFalse(
+            VolkswagenReader.is_proximity_overlay(
+                ET.fromstring(
+                    '<hierarchy><node content-desc="Fahrzeug. Verriegelt." /></hierarchy>'
+                )
+            )
+        )
+
+    def test_empty_ui_dump_triggers_overlay_recovery(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            empty = ET.fromstring("<hierarchy />")
+            overview = ET.fromstring(
+                '<hierarchy><node content-desc="Batteriereichweite: 329 Kilometer" /></hierarchy>'
+            )
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "dump_ui", side_effect=(empty, overview)),
+                    patch.object(reader, "shell") as shell,
+                    patch("time.sleep"),
+                ):
+                    result = reader.dump_ui_with_overlay_recovery("overview.xml")
+                self.assertIs(result, overview)
+                shell.assert_called_once_with(
+                    "input", "keyevent", "KEYCODE_VOLUME_UP"
+                )
+
+    def test_wake_screen_uses_power_key_when_wakeup_is_ignored(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(
+                        reader,
+                        "shell",
+                        side_effect=("", "mWakefulness=Asleep", "", "", "", ""),
+                    ) as shell,
+                    patch("time.sleep"),
+                ):
+                    reader.wake_screen()
+                self.assertIn(
+                    ("input", "keyevent", "KEYCODE_POWER"),
+                    [call.args for call in shell.call_args_list],
+                )
+                self.assertIn(
+                    ("svc", "power", "stayon", "true"),
+                    [call.args for call in shell.call_args_list],
+                )
 
     def test_auto_adb_prefers_usb_and_falls_back_to_wifi(self):
         with TemporaryDirectory() as directory:

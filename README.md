@@ -91,6 +91,8 @@ Environment variables:
 - `DETAIL_INTERVAL_SECONDS`: default `43200`
 - `LOCATION_INTERVAL_SECONDS`: default `14400`
 - `BACKGROUND_MIN_INTERVAL_SECONDS`: default `300`
+- `BACKGROUND_ERROR_RETRY_SECONDS`: default `900`; failed cache refreshes wait
+  before retrying so persistent UI problems do not consume the daily budget
 - `BACKGROUND_DAILY_LIMIT`: default `180`
 - `ACTION_MIN_INTERVAL_SECONDS`: default `60`
 - `ACTION_DAILY_LIMIT`: default `20`
