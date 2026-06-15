@@ -1,0 +1,5 @@
+interface:
+  display_name: "VW App Connector Manager"
+  short_description: "Develop and operate the Volkswagen Android app connector"
+  default_prompt: "Use $vw-app-connector-manager to diagnose or modify the Volkswagen App Connector with usage-limit and live-phone safety checks."
+
