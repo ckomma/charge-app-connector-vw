@@ -6,7 +6,8 @@ truth across Windows, Linux, Termux/mobile, and Codex Cloud.
 
 ## Working Rules
 
-- Read `README.md` and `SECURITY.md` before changing runtime behavior.
+- Read `README.md`, `SECURITY.md`, and `MEMORY.md` before changing runtime
+  behavior.
 - Use the repo-scoped `$vw-app-connector-manager` skill for implementation,
   deployment, diagnostics, and release work.
 - Keep German and English Volkswagen app localizations supported.
@@ -64,4 +65,3 @@ For UI parser or selector changes:
   ask when they cannot be determined safely.
 - Do not copy Claude/Codex transcripts, permission logs, or credential bundles
   into this repository.
-

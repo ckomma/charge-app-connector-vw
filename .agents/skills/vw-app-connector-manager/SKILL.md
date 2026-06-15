@@ -18,8 +18,8 @@ Use this skill for work in the `charge-app-connector-vw-codex` repository:
 - evcc and Home Assistant example integrations
 - live phone verification
 
-Read the repository `AGENTS.md`, `README.md`, and `SECURITY.md` before making
-changes.
+Read the repository `AGENTS.md`, `README.md`, `SECURITY.md`, and `MEMORY.md`
+before making changes.
 
 ## Diagnose First
 
@@ -57,6 +57,19 @@ project context. Do not add personal infrastructure values to the repository.
   daily limits, minimum intervals, or rate-limit cooldowns.
 - Store diagnostics outside the repository.
 
+## Xiaomi And MIUI
+
+- Treat pocket-mode overlays and empty accessibility hierarchies as recoverable
+  phone UI states when the Volkswagen app is foreground.
+- Preserve the existing one-shot volume-up recovery and retry behavior.
+- Foreground detection must consider MIUI's `mObscuringWindow` in addition to
+  the standard focused-window fields.
+- Preserve `KEYCODE_POWER` as a wake fallback and keep the screen awake during
+  multi-step reads.
+- Recommend display-up placement with the proximity sensor uncovered.
+- Do not generalize Xiaomi-specific behavior further without testing another
+  manufacturer; manufacturer-gate the fallback if false positives are found.
+
 ## Live Verification
 
 For read changes:
@@ -90,4 +103,3 @@ Never print or commit:
 
 When reporting location tests, report only whether address and coordinates were
 present.
-

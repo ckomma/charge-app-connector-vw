@@ -141,6 +141,19 @@ The Android device must not use a secure display PIN, password or pattern when
 `SLEEP_AFTER_OPERATION=true`. ADB wakes the display and dismisses the
 non-secure keyguard automatically.
 
+### Xiaomi/MIUI notes
+
+Xiaomi/MIUI pocket mode can block UI automation when the proximity sensor is
+covered, especially when the phone is placed display-down. The connector
+detects and dismisses the known overlay and retries empty UI hierarchies while
+the Volkswagen app is foreground. For reliable unattended operation, keep the
+proximity sensor uncovered and place the phone display-up.
+
+The MIUI handling is an additive compatibility fallback; the connector is not
+limited to Xiaomi phones. Other manufacturers may expose different wake,
+foreground-window, or pocket-mode behavior and should be verified before
+unattended use.
+
 ## Optional ADB over Wi-Fi
 
 USB remains the default and most reliable transport. To prepare Wi-Fi:
