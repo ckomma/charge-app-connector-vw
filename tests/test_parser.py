@@ -143,6 +143,23 @@ class ParserTests(unittest.TestCase):
                 with self.assertRaises(UsageLimit):
                     limiter.acquire_action()
 
+    def test_background_refresh_yields_to_priority_work(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "USAGE_STATE_FILE": f"{directory}/usage.json",
+                "BACKGROUND_DAILY_LIMIT": "3",
+                "BACKGROUND_MIN_INTERVAL_SECONDS": "0",
+            }
+            pending = iter((True, False))
+            with (
+                patch.dict("os.environ", environment),
+                patch("time.sleep") as sleep,
+            ):
+                limiter = UsageLimiter()
+                limiter.acquire_background(1, yield_to=lambda: next(pending))
+                sleep.assert_called_once_with(0.25)
+                self.assertEqual(limiter.snapshot()["backgroundUsed"], 1)
+
     def test_auto_adb_prefers_usb_and_falls_back_to_wifi(self):
         with TemporaryDirectory() as directory:
             environment = {

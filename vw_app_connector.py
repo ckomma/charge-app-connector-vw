@@ -92,7 +92,11 @@ class UsageLimiter:
         if self.state.get("day") != self.today():
             self.state = self._empty()
 
-    def acquire_background(self, cost: int) -> None:
+    def acquire_background(
+        self,
+        cost: int,
+        yield_to: Callable[[], bool] | None = None,
+    ) -> None:
         while True:
             with self.lock:
                 self._rollover()
@@ -108,8 +112,11 @@ class UsageLimiter:
                     raise UsageLimit(
                         "Volkswagen background daily budget exhausted"
                     )
-                wait = self.background_min_interval - (
-                    now - float(self.state["lastBackgroundAt"])
+                wait = (
+                    0.25
+                    if yield_to is not None and yield_to()
+                    else self.background_min_interval
+                    - (now - float(self.state["lastBackgroundAt"]))
                 )
                 if wait <= 0:
                     self.state["backgroundUsed"] = used + cost
@@ -1186,27 +1193,48 @@ class AppState:
     def __init__(self) -> None:
         self.reader = VolkswagenReader()
         self.usage = UsageLimiter()
+        self.priority_lock = threading.Lock()
+        self.priority_waiters = 0
         charging_interval = float(os.getenv("CHARGING_INTERVAL_SECONDS", "300"))
         idle_interval = float(os.getenv("IDLE_INTERVAL_SECONDS", "900"))
         detail_interval = float(os.getenv("DETAIL_INTERVAL_SECONDS", "43200"))
         location_interval = float(os.getenv("LOCATION_INTERVAL_SECONDS", "14400"))
 
+        def priority_pending() -> bool:
+            with self.priority_lock:
+                return self.priority_waiters > 0
+
         def background(
-            loader: Callable[[], T], cost: int
+            loader: Callable[[], T], cost: int, priority: bool = False
         ) -> Callable[[], T]:
             def run() -> T:
-                while self.reader.action_pending.is_set():
-                    time.sleep(0.25)
-                self.usage.acquire_background(cost)
-                self.reader.context.background = True
+                if priority:
+                    with self.priority_lock:
+                        self.priority_waiters += 1
                 try:
-                    return loader()
-                except UsageLimit as exc:
-                    if "reports too many requests" in str(exc):
-                        self.usage.record_rate_limit()
-                    raise
+                    while self.reader.action_pending.is_set():
+                        time.sleep(0.25)
+                    self.usage.acquire_background(
+                        cost,
+                        yield_to=(
+                            None
+                            if priority
+                            else priority_pending
+                        ),
+                    )
+                    self.reader.context.background = True
+                    try:
+                        return loader()
+                    except UsageLimit as exc:
+                        if "reports too many requests" in str(exc):
+                            self.usage.record_rate_limit()
+                        raise
+                    finally:
+                        self.reader.context.background = False
                 finally:
-                    self.reader.context.background = False
+                    if priority:
+                        with self.priority_lock:
+                            self.priority_waiters -= 1
 
             return run
 
@@ -1222,14 +1250,14 @@ class AppState:
         )
         self.details = BackgroundCache(
             "details",
-            background(self.reader.read_details, 3),
+            background(self.reader.read_details, 3, priority=True),
             lambda _: detail_interval,
             DetailData,
             initial_delay=600,
         )
         self.location = BackgroundCache(
             "location",
-            background(self.reader.read_location, 1),
+            background(self.reader.read_location, 1, priority=True),
             lambda _: location_interval,
             LocationData,
             initial_delay=300,

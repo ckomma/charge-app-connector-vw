@@ -105,6 +105,11 @@ Environment variables:
 - `API_KEY`: required for `POST /action/*`
 - `VW_SPIN`: required for lock and unlock actions
 
+Due detail and location refreshes take priority over routine charge refreshes.
+This prevents the five-minute charge polling interval from repeatedly delaying
+the less frequent multi-page reads. The background minimum interval and daily
+budget still apply unchanged.
+
 Authenticated action endpoints:
 
 - `POST /action/lock`
