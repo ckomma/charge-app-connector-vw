@@ -39,6 +39,41 @@ coordinates, screenshots, raw UI dumps, and private network details.
 - USB remains the preferred transport in `ADB_MODE=auto`; configured ADB Wi-Fi
   is only the fallback while USB is unavailable.
 
+## Pixel 10 / Android 16
+
+- Verified on 2026-06-16 in the evcc LXC on the Proxmox host: the Pixel 10 is
+  visible through ADB over USB, the Volkswagen app is installed and signed in,
+  battery telemetry is readable, and the Volkswagen app can be foreground.
+- Pixel devices use standard Android USB debugging; Xiaomi's extra
+  `USB debugging (Security settings)` option is not required.
+- Android 16 can report a successful `uiautomator dump /sdcard/name.xml` while
+  `cat /sdcard/name.xml` fails. The same dump is readable through
+  `/storage/emulated/0/name.xml`, so connector UI-dump reads must keep that
+  fallback.
+- Android 16 exposes `mCurrentFocus`, `mFocusedApp`, and `mObscuringWindow`
+  reliably in `dumpsys window`; `dumpsys window windows` may omit those summary
+  fields. Foreground detection must use the broader `dumpsys window` output.
+- With a secure Pixel keyguard, unattended runs need `SLEEP_AFTER_OPERATION=false`
+  or the secure lock disabled. If the connector puts the screen to sleep, the
+  next wake cannot dismiss the secure keyguard and app operations fail before
+  parsing.
+- During the verification, the running connector still reported `ADB_MODE=auto`
+  with Wi-Fi transport because the old Redmi Wi-Fi device was still available.
+  To make the Pixel the production device, update the runtime `ADB_SERIAL` to
+  the Pixel USB serial on the evcc LXC and reload/restart the connector, then
+  verify `/health` reports USB transport.
+- Functional Pixel/USB test on 2026-06-16:
+  `/health`, `/charge`, and `/details` worked after adding the UI-dump and
+  foreground-detection fallbacks. `/location` reached the Volkswagen app but
+  failed at address parsing (`Volkswagen vehicle address not found`).
+  Climate start/stop, charging stop/start, automatic window heating, and front
+  climate-zone toggles worked and were restored to their original values.
+  Unlock initially failed because the S-PIN dialog was not found while
+  app-level fingerprint/face unlock was enabled. After disabling fingerprint
+  and face unlock for apps, unlock succeeded and lock restore succeeded. Setting
+  target temperature to 21.0 failed verification both before and after disabling
+  fingerprint/face unlock for apps; restoring 20.5 succeeded.
+
 ## Verification
 
 - After wake, overlay, selector, or localization changes, test on a real phone

@@ -154,6 +154,26 @@ limited to Xiaomi phones. Other manufacturers may expose different wake,
 foreground-window, or pocket-mode behavior and should be verified before
 unattended use.
 
+### Google Pixel notes
+
+Pixel devices use standard Android USB debugging and do not need Xiaomi's
+additional `USB debugging (Security settings)` option. Before unattended use,
+verify that the target host sees the phone in `adb devices -l`, that the
+Volkswagen app is installed and signed in, and that `/health` reports the
+expected ADB transport. If ADB lists no device, check the USB cable/data mode,
+developer options, USB debugging, and the authorization dialog on the phone
+before changing connector code.
+
+On Android 16, UI dumps may be written under `/storage/emulated/0` even when
+`uiautomator` reports a `/sdcard` path. The connector keeps a fallback for that
+storage-path difference.
+
+Android 16 also reports focused-window fields in `dumpsys window`; the
+connector uses that broader output for foreground detection. If the Pixel keeps
+a secure display lock, set `SLEEP_AFTER_OPERATION=false` or disable the secure
+lock. Otherwise the connector can wake the phone but cannot dismiss the
+keyguard unattended.
+
 ## Optional ADB over Wi-Fi
 
 USB remains the default and most reliable transport. To prepare Wi-Fi:

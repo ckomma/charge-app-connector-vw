@@ -215,6 +215,27 @@ class ParserTests(unittest.TestCase):
                 ):
                     self.assertTrue(reader.app_in_foreground())
 
+    def test_android_16_window_dump_counts_as_foreground(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with patch.object(
+                    reader,
+                    "shell",
+                    return_value=(
+                        "mCurrentFocus=Window{12 u0 "
+                        "com.volkswagen.weconnect/com.volkswagen.weconnect.SingleActivity}\n"
+                        "mFocusedApp=ActivityRecord{34 u0 "
+                        "com.volkswagen.weconnect/.SingleActivity}"
+                    ),
+                ) as shell:
+                    self.assertTrue(reader.app_in_foreground())
+                shell.assert_called_once_with("dumpsys", "window", timeout=20)
+
     def test_xiaomi_proximity_overlay_is_detected(self):
         root = ET.fromstring(
             '<hierarchy><node text="Den Kopfhörerbereich nicht abdecken" /></hierarchy>'
@@ -250,6 +271,29 @@ class ParserTests(unittest.TestCase):
                 shell.assert_called_once_with(
                     "input", "keyevent", "KEYCODE_VOLUME_UP"
                 )
+
+    def test_ui_dump_falls_back_to_explicit_emulated_storage_path(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+
+            def fake_shell(*args, timeout=20):
+                if args == ("uiautomator", "dump", "/sdcard/overview.xml"):
+                    return "UI hierarchy dumped"
+                if args == ("cat", "/sdcard/overview.xml"):
+                    raise RuntimeError("No such file or directory")
+                if args == ("cat", "/storage/emulated/0/overview.xml"):
+                    return '<hierarchy><node content-desc="Fahrzeug" /></hierarchy>'
+                raise AssertionError(args)
+
+            with patch.object(reader, "shell", side_effect=fake_shell):
+                root = reader.dump_ui("overview.xml")
+
+            self.assertEqual(VolkswagenReader.strings(root), ["Fahrzeug"])
 
     def test_wake_screen_uses_power_key_when_wakeup_is_ignored(self):
         with TemporaryDirectory() as directory:

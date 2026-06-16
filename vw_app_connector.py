@@ -373,10 +373,21 @@ class VolkswagenReader:
             raise RuntimeError(f"ADB failed ({result.returncode}): {message}")
         return result.stdout
 
+    @staticmethod
+    def ui_dump_paths(remote_name: str) -> tuple[str, str]:
+        return f"/sdcard/{remote_name}", f"/storage/emulated/0/{remote_name}"
+
+    def read_ui_dump(self, remote_name: str, timeout: float = 10) -> str:
+        primary_path, fallback_path = self.ui_dump_paths(remote_name)
+        try:
+            return self.shell("cat", primary_path, timeout=timeout)
+        except RuntimeError:
+            return self.shell("cat", fallback_path, timeout=timeout)
+
     def dump_ui(self, remote_name: str) -> ET.Element:
-        remote_path = f"/sdcard/{remote_name}"
+        remote_path, _ = self.ui_dump_paths(remote_name)
         self.shell("uiautomator", "dump", remote_path, timeout=30)
-        return ET.fromstring(self.shell("cat", remote_path, timeout=10))
+        return ET.fromstring(self.read_ui_dump(remote_name, timeout=10))
 
     @classmethod
     def is_proximity_overlay(cls, root: ET.Element) -> bool:
@@ -404,7 +415,7 @@ class VolkswagenReader:
         stem = self.diagnostics_dir / f"{stamp}-{category.casefold()}"
         try:
             self.shell("uiautomator", "dump", "/sdcard/vw-error.xml", timeout=30)
-            xml = self.shell("cat", "/sdcard/vw-error.xml", timeout=10)
+            xml = self.read_ui_dump("vw-error.xml", timeout=10)
             stem.with_suffix(".xml").write_text(xml, encoding="utf-8")
             stem.with_suffix(".png").write_bytes(
                 self.adb_bytes("exec-out", "screencap", "-p", timeout=20)
@@ -639,7 +650,7 @@ class VolkswagenReader:
             raise ActionPriority("Background refresh preempted by action")
 
     def app_in_foreground(self) -> bool:
-        windows = self.shell("dumpsys", "window", "windows", timeout=20)
+        windows = self.shell("dumpsys", "window", timeout=20)
         return bool(
             re.search(
                 rf"(?:mCurrentFocus|mObscuringWindow|mFocusedApp)="
