@@ -129,6 +129,57 @@ class ParserTests(unittest.TestCase):
             (48.114598, 11.480513),
         )
 
+    def test_map_view_center_uses_visible_texture_view(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node resource-id="com.volkswagen.weconnect:id/catNavMapFragment"
+                class="androidx.compose.ui.platform.ComposeView"
+                bounds="[0,0][1080,2148]"/>
+            <node class="android.view.TextureView" bounds="[0,0][1080,2148]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(VolkswagenReader.map_view_center(root), (540, 1074))
+
+    def test_map_view_center_falls_back_to_map_container(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node resource-id="com.volkswagen.weconnect:id/catNavMapFragment"
+                class="androidx.compose.ui.platform.ComposeView"
+                bounds="[0,100][1080,2100]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(VolkswagenReader.map_view_center(root), (540, 1100))
+
+    def test_map_view_center_keeps_legacy_coordinate_fallback(self):
+        root = ET.fromstring("<hierarchy />")
+        self.assertEqual(VolkswagenReader.map_view_center(root), (540, 786))
+
+    def test_location_details_parse_combined_address_and_parked_duration(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node text="Example Street 1&#10;Geparkt seit 2 Std." bounds="[55,1565][1025,1631]"/>
+            <node text="Route" bounds="[502,1987][622,2042]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(
+            VolkswagenReader.parse_location_details(root),
+            ("Example Street 1", "Geparkt seit 2 Std."),
+        )
+
+    def test_location_details_parse_separate_address_text_view(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node class="android.widget.TextView" text="ID.7" bounds="[55,1445][196,1510]"/>
+            <node class="android.widget.TextView" text="Example Street 1, Example City"
+                bounds="[55,1565][1025,1631]"/>
+            <node class="android.widget.TextView" text="Route" bounds="[502,1987][622,2042]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(
+            VolkswagenReader.parse_location_details(root),
+            ("Example Street 1, Example City", ""),
+        )
+
     def test_usage_limiter_persists_and_enforces_daily_budget(self):
         with TemporaryDirectory() as directory:
             environment = {

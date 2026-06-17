@@ -38,6 +38,14 @@ coordinates, screenshots, raw UI dumps, and private network details.
   background budget every five minutes.
 - USB remains the preferred transport in `ADB_MODE=auto`; configured ADB Wi-Fi
   is only the fallback while USB is unavailable.
+- Location marker details can expose the address as a separate TextView instead
+  of a single combined string containing `Geparkt seit` / `Parked since`.
+  Verified on 2026-06-17 with the production Redmi connected to the evcc LXC:
+  a direct live location read returned both an address and navigation
+  coordinates after using the visible map viewport for the marker tap and a
+  position-based address fallback. The current view did not expose a parked
+  duration label, so `parkedDuration` can remain empty even when address and
+  coordinates are functional.
 
 ## Pixel 10 / Android 16
 

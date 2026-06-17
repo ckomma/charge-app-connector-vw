@@ -456,13 +456,20 @@ class VolkswagenReader:
         return values
 
     @staticmethod
-    def node_center(node: ET.Element) -> tuple[int, int] | None:
+    def node_bounds(node: ET.Element) -> tuple[int, int, int, int] | None:
         match = re.fullmatch(
             r"\[(\d+),(\d+)]\[(\d+),(\d+)]", node.attrib.get("bounds", "")
         )
         if not match:
             return None
-        left, top, right, bottom = map(int, match.groups())
+        return tuple(map(int, match.groups()))
+
+    @classmethod
+    def node_center(cls, node: ET.Element) -> tuple[int, int] | None:
+        bounds = cls.node_bounds(node)
+        if not bounds:
+            return None
+        left, top, right, bottom = bounds
         return ((left + right) // 2, (top + bottom) // 2)
 
     @classmethod
@@ -494,6 +501,65 @@ class VolkswagenReader:
         return cls.described_node_center_any(
             root, ("Batteriereichweite:", "Battery range:", "Electric range:")
         )
+
+    @classmethod
+    def map_view_center(cls, root: ET.Element) -> tuple[int, int]:
+        for node in root.iter():
+            if node.attrib.get("class") == "android.view.TextureView":
+                center = cls.node_center(node)
+                if center:
+                    return center
+        for node in root.iter():
+            if node.attrib.get("resource-id", "").endswith("catNavMapFragment"):
+                center = cls.node_center(node)
+                if center:
+                    return center
+        return (540, 786)
+
+    @classmethod
+    def parse_location_details(cls, root: ET.Element) -> tuple[str, str]:
+        for value in cls.strings(root):
+            if not re.search(
+                r"\n(?:Geparkt seit|Parked since|Parked for)\s+",
+                value,
+                re.IGNORECASE,
+            ):
+                continue
+            return tuple(value.split("\n", 1))  # type: ignore[return-value]
+
+        try:
+            _route_x, route_y = cls.described_node_center(root, "Route")
+        except RuntimeError:
+            return "", ""
+
+        candidates: list[tuple[int, str]] = []
+        ignored = {
+            "Route",
+            "Navigation Tab",
+            "Google Maps",
+            "Map Back Button",
+            "Map Settings Button",
+            "Car Locate Button",
+            "Device Location Button",
+        }
+        for node in root.iter():
+            if node.attrib.get("class") != "android.widget.TextView":
+                continue
+            text = node.attrib.get("text", "").strip()
+            if not text or text in ignored:
+                continue
+            bounds = cls.node_bounds(node)
+            if not bounds:
+                continue
+            left, top, right, _bottom = bounds
+            if top >= route_y or left > 140 or right - left < 360:
+                continue
+            candidates.append((top, text))
+
+        if candidates:
+            candidates.sort()
+            return candidates[0][1], ""
+        return "", ""
 
     @staticmethod
     def parse_locked(text: str) -> bool | None:
@@ -870,22 +936,15 @@ class VolkswagenReader:
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
 
-        # Car Locate centers the vehicle badge at the stable map viewport center.
-        self.shell("input", "tap", "540", "786")
+        # Car Locate centers the vehicle badge in the visible map viewport.
+        x, y = self.map_view_center(map_root)
+        self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
         details = self.dump_ui("vw-location-details.xml")
         result = LocationData(
             observedAt=datetime.now().astimezone().isoformat(timespec="seconds")
         )
-        for value in self.strings(details):
-            if not re.search(
-                r"\n(?:Geparkt seit|Parked since|Parked for)\s+",
-                value,
-                re.IGNORECASE,
-            ):
-                continue
-            result.address, result.parkedDuration = value.split("\n", 1)
-            break
+        result.address, result.parkedDuration = self.parse_location_details(details)
         if not result.address:
             raise RuntimeError("Volkswagen vehicle address not found")
 
