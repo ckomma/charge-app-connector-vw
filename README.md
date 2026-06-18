@@ -64,6 +64,7 @@ Status follows evcc's vehicle convention:
 
 - Android phone with the Volkswagen app already signed in
 - Volkswagen app language set to German or English
+- Android: Set view size to "small" until "Fahrzeugzustandsbericht/Vehicle Health" is seen without scrolling.
 - regular USB debugging
 - Xiaomi devices: `USB debugging (Security settings)` for simulated taps
 - `adb` available to the service user
