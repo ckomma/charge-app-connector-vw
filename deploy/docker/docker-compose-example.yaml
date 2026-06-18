@@ -1,0 +1,53 @@
+services:
+  vw-connector:
+    build:
+      context: /path/on/your/server
+      dockerfile: deploy/docker/Dockerfile
+    container_name: vw_app_connector
+    ports:    
+      - "9920:9920"
+    restart: unless-stopped
+    
+    stdin_open: true
+    tty: true
+    
+    volumes:
+      - /path/on/your/server/vw_app_connector.py:/app/vw_app_connector.py
+      
+    privileged: true
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+
+    environment:
+      ADB_SERIAL: "xxxxxxxx"
+      ADB_MODE: "usb"
+      ADB_WIFI_ADDRESS: ""
+      ADB_PAIRING_CODE: ""
+
+      LISTEN_ADDRESS: "0.0.0.0"
+      PORT: "9920"
+
+      CHARGING_INTERVAL_SECONDS: "300"
+      IDLE_INTERVAL_SECONDS: "900"
+      DETAIL_INTERVAL_SECONDS: "43200"
+      LOCATION_INTERVAL_SECONDS: "14400"
+      BACKGROUND_MIN_INTERVAL_SECONDS: "300"
+      BACKGROUND_DAILY_LIMIT: "180"
+
+      ACTION_MIN_INTERVAL_SECONDS: "60"
+      ACTION_DAILY_LIMIT: "20"
+
+      RATE_LIMIT_COOLDOWN_SECONDS: "43200"
+
+      APP_PACKAGE: "com.volkswagen.weconnect"
+      APP_START_WAIT_SECONDS: "8"
+      DETAIL_WAIT_SECONDS: "3"
+
+      SLEEP_AFTER_OPERATION: "true"
+
+      API_KEY: ""
+      VW_SPIN: ""
+
+      LOG_LEVEL: "INFO"
+
+    
