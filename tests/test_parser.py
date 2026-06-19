@@ -4,10 +4,13 @@ from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from vw_app_connector import (
     BackgroundCache,
+    ChargingLocationSettingsData,
+    ChargingLocationsData,
+    ChargingSettingsData,
     LocationData,
     UsageLimit,
     UsageLimiter,
@@ -17,6 +20,123 @@ from vw_app_connector import (
 
 
 class ParserTests(unittest.TestCase):
+    def test_charging_setting_values_are_sorted_and_localization_independent(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node resource-id="com.volkswagen.weconnect:id/value" text="80%"
+                bounds="[900,700][1030,760]"/>
+            <node resource-id="com.volkswagen.weconnect:id/value" text="30 %"
+                bounds="[900,300][1030,360]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(
+            [value for _node, value in VolkswagenReader.setting_values(root)],
+            [30, 80],
+        )
+
+    def test_resource_node_center_accepts_compose_resource_suffix(self):
+        root = ET.fromstring(
+            '<hierarchy><node resource-id="settingsTile" '
+            'bounds="[50,100][450,500]"/></hierarchy>'
+        )
+        self.assertEqual(
+            VolkswagenReader.resource_node_center(root, "settingsTile"),
+            (250, 300),
+        )
+
+    def test_overview_element_scrolls_until_lazy_item_is_visible(self):
+        initial = ET.fromstring(
+            '<hierarchy><node bounds="[0,0][1080,2340]"/></hierarchy>'
+        )
+        visible = ET.fromstring(
+            '<hierarchy><node content-desc="Einstellungen. Details öffnen" '
+            'bounds="[50,1000][1030,1300]"/></hierarchy>'
+        )
+        reader = object.__new__(VolkswagenReader)
+        reader.shell = Mock()
+        reader.dump_ui = Mock(return_value=visible)
+        with patch("time.sleep"):
+            root, center = reader.find_overview_element(
+                initial, ("Einstellungen.",), "settingsTile"
+            )
+        self.assertIs(root, visible)
+        self.assertEqual(center, (540, 1150))
+
+    def test_charging_settings_parse_named_switches(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node resource-id="com.volkswagen.weconnect:id/value" text="80%"
+                bounds="[900,300][1030,360]"/>
+            <node text="Battery Care" bounds="[50,500][600,560]"/>
+            <node checkable="true" clickable="true" checked="true"
+                bounds="[880,470][1030,590]"/>
+            <node text="Reduced AC current" bounds="[50,700][600,760]"/>
+            <node checkable="true" clickable="true" checked="false"
+                bounds="[880,670][1030,790]"/>
+            </hierarchy>"""
+        )
+        reader = object.__new__(VolkswagenReader)
+        self.assertEqual(
+            reader.read_charging_settings(root),
+            ChargingSettingsData(targetSoc=80, batteryCare=True, reducedAc=False),
+        )
+
+    def test_german_charging_location_settings(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node resource-id="com.volkswagen.weconnect:id/value" text="30%"
+                bounds="[900,300][1030,360]"/>
+            <node resource-id="com.volkswagen.weconnect:id/value" text="80%"
+                bounds="[900,500][1030,560]"/>
+            <node text="Reduzierter AC-Ladestrom" bounds="[50,700][650,760]"/>
+            <node checkable="true" clickable="true" checked="true"
+                bounds="[880,670][1030,790]"/>
+            <node text="Automatisch entriegeln" bounds="[50,900][650,960]"/>
+            <node checkable="true" clickable="true" checked="false"
+                bounds="[880,870][1030,990]"/>
+            </hierarchy>"""
+        )
+        reader = object.__new__(VolkswagenReader)
+        self.assertEqual(
+            reader.read_charging_location_settings("Zuhause", root),
+            ChargingLocationSettingsData(
+                name="Zuhause", directSoc=30, targetSoc=80,
+                reducedAc=True, autoUnlock=False,
+            ),
+        )
+
+    def test_charging_location_list_uses_semantic_name_resources(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node resource-id="com.volkswagen.weconnect:id/name" text="Zuhause"
+                bounds="[50,300][500,360]"/>
+            <node resource-id="com.volkswagen.weconnect:id/name" text="Arbeit"
+                bounds="[50,500][500,560]"/>
+            </hierarchy>"""
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                overview = ET.fromstring(
+                    '<hierarchy><node text="Abfahrtszeiten." '
+                    'bounds="[10,20][110,120]"/></hierarchy>'
+                )
+                with (
+                    patch.object(reader, "screen_session", nullcontext),
+                    patch.object(reader, "launch"),
+                    patch.object(reader, "open_overview", return_value=overview),
+                    patch.object(reader, "dump_ui", return_value=root),
+                    patch.object(reader, "shell"),
+                ):
+                    self.assertEqual(
+                        reader.list_charging_locations(),
+                        ChargingLocationsData(locations=["Zuhause", "Arbeit"]),
+                    )
+
     def test_strings_and_range_tile(self):
         root = ET.fromstring(
             """<hierarchy><node text="" content-desc="Übersicht Reichweite. Batteriereichweite: 126 Kilometer. Details öffnen" bounds="[55,1044][507,1496]"/>

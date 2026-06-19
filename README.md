@@ -127,6 +127,17 @@ Authenticated action endpoints:
 - `POST /action/unlock`
 - `POST /action/charging/start`
 - `POST /action/charging/stop`
+- `POST /action/charging/target-soc?value=80`
+- `POST /action/charging/mode?value=immediate`
+- `POST /action/charging/settings`
+- `POST /action/charging/option/battery-care?value=true`
+- `POST /action/charging/option/reduced-ac?value=true`
+- `POST /action/charging-location/direct-soc?name=Home&value=30`
+- `POST /action/charging-location/target-soc?name=Home&value=80`
+- `POST /action/charging-location/settings?name=Home`
+- `POST /action/charging-location/option/reduced-ac?name=Home&value=true`
+- `POST /action/charging-location/option/auto-unlock?name=Home&value=true`
+- `POST /action/charging-locations`
 - `POST /action/climate/start`
 - `POST /action/climate/stop`
 - `POST /action/climate/temperature?value=20.5`
@@ -134,9 +145,17 @@ Authenticated action endpoints:
 - `POST /action/climate/option/zone-front-left?value=true`
 - `POST /action/climate/option/zone-front-right?value=true`
 
-The target state of charge is read when Volkswagen exposes it in the charging
-detail view. The currently observed idle view has no verifiable target-SoC
-control, so the connector deliberately does not offer a blind write action.
+The target state of charge supports 50, 60, 70, 80, 90 and 100 percent. Charging
+modes are `immediate`, `preferred-times`, `departure` and `departure-climate`.
+Location-specific direct-charge limits support 0 through 50 percent in ten-point
+steps; location target limits use the same values as the global target. Slider
+positions are derived from the current accessibility layout and every change is
+checked against the displayed value before it is saved.
+
+On the live-tested Volkswagen app `3.63.2`, the charging-mode row is readable
+but exposes no clickable accessibility element. The connector therefore fails
+that action safely instead of using an unverified fixed coordinate. Charging
+locations can only be controlled when the app account has a location configured.
 
 Send the API key in the `X-API-Key` header. Keep the environment file readable
 only by root because it contains the Volkswagen S-PIN.

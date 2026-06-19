@@ -192,6 +192,29 @@ class VehicleData:
 
 
 @dataclass
+class ChargingSettingsData:
+    targetSoc: int | None = None
+    batteryCare: bool | None = None
+    reducedAc: bool | None = None
+
+
+@dataclass
+class ChargingLocationSettingsData:
+    name: str = ""
+    directSoc: int | None = None
+    targetSoc: int | None = None
+    reducedAc: bool | None = None
+    autoUnlock: bool | None = None
+    previousDirectSoc: int | None = None
+    previousTargetSoc: int | None = None
+
+
+@dataclass
+class ChargingLocationsData:
+    locations: list[str] | None = None
+
+
+@dataclass
 class LocationData:
     address: str = ""
     parkedDuration: str = ""
@@ -516,6 +539,24 @@ class VolkswagenReader:
         )
 
     @classmethod
+    def resource_nodes(cls, root: ET.Element, suffix: str) -> list[ET.Element]:
+        return [
+            node
+            for node in root.iter()
+            if node.attrib.get("resource-id", "").endswith(suffix)
+            and cls.node_center(node) is not None
+        ]
+
+    @classmethod
+    def resource_node_center(cls, root: ET.Element, suffix: str) -> tuple[int, int]:
+        nodes = cls.resource_nodes(root, suffix)
+        if not nodes:
+            raise RuntimeError(f"Volkswagen UI resource not found: {suffix}")
+        center = cls.node_center(nodes[0])
+        assert center is not None
+        return center
+
+    @classmethod
     def range_tile_center(cls, root: ET.Element) -> tuple[int, int]:
         return cls.described_node_center_any(
             root, ("Batteriereichweite:", "Battery range:", "Electric range:")
@@ -740,7 +781,7 @@ class VolkswagenReader:
     ) -> ET.Element:
         deadline = time.monotonic() + self.ui_update_timeout
         while True:
-            root = self.dump_ui(remote_name)
+            root = self.dump_ui_with_overlay_recovery(remote_name)
             try:
                 if self.parse_target_temperature(root) == desired:
                     return root
@@ -1439,6 +1480,478 @@ class VolkswagenReader:
                 )
             return desired
 
+    @staticmethod
+    def percentage_value(node: ET.Element) -> int | None:
+        value = node.attrib.get("text", "").strip()
+        match = re.fullmatch(r"(\d{1,3})\s*%", value)
+        return int(match.group(1)) if match else None
+
+    @classmethod
+    def setting_values(cls, root: ET.Element) -> list[tuple[ET.Element, int]]:
+        values: list[tuple[ET.Element, int]] = []
+        for node in cls.resource_nodes(root, "/value"):
+            value = cls.percentage_value(node)
+            if value is not None:
+                values.append((node, value))
+        return sorted(
+            values,
+            key=lambda item: (cls.node_center(item[0]) or (0, 0))[1],
+        )
+
+    def wait_for_settings_values(
+        self, remote_name: str, minimum: int = 1
+    ) -> ET.Element:
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            root = self.dump_ui_with_overlay_recovery(remote_name)
+            if len(self.setting_values(root)) >= minimum:
+                return root
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Volkswagen charging settings did not finish loading")
+            time.sleep(0.5)
+
+    def find_overview_element(
+        self,
+        root: ET.Element,
+        labels: tuple[str, ...],
+        resource_suffix: str = "",
+    ) -> tuple[ET.Element, tuple[int, int]]:
+        for attempt in range(20):
+            try:
+                if resource_suffix:
+                    return root, self.resource_node_center(root, resource_suffix)
+                return root, self.described_node_center_any(root, labels)
+            except RuntimeError:
+                try:
+                    return root, self.described_node_center_any(root, labels)
+                except RuntimeError:
+                    if attempt == 19:
+                        raise
+                    width, height = self.viewport_size(root)
+                    card_centers = [
+                        center
+                        for node in root.iter()
+                        if (
+                            "details öffnen" in node.attrib.get("content-desc", "").casefold()
+                            or "open details" in node.attrib.get("content-desc", "").casefold()
+                        )
+                        and (center := self.node_center(node)) is not None
+                    ]
+                    swipe_x, swipe_y = (
+                        max(card_centers, key=lambda center: center[1])
+                        if card_centers
+                        else (width // 2, round(height * 0.6))
+                    )
+                    self.shell(
+                        "input", "swipe", str(swipe_x), str(swipe_y),
+                        str(swipe_x), str(max(200, swipe_y - round(height * 0.3))),
+                        "800",
+                    )
+                    time.sleep(1.5)
+                    root = self.dump_ui_with_overlay_recovery(
+                        "vw-overview-scroll.xml"
+                    )
+        raise RuntimeError("Volkswagen overview element not found")
+
+    def open_charging_settings(self) -> ET.Element:
+        overview = self.open_overview()
+        _overview, (x, y) = self.find_overview_element(
+            overview,
+            (
+                "Ladeeinstellungen.",
+                "Einstellungen.",
+                "Charging settings.",
+                "Settings. Open details",
+            ),
+            "settingsTile",
+        )
+        self.shell("input", "tap", str(x), str(y))
+        return self.wait_for_settings_values("vw-charging-settings.xml")
+
+    def save_settings(self, root: ET.Element) -> None:
+        for attempt in range(3):
+            try:
+                x, y = self.resource_node_center(root, "/vwd_save_button")
+                break
+            except RuntimeError:
+                try:
+                    x, y = self.described_node_center_any(root, ("Speichern", "Save"))
+                    break
+                except RuntimeError:
+                    if attempt == 2:
+                        raise RuntimeError("Volkswagen charging settings save button not found")
+                    width, height = self.viewport_size(root)
+                    self.shell(
+                        "input", "swipe", str(width // 2), str(round(height * 0.8)),
+                        str(width // 2), str(round(height * 0.45)), "300",
+                    )
+                    root = self.dump_ui("vw-settings-save-scroll.xml")
+        self.shell("input", "tap", str(x), str(y))
+        time.sleep(self.detail_wait)
+
+    def dismiss_setting_notice(self, root: ET.Element) -> ET.Element:
+        try:
+            x, y = self.described_node_center_any(
+                root, ("Verstanden", "Alles klar", "Got it", "OK")
+            )
+        except RuntimeError:
+            return root
+        self.shell("input", "tap", str(x), str(y))
+        time.sleep(0.5)
+        return self.dump_ui("vw-setting-notice-dismissed.xml")
+
+    def set_percentage_slider(
+        self,
+        root: ET.Element,
+        index: int,
+        desired: int,
+        allowed: tuple[int, ...],
+        remote_name: str,
+    ) -> ET.Element:
+        if desired not in allowed:
+            raise ValueError(f"value must be one of {list(allowed)}")
+        values = self.setting_values(root)
+        if index >= len(values):
+            raise RuntimeError("Volkswagen charging percentage control not found")
+        value_node, current = values[index]
+        if current == desired:
+            return root
+
+        subtitles = self.resource_nodes(root, "/subtitle")
+        value_bounds = self.node_bounds(value_node)
+        if not value_bounds:
+            raise RuntimeError("Volkswagen charging slider geometry not found")
+        value_center = self.node_center(value_node)
+        assert value_center is not None
+        nearby = [
+            node
+            for node in subtitles
+            if (self.node_center(node) or (0, -10000))[1] <= value_center[1]
+        ]
+        anchor = min(
+            nearby or subtitles,
+            key=lambda node: abs((self.node_center(node) or (0, 0))[1] - value_center[1]),
+        ) if (nearby or subtitles) else None
+        anchor_bounds = self.node_bounds(anchor) if anchor is not None else None
+        if not anchor_bounds:
+            raise RuntimeError("Volkswagen charging slider anchor not found")
+
+        low_x = anchor_bounds[0]
+        high_x = value_bounds[0] - 5
+        # The Compose slider track is rendered slightly below the midpoint
+        # between its subtitle and value nodes on the verified VW layout.
+        track_y = (anchor_bounds[3] + value_bounds[1]) // 2 + 7
+        for _attempt in range(14):
+            x = (low_x + high_x) // 2
+            self.shell("input", "tap", str(x), str(track_y))
+            time.sleep(0.8)
+            root = self.dismiss_setting_notice(self.dump_ui(remote_name))
+            values = self.setting_values(root)
+            if index >= len(values):
+                continue
+            current = values[index][1]
+            if current == desired:
+                return root
+            if current < desired:
+                low_x = x + 1
+            else:
+                high_x = x - 1
+        raise RuntimeError(
+            f"Volkswagen charging percentage verification failed: {desired}%"
+        )
+
+    @classmethod
+    def option_state(cls, root: ET.Element, labels: tuple[str, ...]) -> bool:
+        return cls.checked_node_near_labels(root, labels).attrib.get("checked") == "true"
+
+    def checked_option_with_scroll(
+        self, root: ET.Element, labels: tuple[str, ...], remote_name: str
+    ) -> tuple[ET.Element, ET.Element]:
+        for attempt in range(3):
+            try:
+                return root, self.checked_node_near_labels(root, labels)
+            except RuntimeError:
+                if attempt == 2:
+                    raise
+                width, height = self.viewport_size(root)
+                self.shell(
+                    "input", "swipe", str(width // 2), str(round(height * 0.8)),
+                    str(width // 2), str(round(height * 0.45)), "300",
+                )
+                root = self.dump_ui_with_overlay_recovery(remote_name)
+        raise RuntimeError("Volkswagen charging option not found")
+
+    def read_charging_settings(self, root: ET.Element) -> ChargingSettingsData:
+        values = self.setting_values(root)
+        result = ChargingSettingsData(targetSoc=values[0][1] if values else None)
+        for attribute, labels in (
+            ("batteryCare", ("Batterieschutz", "Battery Care", "Battery care")),
+            ("reducedAc", ("Reduzierter AC-Ladestrom", "Reduced AC current")),
+        ):
+            try:
+                setattr(result, attribute, self.option_state(root, labels))
+            except RuntimeError:
+                pass
+        return result
+
+    def set_target_soc(self, desired: int) -> ChargingSettingsData:
+        with self.screen_session():
+            self.launch()
+            root = self.open_charging_settings()
+            current = self.read_charging_settings(root)
+            if current.targetSoc == desired:
+                return current
+            root = self.set_percentage_slider(
+                root, 0, desired, (50, 60, 70, 80, 90, 100),
+                "vw-target-soc-adjust.xml",
+            )
+            result = self.read_charging_settings(root)
+            for attribute, labels in (
+                ("batteryCare", ("Batterieschutz", "Battery Care", "Battery care")),
+                ("reducedAc", ("Reduzierter AC-Ladestrom", "Reduced AC current")),
+            ):
+                if getattr(result, attribute) is not None:
+                    continue
+                root, switch = self.checked_option_with_scroll(
+                    root, labels, "vw-target-soc-settings-scroll.xml"
+                )
+                setattr(result, attribute, switch.attrib.get("checked") == "true")
+            self.save_settings(root)
+            return result
+
+    def get_charging_settings(self) -> ChargingSettingsData:
+        with self.screen_session():
+            self.launch()
+            root = self.open_charging_settings()
+            result = self.read_charging_settings(root)
+            for attribute, labels in (
+                ("batteryCare", ("Batterieschutz", "Battery Care", "Battery care")),
+                ("reducedAc", ("Reduzierter AC-Ladestrom", "Reduced AC current")),
+            ):
+                if getattr(result, attribute) is not None:
+                    continue
+                root, switch = self.checked_option_with_scroll(
+                    root, labels, "vw-charging-settings-read-scroll.xml"
+                )
+                setattr(result, attribute, switch.attrib.get("checked") == "true")
+            return result
+
+    def set_charging_option(self, option: str, desired: bool) -> ChargingSettingsData:
+        specs = {
+            "battery-care": ("Batterieschutz", "Battery Care", "Battery care"),
+            "reduced-ac": ("Reduzierter AC-Ladestrom", "Reduced AC current"),
+        }
+        if option not in specs:
+            raise KeyError(option)
+        labels = specs[option]
+        with self.screen_session():
+            self.launch()
+            root = self.open_charging_settings()
+            result = self.read_charging_settings(root)
+            root, switch = self.checked_option_with_scroll(
+                root, labels, "vw-charging-option-scroll.xml"
+            )
+            current = switch.attrib.get("checked") == "true"
+            if current != desired:
+                center = self.node_center(switch)
+                assert center is not None
+                self.shell("input", "tap", str(center[0]), str(center[1]))
+                self.dismiss_setting_notice(
+                    self.dump_ui_with_overlay_recovery(
+                        "vw-charging-option-notice.xml"
+                    )
+                )
+                root, _switch = self.wait_for_checked_option(
+                    "vw-charging-option-verify.xml", labels, desired
+                )
+                self.save_settings(root)
+            setattr(result, "batteryCare" if option == "battery-care" else "reducedAc", desired)
+            return result
+
+    def set_charging_mode(self, mode: str) -> str:
+        modes = {
+            "immediate": ("Sofortladen", "Immediate charging"),
+            "preferred-times": ("Zu bevorzugten Zeiten laden", "Charge at preferred times"),
+            "departure": ("Zur Abfahrtszeit laden", "Charge for departure time"),
+            "departure-climate": (
+                "Zur Abfahrtszeit laden und klimatisieren",
+                "Charge/air condition for departure",
+            ),
+        }
+        if mode not in modes:
+            raise ValueError(f"mode must be one of {list(modes)}")
+        with self.screen_session():
+            self.launch()
+            overview = self.open_overview()
+            x, y = self.range_tile_center(overview)
+            self.shell("input", "tap", str(x), str(y))
+            time.sleep(self.detail_wait)
+            detail = self.wait_for_described_node(
+                "vw-charge-mode-current.xml",
+                (
+                    "Ladeverfahren",
+                    "Charging mode",
+                    "Charging method",
+                ),
+            )[0]
+            x, y = self.described_node_center_any(
+                detail,
+                (
+                    "Ladeverfahren",
+                    "Charging mode",
+                    "Charging method",
+                ),
+            )
+            self.shell("input", "tap", str(x), str(y))
+            choices, (x, y) = self.wait_for_described_node(
+                "vw-charge-mode-choices.xml", modes[mode]
+            )
+            self.shell("input", "tap", str(x), str(y))
+            time.sleep(self.detail_wait)
+            verify = self.dump_ui("vw-charge-mode-verify.xml")
+            text = "\n".join(self.strings(verify))
+            if not any(label.casefold() in text.casefold() for label in modes[mode]):
+                raise RuntimeError("Volkswagen charging mode verification failed")
+            return mode
+
+    def open_charging_location(self, name: str) -> ET.Element:
+        overview = self.open_overview()
+        _overview, (x, y) = self.find_overview_element(
+            overview,
+            ("Abfahrtszeiten.", "Departure times."),
+            "departureTimesTile",
+        )
+        self.shell("input", "tap", str(x), str(y))
+        departures = self.dump_ui("vw-location-departures.xml")
+        x, y = self.described_node_center_any(departures, (name,))
+        self.shell("input", "tap", str(x), str(y))
+        location = self.dump_ui("vw-location-selected.xml")
+        try:
+            x, y = self.resource_node_center(location, "/vwd_setting_button")
+        except RuntimeError:
+            x, y = self.described_node_center_any(
+                location, ("Ladeeinstellungen", "Charging settings", "Settings")
+            )
+        self.shell("input", "tap", str(x), str(y))
+        return self.wait_for_settings_values("vw-location-settings.xml", 2)
+
+    def list_charging_locations(self) -> ChargingLocationsData:
+        with self.screen_session():
+            self.launch()
+            overview = self.open_overview()
+            _overview, (x, y) = self.find_overview_element(
+                overview,
+                ("Abfahrtszeiten.", "Departure times."),
+                "departureTimesTile",
+            )
+            self.shell("input", "tap", str(x), str(y))
+            root = self.dump_ui("vw-location-list.xml")
+            names = [
+                node.attrib.get("text", "").strip()
+                for node in self.resource_nodes(root, "/name")
+                if node.attrib.get("text", "").strip()
+            ]
+            return ChargingLocationsData(locations=list(dict.fromkeys(names)))
+
+    def get_charging_location_settings(
+        self, name: str
+    ) -> ChargingLocationSettingsData:
+        with self.screen_session():
+            self.launch()
+            root = self.open_charging_location(name)
+            result = self.read_charging_location_settings(name, root)
+            for attribute, labels in (
+                ("reducedAc", ("Reduzierter AC-Ladestrom", "Reduced AC current")),
+                ("autoUnlock", ("Automatisch entriegeln", "Automatic unlock", "Auto unlock")),
+            ):
+                if getattr(result, attribute) is not None:
+                    continue
+                root, switch = self.checked_option_with_scroll(
+                    root, labels, "vw-location-settings-read-scroll.xml"
+                )
+                setattr(result, attribute, switch.attrib.get("checked") == "true")
+            return result
+
+    def read_charging_location_settings(
+        self, name: str, root: ET.Element
+    ) -> ChargingLocationSettingsData:
+        values = self.setting_values(root)
+        result = ChargingLocationSettingsData(
+            name=name,
+            directSoc=values[0][1] if len(values) > 0 else None,
+            targetSoc=values[1][1] if len(values) > 1 else None,
+        )
+        for attribute, labels in (
+            ("reducedAc", ("Reduzierter AC-Ladestrom", "Reduced AC current")),
+            ("autoUnlock", ("Automatisch entriegeln", "Automatic unlock", "Auto unlock")),
+        ):
+            try:
+                setattr(result, attribute, self.option_state(root, labels))
+            except RuntimeError:
+                pass
+        return result
+
+    def set_charging_location_percentage(
+        self, name: str, kind: str, desired: int
+    ) -> ChargingLocationSettingsData:
+        specs = {
+            "direct-soc": (0, (0, 10, 20, 30, 40, 50)),
+            "target-soc": (1, (50, 60, 70, 80, 90, 100)),
+        }
+        if kind not in specs:
+            raise KeyError(kind)
+        index, allowed = specs[kind]
+        with self.screen_session():
+            self.launch()
+            root = self.open_charging_location(name)
+            current = self.read_charging_location_settings(name, root)
+            if getattr(current, "directSoc" if index == 0 else "targetSoc") == desired:
+                return current
+            root = self.set_percentage_slider(
+                root, index, desired, allowed, "vw-location-soc-adjust.xml"
+            )
+            self.save_settings(root)
+            result = self.read_charging_location_settings(name, root)
+            if index == 0:
+                result.previousDirectSoc = current.directSoc
+            else:
+                result.previousTargetSoc = current.targetSoc
+            return result
+
+    def set_charging_location_option(
+        self, name: str, option: str, desired: bool
+    ) -> ChargingLocationSettingsData:
+        specs = {
+            "reduced-ac": ("Reduzierter AC-Ladestrom", "Reduced AC current"),
+            "auto-unlock": ("Automatisch entriegeln", "Automatic unlock", "Auto unlock"),
+        }
+        if option not in specs:
+            raise KeyError(option)
+        labels = specs[option]
+        with self.screen_session():
+            self.launch()
+            root = self.open_charging_location(name)
+            result = self.read_charging_location_settings(name, root)
+            root, switch = self.checked_option_with_scroll(
+                root, labels, "vw-location-option-scroll.xml"
+            )
+            current = switch.attrib.get("checked") == "true"
+            if current != desired:
+                center = self.node_center(switch)
+                assert center is not None
+                self.shell("input", "tap", str(center[0]), str(center[1]))
+                self.dismiss_setting_notice(
+                    self.dump_ui_with_overlay_recovery(
+                        "vw-location-option-notice.xml"
+                    )
+                )
+                root, _switch = self.wait_for_checked_option(
+                    "vw-location-option-verify.xml", labels, desired
+                )
+                self.save_settings(root)
+            setattr(result, "reducedAc" if option == "reduced-ac" else "autoUnlock", desired)
+            return result
+
 
 class BackgroundCache(Generic[T]):
     def __init__(
@@ -1763,11 +2276,36 @@ class AppState:
                 },
             )
             return self.details.patch_value(details)
-        if name == "target-soc":
-            raise RuntimeError(
-                "Target SoC control is unavailable because the idle Volkswagen UI "
-                "does not expose a verifiable control"
+        if name == "charging/target-soc":
+            settings = self.reader.set_target_soc(int(query["value"][0]))
+            with self.charge.lock:
+                if self.charge.value is not None:
+                    self.charge.value.targetSoc = settings.targetSoc
+            return settings
+        if name == "charging/mode":
+            self.reader.set_charging_mode(query["value"][0])
+            return self.charge.set_value(self.reader.read())
+        if name == "charging/settings":
+            return self.reader.get_charging_settings()
+        if name.startswith("charging/option/"):
+            desired = query["value"][0].casefold() in ("1", "true", "on")
+            option = name.removeprefix("charging/option/")
+            return self.reader.set_charging_option(option, desired)
+        if name.startswith("charging-location/option/"):
+            desired = query["value"][0].casefold() in ("1", "true", "on")
+            option = name.removeprefix("charging-location/option/")
+            return self.reader.set_charging_location_option(
+                query["name"][0], option, desired
             )
+        if name == "charging-location/settings":
+            return self.reader.get_charging_location_settings(query["name"][0])
+        if name.startswith("charging-location/"):
+            kind = name.removeprefix("charging-location/")
+            return self.reader.set_charging_location_percentage(
+                query["name"][0], kind, int(query["value"][0])
+            )
+        if name == "charging-locations":
+            return self.reader.list_charging_locations()
         raise KeyError(name)
 
     def health(self) -> HealthData:

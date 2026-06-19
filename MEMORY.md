@@ -106,6 +106,25 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## Verification
 
+- Live deployment verification on 2026-06-19 with Volkswagen app `3.63.2`:
+  global target SoC changed 100 -> 90 -> 100 successfully. Battery Care changed
+  true -> false -> true and reduced AC changed false -> true -> false. Enabling
+  Battery Care at a 100% target opens a localized confirmation dialog and later
+  resets the displayed target to 80%; the test restored the original 100% target.
+- The same live test found that the charging-mode row is readable as
+  `Ladeverfahren. Sofortladen. Ladeverfahren ändern` but its Compose node is not
+  clickable and bounds-relative taps do not open the selector. No blind fixed
+  coordinate was added, and the mode remained `Sofortladen`.
+- The production account exposed departure times but no configured charging
+  location, so the charging-location list correctly returned empty and no
+  location-specific write was possible.
+- MIUI can ignore several overview swipes and intermittently return an empty UI
+  tree. Overview searches for lower tiles need bounds-derived swipes, the existing
+  overlay recovery, and enough bounded retry attempts.
+- The action limit was temporarily raised for the explicitly requested live test
+  and restored afterward. The persisted action count can remain above the normal
+  daily limit until the next local-day rollover; do not reset it manually.
+
 - The latest production-Redmi verification on 2026-06-19 used Volkswagen app
   `3.63.2` (`versionCode 41262`). Record app versions as tested baselines, not
   strict compatibility pins.
