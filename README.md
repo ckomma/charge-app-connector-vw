@@ -76,6 +76,11 @@ against a live Volkswagen app installation, including read operations and
 vehicle actions. Volkswagen may still vary UI wording between app versions and
 vehicle capabilities. Other app languages are not supported.
 
+The latest real-device verification used Volkswagen app `3.63.2`
+(`versionCode 41262`) on the production Redmi. This is a tested baseline, not
+an exact version pin; newer app versions must be reverified because UI labels
+and accessibility metadata can change independently of the connector.
+
 ## Configuration
 
 Environment variables:
@@ -98,10 +103,14 @@ Environment variables:
 - `ACTION_DAILY_LIMIT`: default `20`
 - `RATE_LIMIT_COOLDOWN_SECONDS`: default `43200`
 - `USAGE_STATE_FILE`: default `/var/lib/vw-app-connector/usage.json`
+- `CACHE_STATE_DIR`: default `/var/lib/vw-app-connector/cache`; stores the last
+  successful endpoint values so restarts can serve data during cache refresh
 - `DIAGNOSTICS_DIR`: default `/var/lib/vw-app-connector/diagnostics`
 - `APP_PACKAGE`: default `com.volkswagen.weconnect`
 - `APP_START_WAIT_SECONDS`: default `8`
 - `DETAIL_WAIT_SECONDS`: default `3`
+- `UI_UPDATE_TIMEOUT_SECONDS`: default `8`; maximum wait for an expected UI
+  value or semantic element after navigation or a setting change
 - `SLEEP_AFTER_OPERATION`: default `true`; wake and unlock before UI automation,
   then switch the display off again
 - `API_KEY`: required for `POST /action/*`

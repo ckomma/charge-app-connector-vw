@@ -1,5 +1,7 @@
 import unittest
 import xml.etree.ElementTree as ET
+from contextlib import nullcontext
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -119,6 +121,282 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(VolkswagenReader.parse_target_temperature(root), 20.5)
 
+    def test_target_temperature_taps_visible_value_on_pixel_geometry(self):
+        initial = ET.fromstring(
+            """<hierarchy>
+            <node text="20" bounds="[0,1111][135,1264]"/>
+            <node text="20.5" bounds="[349,1085][685,1290]"/>
+            <node text="21" bounds="[911,1111][1059,1264]"/>
+            </hierarchy>"""
+        )
+        updated = ET.fromstring(
+            """<hierarchy>
+            <node text="20.5" bounds="[0,1111][187,1264]"/>
+            <node text="21" bounds="[418,1085][616,1290]"/>
+            <node text="21.5" bounds="[859,1111][1080,1264]"/>
+            </hierarchy>"""
+        )
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "screen_session", nullcontext),
+                    patch.object(reader, "launch"),
+                    patch.object(reader, "open_climate", return_value=initial),
+                    patch.object(reader, "dump_ui", side_effect=(updated, updated)),
+                    patch.object(reader, "shell") as shell,
+                    patch("time.sleep"),
+                ):
+                    self.assertEqual(reader.set_target_temperature(21), 21)
+                shell.assert_called_once_with("input", "tap", "985", "1187")
+
+    def test_target_temperature_waits_for_delayed_ui_update(self):
+        initial = ET.fromstring(
+            '<hierarchy><node text="20.5" bounds="[300,1000][700,1200]"/>'
+            '<node text="21" bounds="[900,1020][1080,1180]"/></hierarchy>'
+        )
+        updated = ET.fromstring(
+            '<hierarchy><node text="20.5" bounds="[0,1020][180,1180]"/>'
+            '<node text="21" bounds="[300,1000][700,1200]"/></hierarchy>'
+        )
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+                "UI_UPDATE_TIMEOUT_SECONDS": "1",
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "screen_session", nullcontext),
+                    patch.object(reader, "launch"),
+                    patch.object(reader, "open_climate", return_value=initial),
+                    patch.object(
+                        reader, "dump_ui", side_effect=(initial, updated)
+                    ),
+                    patch.object(reader, "shell"),
+                    patch("time.sleep") as sleep,
+                ):
+                    self.assertEqual(reader.set_target_temperature(21), 21)
+                sleep.assert_called_once_with(0.5)
+
+    def test_target_temperature_decreases_multiple_steps(self):
+        initial = ET.fromstring(
+            '<hierarchy><node text="21" bounds="[0,1020][180,1180]"/>'
+            '<node text="21.5" bounds="[300,1000][700,1200]"/></hierarchy>'
+        )
+        middle = ET.fromstring(
+            '<hierarchy><node text="20.5" bounds="[0,1020][180,1180]"/>'
+            '<node text="21" bounds="[300,1000][700,1200]"/></hierarchy>'
+        )
+        final = ET.fromstring(
+            '<hierarchy><node text="20.5" bounds="[300,1000][700,1200]"/>'
+            '<node text="21" bounds="[900,1020][1080,1180]"/></hierarchy>'
+        )
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "screen_session", nullcontext),
+                    patch.object(reader, "launch"),
+                    patch.object(reader, "open_climate", return_value=initial),
+                    patch.object(reader, "dump_ui", side_effect=(middle, final)),
+                    patch.object(reader, "shell") as shell,
+                    patch("time.sleep"),
+                ):
+                    self.assertEqual(reader.set_target_temperature(20.5), 20.5)
+                taps = [entry.args for entry in shell.call_args_list]
+                self.assertEqual(
+                    taps,
+                    [
+                        ("input", "tap", "90", "1100"),
+                        ("input", "tap", "90", "1100"),
+                    ],
+                )
+
+    def test_target_temperature_accepts_decimal_comma(self):
+        root = ET.fromstring(
+            '<hierarchy><node text="20,5" bounds="[300,1000][700,1200]"/>'
+            '<node text="21" bounds="[900,1020][1080,1180]"/></hierarchy>'
+        )
+        self.assertEqual(VolkswagenReader.parse_target_temperature(root), 20.5)
+        self.assertEqual(
+            VolkswagenReader.temperature_value_center(root, 20.5),
+            (500, 1100),
+        )
+
+    def test_open_overview_waits_for_range_tile(self):
+        loading = ET.fromstring('<hierarchy><node text="Loading"/></hierarchy>')
+        ready = ET.fromstring(
+            '<hierarchy><node content-desc="Battery range: 100 kilometres" '
+            'bounds="[10,20][110,120]"/></hierarchy>'
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(
+                        reader,
+                        "dump_ui_with_overlay_recovery",
+                        side_effect=(loading, ready),
+                    ),
+                    patch.object(reader, "shell") as shell,
+                    patch("time.sleep") as sleep,
+                ):
+                    self.assertIs(reader.open_overview(), ready)
+                shell.assert_not_called()
+                sleep.assert_called_once_with(0.5)
+
+    def test_pin_input_and_viewport_are_semantic(self):
+        root = ET.fromstring(
+            '<hierarchy><node bounds="[0,0][1080,2424]"/>'
+            '<node class="android.widget.EditText" '
+            'bounds="[55,1059][1025,1363]"/></hierarchy>'
+        )
+        self.assertEqual(VolkswagenReader.viewport_size(root), (1080, 2424))
+        self.assertEqual(
+            VolkswagenReader.editable_node_center(root), (540, 1211)
+        )
+
+    def test_climate_switch_is_selected_by_nearby_label(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node text="Unrelated" bounds="[55,300][400,360]"/>
+            <node checkable="true" clickable="true" checked="false"
+                bounds="[882,280][1025,412]"/>
+            <node text="Automatische Scheibenheizung"
+                bounds="[55,679][741,740]"/>
+            <node checkable="true" clickable="true" checked="true"
+                bounds="[882,643][1025,775]"/>
+            </hierarchy>"""
+        )
+        node = VolkswagenReader.checked_node_near_labels(
+            root,
+            ("Automatische Scheibenheizung", "Automatic window heating"),
+        )
+        self.assertEqual(node.attrib["checked"], "true")
+
+    def test_open_climate_waits_for_english_temperature_page(self):
+        overview = ET.fromstring(
+            '<hierarchy><node content-desc="Climate control. Off." '
+            'bounds="[10,20][110,120]"/></hierarchy>'
+        )
+        loading = ET.fromstring('<hierarchy><node text="Loading"/></hierarchy>')
+        ready = ET.fromstring(
+            '<hierarchy><node text="20.5" '
+            'bounds="[300,1000][700,1200]"/></hierarchy>'
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "open_overview", return_value=overview),
+                    patch.object(reader, "dump_ui", side_effect=(loading, ready)),
+                    patch.object(reader, "shell") as shell,
+                    patch("time.sleep") as sleep,
+                ):
+                    self.assertIs(reader.open_climate(), ready)
+                shell.assert_called_once_with("input", "tap", "60", "70")
+                sleep.assert_called_once_with(0.5)
+
+    def test_english_automatic_window_heating_selector(self):
+        climate = ET.fromstring(
+            '<hierarchy><node text="Settings" '
+            'bounds="[10,20][110,120]"/></hierarchy>'
+        )
+        settings = ET.fromstring(
+            """<hierarchy>
+            <node text="Unrelated option" bounds="[55,300][400,360]"/>
+            <node checkable="true" clickable="true" checked="true"
+                bounds="[882,280][1025,412]"/>
+            <node text="Automatic window heating"
+                bounds="[55,679][741,740]"/>
+            <node checkable="true" clickable="true" checked="false"
+                bounds="[882,643][1025,775]"/>
+            </hierarchy>"""
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "screen_session", nullcontext),
+                    patch.object(reader, "launch"),
+                    patch.object(reader, "open_climate", return_value=climate),
+                    patch.object(reader, "dump_ui", return_value=settings),
+                    patch.object(reader, "shell") as shell,
+                    patch("time.sleep"),
+                ):
+                    self.assertFalse(
+                        reader.set_climate_option(
+                            "automatic-window-heating", False
+                        )
+                    )
+                shell.assert_called_once_with("input", "tap", "60", "70")
+
+    def test_english_front_right_selector(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node text="Front left" bounds="[55,1015][296,1076]"/>
+            <node checkable="true" clickable="true" checked="true"
+                bounds="[882,979][1025,1111]"/>
+            <node text="Front right" bounds="[55,1194][332,1255]"/>
+            <node checkable="true" clickable="true" checked="false"
+                bounds="[882,1158][1025,1290]"/>
+            </hierarchy>"""
+        )
+        node = VolkswagenReader.checked_node_near_labels(
+            root, ("Vorne rechts", "Front right")
+        )
+        self.assertEqual(node.attrib["checked"], "false")
+
+    def test_climate_option_waits_for_complete_page(self):
+        loading = ET.fromstring(
+            '<hierarchy><node text="Front left" '
+            'bounds="[55,1015][296,1076]"/></hierarchy>'
+        )
+        ready = ET.fromstring(
+            '<hierarchy><node text="Front right" '
+            'bounds="[55,1194][332,1255]"/>'
+            '<node checkable="true" clickable="true" checked="false" '
+            'bounds="[882,1158][1025,1290]"/></hierarchy>'
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "dump_ui", side_effect=(loading, ready)),
+                    patch("time.sleep") as sleep,
+                ):
+                    _root, node = reader.wait_for_checked_option(
+                        "zones.xml", ("Vorne rechts", "Front right")
+                    )
+                self.assertEqual(node.attrib["checked"], "false")
+                sleep.assert_called_once_with(0.5)
+
     def test_navigation_coordinates(self):
         activity = (
             "intent={act=android.intent.action.VIEW "
@@ -154,6 +432,32 @@ class ParserTests(unittest.TestCase):
         root = ET.fromstring("<hierarchy />")
         self.assertEqual(VolkswagenReader.map_view_center(root), (540, 786))
 
+    def test_vehicle_marker_label_is_above_centered_map_pin(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node class="android.view.TextureView" bounds="[0,0][1080,1984]"/>
+            <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(
+            VolkswagenReader.vehicle_marker_label_center(root),
+            (540, 812),
+        )
+
+    def test_vehicle_name_is_read_from_german_and_english_overview(self):
+        for description in (
+            "Ihr Fahrzeug: ID.7 Tourer Pro. Gerade synchronisiert.",
+            "Your vehicle: ID.7 Tourer Pro. Just synced.",
+        ):
+            with self.subTest(description=description):
+                root = ET.fromstring(
+                    f'<hierarchy><node content-desc="{description}"/></hierarchy>'
+                )
+                self.assertEqual(
+                    VolkswagenReader.parse_vehicle_name(root),
+                    "ID.7 Tourer Pro",
+                )
+
     def test_location_details_parse_combined_address_and_parked_duration(self):
         root = ET.fromstring(
             """<hierarchy>
@@ -178,6 +482,23 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(
             VolkswagenReader.parse_location_details(root),
             ("Example Street 1, Example City", ""),
+        )
+
+    def test_english_location_parses_separate_parked_duration(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node class="android.widget.TextView"
+                text="Example Street 1, Example City"
+                bounds="[55,1565][1025,1631]"/>
+            <node class="android.widget.TextView" text="Parked for 2 hours"
+                bounds="[55,1660][1025,1725]"/>
+            <node class="android.widget.TextView" text="Route"
+                bounds="[502,1987][622,2042]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(
+            VolkswagenReader.parse_location_details(root),
+            ("Example Street 1, Example City", "Parked for 2 hours"),
         )
 
     def test_usage_limiter_persists_and_enforces_daily_budget(self):
@@ -231,6 +552,31 @@ class ParserTests(unittest.TestCase):
         result = cache.refresh()
         self.assertEqual(result.error, "failed")
         self.assertGreaterEqual(cache.next_attempt_monotonic, before + 899)
+
+    def test_background_cache_restores_last_success_after_restart(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "charge.json"
+            with patch("threading.Thread.start"):
+                first = BackgroundCache(
+                    "charge",
+                    VehicleData,
+                    lambda _: 900,
+                    VehicleData,
+                    state_path=path,
+                )
+                first.set_value(VehicleData(status="B", soc=55))
+                restored = BackgroundCache(
+                    "charge",
+                    VehicleData,
+                    lambda _: 900,
+                    VehicleData,
+                    state_path=path,
+                )
+            value = restored.get()
+            self.assertEqual(value.status, "B")
+            self.assertEqual(value.soc, 55)
+            self.assertTrue(value.lastSuccessfulAt)
+            self.assertEqual(value.error, "")
 
     def test_location_read_uses_recovery_retries(self):
         with TemporaryDirectory() as directory:
@@ -346,6 +692,36 @@ class ParserTests(unittest.TestCase):
 
             self.assertEqual(VolkswagenReader.strings(root), ["Fahrzeug"])
 
+    def test_ui_dump_retries_transient_adb_failure(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+            attempts = 0
+
+            def fake_shell(*args, timeout=20):
+                nonlocal attempts
+                if args == ("uiautomator", "dump", "/sdcard/overview.xml"):
+                    attempts += 1
+                    if attempts == 1:
+                        raise RuntimeError("ADB failed (137)")
+                    return "UI hierarchy dumped"
+                if args == ("cat", "/sdcard/overview.xml"):
+                    return '<hierarchy><node text="Ready" /></hierarchy>'
+                raise AssertionError(args)
+
+            with (
+                patch.object(reader, "shell", side_effect=fake_shell),
+                patch("time.sleep") as sleep,
+            ):
+                root = reader.dump_ui("overview.xml")
+            self.assertEqual(VolkswagenReader.strings(root), ["Ready"])
+            self.assertEqual(attempts, 2)
+            sleep.assert_called_once_with(1)
+
     def test_wake_screen_uses_power_key_when_wakeup_is_ignored(self):
         with TemporaryDirectory() as directory:
             environment = {
@@ -358,7 +734,15 @@ class ParserTests(unittest.TestCase):
                     patch.object(
                         reader,
                         "shell",
-                        side_effect=("", "mWakefulness=Asleep", "", "", "", ""),
+                        side_effect=(
+                            "",
+                            "mWakefulness=Asleep",
+                            "",
+                            "",
+                            "",
+                            "",
+                            "isKeyguardShowing=false",
+                        ),
                     ) as shell,
                     patch("time.sleep"),
                 ):
@@ -369,6 +753,38 @@ class ParserTests(unittest.TestCase):
                 )
                 self.assertIn(
                     ("svc", "power", "stayon", "true"),
+                    [call.args for call in shell.call_args_list],
+                )
+
+    def test_wake_screen_swipes_nonsecure_keyguard(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(
+                        reader,
+                        "shell",
+                        side_effect=(
+                            "",
+                            "mWakefulness=Awake",
+                            "",
+                            "",
+                            "",
+                            "isKeyguardShowing=true",
+                            "Physical size: 1080x2400",
+                            "",
+                            "isKeyguardShowing=false",
+                        ),
+                    ) as shell,
+                    patch("time.sleep"),
+                ):
+                    reader.wake_screen()
+                self.assertIn(
+                    ("input", "swipe", "540", "1920", "540", "480", "700"),
                     [call.args for call in shell.call_args_list],
                 )
 

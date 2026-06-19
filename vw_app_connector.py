@@ -269,6 +269,9 @@ class VolkswagenReader:
         self.package = os.getenv("APP_PACKAGE", "com.volkswagen.weconnect")
         self.start_wait = float(os.getenv("APP_START_WAIT_SECONDS", "8"))
         self.detail_wait = float(os.getenv("DETAIL_WAIT_SECONDS", "3"))
+        self.ui_update_timeout = float(
+            os.getenv("UI_UPDATE_TIMEOUT_SECONDS", "8")
+        )
         self.spin = os.getenv("VW_SPIN", "")
         self.sleep_after_operation = (
             os.getenv("SLEEP_AFTER_OPERATION", "true").casefold() == "true"
@@ -386,8 +389,17 @@ class VolkswagenReader:
 
     def dump_ui(self, remote_name: str) -> ET.Element:
         remote_path, _ = self.ui_dump_paths(remote_name)
-        self.shell("uiautomator", "dump", remote_path, timeout=30)
-        return ET.fromstring(self.read_ui_dump(remote_name, timeout=10))
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                self.shell("uiautomator", "dump", remote_path, timeout=30)
+                return ET.fromstring(self.read_ui_dump(remote_name, timeout=10))
+            except (RuntimeError, ET.ParseError) as exc:
+                last_error = exc
+                if attempt == 0:
+                    time.sleep(1)
+        assert last_error is not None
+        raise last_error
 
     @classmethod
     def is_proximity_overlay(cls, root: ET.Element) -> bool:
@@ -430,17 +442,24 @@ class VolkswagenReader:
             LOG.exception("Could not save diagnostics")
 
     def open_overview(self) -> ET.Element:
-        for attempt in range(4):
-            overview = self.dump_ui_with_overlay_recovery("vw-overview.xml")
-            overview_text = "\n".join(self.strings(overview)).casefold()
-            if "too many requests" in overview_text or "zu viele anfragen" in overview_text:
-                raise UsageLimit("Volkswagen app reports too many requests")
-            try:
-                self.range_tile_center(overview)
-                return overview
-            except RuntimeError:
-                if attempt == 3:
-                    raise
+        for navigation_attempt in range(2):
+            deadline = time.monotonic() + self.ui_update_timeout
+            while True:
+                overview = self.dump_ui_with_overlay_recovery("vw-overview.xml")
+                overview_text = "\n".join(self.strings(overview)).casefold()
+                if (
+                    "too many requests" in overview_text
+                    or "zu viele anfragen" in overview_text
+                ):
+                    raise UsageLimit("Volkswagen app reports too many requests")
+                try:
+                    self.range_tile_center(overview)
+                    return overview
+                except RuntimeError:
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.5)
+            if navigation_attempt == 0:
                 self.shell("input", "keyevent", "KEYCODE_BACK")
                 time.sleep(2)
         raise RuntimeError("Volkswagen overview not found")
@@ -517,6 +536,51 @@ class VolkswagenReader:
         return (540, 786)
 
     @classmethod
+    def vehicle_marker_label_center(cls, root: ET.Element) -> tuple[int, int]:
+        x, y = cls.map_view_center(root)
+        _width, height = cls.viewport_size(root)
+        # Google Maps renders the vehicle label in the map canvas, so Android
+        # exposes neither semantic text nor bounds for it. Car Locate centers
+        # the marker pin; its tappable label sits just above that pin.
+        return (x, y - max(40, round(height * 0.075)))
+
+    @classmethod
+    def parse_vehicle_name(cls, root: ET.Element) -> str:
+        text = "\n".join(cls.strings(root))
+        match = re.search(
+            r"(?:Ihr Fahrzeug|Your vehicle):\s*(.+?)\.\s*"
+            r"(?:Gerade synchronisiert|Just synchronized|Just synchronised|"
+            r"Just synced)\b",
+            text,
+            re.IGNORECASE,
+        )
+        return match.group(1).strip() if match else ""
+
+    @classmethod
+    def viewport_size(cls, root: ET.Element) -> tuple[int, int]:
+        bounds = [
+            value
+            for node in root.iter()
+            if (value := cls.node_bounds(node)) is not None
+        ]
+        if not bounds:
+            raise RuntimeError("Volkswagen UI viewport not found")
+        return (
+            max(value[2] for value in bounds),
+            max(value[3] for value in bounds),
+        )
+
+    @classmethod
+    def editable_node_center(cls, root: ET.Element) -> tuple[int, int]:
+        for node in root.iter():
+            if node.attrib.get("class") != "android.widget.EditText":
+                continue
+            center = cls.node_center(node)
+            if center:
+                return center
+        raise RuntimeError("Volkswagen S-PIN input field not found")
+
+    @classmethod
     def parse_location_details(cls, root: ET.Element) -> tuple[str, str]:
         for value in cls.strings(root):
             if not re.search(
@@ -526,6 +590,16 @@ class VolkswagenReader:
             ):
                 continue
             return tuple(value.split("\n", 1))  # type: ignore[return-value]
+
+        parked_duration = ""
+        for value in cls.strings(root):
+            if re.match(
+                r"(?:Geparkt seit|Parked since|Parked for)\b",
+                value,
+                re.IGNORECASE,
+            ):
+                parked_duration = value
+                break
 
         try:
             _route_x, route_y = cls.described_node_center(root, "Route")
@@ -546,7 +620,7 @@ class VolkswagenReader:
             if node.attrib.get("class") != "android.widget.TextView":
                 continue
             text = node.attrib.get("text", "").strip()
-            if not text or text in ignored:
+            if not text or text in ignored or text == parked_duration:
                 continue
             bounds = cls.node_bounds(node)
             if not bounds:
@@ -558,7 +632,7 @@ class VolkswagenReader:
 
         if candidates:
             candidates.sort()
-            return candidates[0][1], ""
+            return candidates[0][1], parked_duration
         return "", ""
 
     @staticmethod
@@ -619,19 +693,77 @@ class VolkswagenReader:
 
     @staticmethod
     def parse_target_temperature(root: ET.Element) -> float:
-        candidates: list[tuple[int, float]] = []
+        viewport_bounds = [
+            bounds
+            for node in root.iter()
+            if (bounds := VolkswagenReader.node_bounds(node)) is not None
+        ]
+        if not viewport_bounds:
+            raise RuntimeError("Volkswagen target temperature not found")
+        viewport_center = (
+            min(bounds[0] for bounds in viewport_bounds)
+            + max(bounds[2] for bounds in viewport_bounds)
+        ) / 2
+        candidates: list[tuple[float, float]] = []
         for node in root.iter():
             value = node.attrib.get("text", "").strip()
             if not re.fullmatch(r"\d{2}(?:[.,]\d)?", value):
                 continue
-            bounds = re.fullmatch(
-                r"\[(\d+),(\d+)]\[(\d+),(\d+)]", node.attrib.get("bounds", "")
-            )
-            width = int(bounds.group(3)) - int(bounds.group(1)) if bounds else 0
-            candidates.append((width, float(value.replace(",", "."))))
+            center = VolkswagenReader.node_center(node)
+            if center:
+                candidates.append(
+                    (abs(center[0] - viewport_center), float(value.replace(",", ".")))
+                )
         if not candidates:
             raise RuntimeError("Volkswagen target temperature not found")
-        return max(candidates)[1]
+        return min(candidates)[1]
+
+    @classmethod
+    def temperature_value_center(
+        cls, root: ET.Element, desired: float
+    ) -> tuple[int, int]:
+        for node in root.iter():
+            value = node.attrib.get("text", "").strip().replace(",", ".")
+            if not re.fullmatch(r"\d{2}(?:\.\d)?", value):
+                continue
+            if float(value) != desired:
+                continue
+            center = cls.node_center(node)
+            if center:
+                return center
+        raise RuntimeError(
+            f"Volkswagen target temperature value not found: {desired:g}"
+        )
+
+    def wait_for_target_temperature(
+        self, desired: float, remote_name: str
+    ) -> ET.Element:
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            root = self.dump_ui(remote_name)
+            try:
+                if self.parse_target_temperature(root) == desired:
+                    return root
+            except RuntimeError:
+                pass
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "Volkswagen target temperature adjustment failed"
+                )
+            time.sleep(0.5)
+
+    def wait_for_described_node(
+        self, remote_name: str, labels: tuple[str, ...]
+    ) -> tuple[ET.Element, tuple[int, int]]:
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            root = self.dump_ui(remote_name)
+            try:
+                return root, self.described_node_center_any(root, labels)
+            except RuntimeError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.5)
 
     @staticmethod
     def parse_charging_details(text: str, result: VehicleData) -> None:
@@ -725,6 +857,17 @@ class VolkswagenReader:
             )
         )
 
+    def keyguard_showing(self) -> bool:
+        policy = self.shell("dumpsys", "window", "policy", timeout=20)
+        return "isKeyguardShowing=true" in policy
+
+    def display_size(self) -> tuple[int, int]:
+        output = self.shell("wm", "size", timeout=10)
+        match = re.search(r"(?:Physical|Override) size:\s*(\d+)x(\d+)", output)
+        if not match:
+            raise RuntimeError("Android display size not found")
+        return int(match.group(1)), int(match.group(2))
+
     def wake_screen(self) -> None:
         self.shell("input", "keyevent", "KEYCODE_WAKEUP")
         time.sleep(0.5)
@@ -736,6 +879,22 @@ class VolkswagenReader:
         self.shell("wm", "dismiss-keyguard")
         self.shell("input", "keyevent", "82")
         time.sleep(1)
+        if self.keyguard_showing():
+            width, height = self.display_size()
+            self.shell(
+                "input",
+                "swipe",
+                str(width // 2),
+                str(round(height * 0.8)),
+                str(width // 2),
+                str(round(height * 0.2)),
+                "700",
+            )
+            time.sleep(1)
+            if self.keyguard_showing():
+                raise RuntimeError(
+                    "Android keyguard could not be dismissed; disable the secure lock"
+                )
 
     def sleep_screen(self) -> None:
         if self.sleep_after_operation:
@@ -910,16 +1069,30 @@ class VolkswagenReader:
             )
             self.shell("input", "tap", str(x), str(y))
             time.sleep(self.detail_wait)
+            width, height = self.viewport_size(overview)
+            swipe_x = width // 2
+            lower_y = round(height * 0.85)
+            upper_y = round(height * 0.63)
+            # The lock control exposes no stable accessibility node until the
+            # vehicle graphic has been swiped, so this gesture is viewport-relative.
             if desired:
-                self.shell("input", "swipe", "540", "2050", "540", "1530", "900")
+                self.shell(
+                    "input", "swipe", str(swipe_x), str(lower_y),
+                    str(swipe_x), str(upper_y), "900"
+                )
             else:
-                self.shell("input", "swipe", "540", "1530", "540", "2050", "900")
+                self.shell(
+                    "input", "swipe", str(swipe_x), str(upper_y),
+                    str(swipe_x), str(lower_y), "900"
+                )
             time.sleep(2)
 
-            pin_text = "\n".join(self.strings(self.dump_ui("vw-pin.xml")))
+            pin_root = self.dump_ui("vw-pin.xml")
+            pin_text = "\n".join(self.strings(pin_root))
             if not re.search(r"S-?PIN", pin_text, re.IGNORECASE):
                 raise RuntimeError("Volkswagen S-PIN dialog not found")
-            self.shell("input", "tap", "260", "1020")
+            x, y = self.editable_node_center(pin_root)
+            self.shell("input", "tap", str(x), str(y))
             self.shell("input", "text", self.spin)
             time.sleep(8)
             return self.with_retries(self._read, "ACTION_VERIFY")
@@ -927,6 +1100,7 @@ class VolkswagenReader:
     def _read_location(self) -> LocationData:
         self.launch()
         root = self.dump_ui_with_overlay_recovery("vw-location-start.xml")
+        vehicle_name = self.parse_vehicle_name(root)
         x, y = self.described_node_center(root, "Navigation Tab")
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
@@ -936,11 +1110,16 @@ class VolkswagenReader:
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
 
-        # Car Locate centers the vehicle badge in the visible map viewport.
-        x, y = self.map_view_center(map_root)
+        centered_map = self.dump_ui("vw-location-centered-map.xml")
+        x, y = self.vehicle_marker_label_center(centered_map)
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
         details = self.dump_ui("vw-location-details.xml")
+        if vehicle_name and not any(
+            vehicle_name.casefold() in value.casefold()
+            for value in self.strings(details)
+        ):
+            raise RuntimeError("Volkswagen vehicle marker was not selected")
         result = LocationData(
             observedAt=datetime.now().astimezone().isoformat(timespec="seconds")
         )
@@ -1034,6 +1213,60 @@ class VolkswagenReader:
             key=lambda node: VolkswagenReader.node_center(node) or (0, 0),
         )
 
+    @classmethod
+    def checked_node_near_labels(
+        cls, root: ET.Element, labels: tuple[str, ...]
+    ) -> ET.Element:
+        label_centers: list[tuple[int, int]] = []
+        for node in root.iter():
+            text = " ".join(
+                (
+                    node.attrib.get("text", ""),
+                    node.attrib.get("content-desc", ""),
+                )
+            ).casefold()
+            if not any(label.casefold() in text for label in labels):
+                continue
+            center = cls.node_center(node)
+            if center:
+                label_centers.append(center)
+        switches = cls.checked_nodes(root)
+        if not label_centers or not switches:
+            raise RuntimeError(
+                f"Volkswagen climate option not found: {' / '.join(labels)}"
+            )
+        return min(
+            switches,
+            key=lambda node: min(
+                abs((cls.node_center(node) or (0, 0))[1] - label[1])
+                for label in label_centers
+            ),
+        )
+
+    def wait_for_checked_option(
+        self,
+        remote_name: str,
+        labels: tuple[str, ...],
+        desired: bool | None = None,
+    ) -> tuple[ET.Element, ET.Element]:
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            root = self.dump_ui(remote_name)
+            try:
+                node = self.checked_node_near_labels(root, labels)
+                if desired is None or (
+                    node.attrib.get("checked") == "true"
+                ) == desired:
+                    return root, node
+            except RuntimeError:
+                pass
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Volkswagen climate option not found or not updated: "
+                    f"{' / '.join(labels)}"
+                )
+            time.sleep(0.5)
+
     def open_climate(self) -> ET.Element:
         overview = self.open_overview()
         x, y = self.described_node_center_any(
@@ -1041,8 +1274,18 @@ class VolkswagenReader:
             ("Vorklimatisierung.", "Air conditioning.", "Climate control."),
         )
         self.shell("input", "tap", str(x), str(y))
-        time.sleep(self.detail_wait)
-        return self.dump_ui("vw-climate.xml")
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            root = self.dump_ui("vw-climate.xml")
+            try:
+                self.parse_target_temperature(root)
+                return root
+            except RuntimeError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "Volkswagen climate page did not finish loading"
+                    )
+                time.sleep(0.5)
 
     def _read_details(self) -> DetailData:
         result = DetailData(
@@ -1136,27 +1379,37 @@ class VolkswagenReader:
             self.launch()
             climate = self.open_climate()
             current = self.parse_target_temperature(climate)
-            x = 984 if desired > current else 70
-            for _ in range(int(round(abs(desired - current) * 2))):
-                self.shell("input", "tap", str(x), "1100")
-                time.sleep(0.4)
-            time.sleep(4)
-            verify = self.parse_target_temperature(
-                self.dump_ui("vw-climate-verify.xml")
-            )
+            while current != desired:
+                next_value = current + (0.5 if desired > current else -0.5)
+                x, y = self.temperature_value_center(climate, next_value)
+                self.shell("input", "tap", str(x), str(y))
+                climate = self.wait_for_target_temperature(
+                    next_value, "vw-climate-adjust.xml"
+                )
+                current = next_value
+            verify = self.parse_target_temperature(climate)
             if verify != desired:
                 raise RuntimeError("Volkswagen target temperature verification failed")
             return desired
 
     def set_climate_option(self, option: str, desired: bool) -> bool:
-        option_index = {
-            "automatic-window-heating": ("settings", 1),
-            "zone-front-left": ("zones", 0),
-            "zone-front-right": ("zones", 1),
+        option_spec = {
+            "automatic-window-heating": (
+                "settings",
+                ("Automatische Scheibenheizung", "Automatic window heating"),
+            ),
+            "zone-front-left": (
+                "zones",
+                ("Vorne links", "Front left"),
+            ),
+            "zone-front-right": (
+                "zones",
+                ("Vorne rechts", "Front right"),
+            ),
         }
-        if option not in option_index:
+        if option not in option_spec:
             raise KeyError(option)
-        page, index = option_index[option]
+        page, labels = option_spec[option]
         with self.screen_session():
             self.launch()
             climate = self.open_climate()
@@ -1164,25 +1417,26 @@ class VolkswagenReader:
                 climate, ("Einstellungen", "Settings")
             )
             self.shell("input", "tap", str(x), str(y))
-            time.sleep(self.detail_wait)
-            root = self.dump_ui("vw-option-settings.xml")
             if page == "zones":
-                x, y = self.described_node_center_any(root, ("Zonen", "Zones"))
+                _root, (x, y) = self.wait_for_described_node(
+                    "vw-option-settings.xml", ("Zonen", "Zones")
+                )
                 self.shell("input", "tap", str(x), str(y))
-                time.sleep(self.detail_wait)
-                root = self.dump_ui("vw-option-zones.xml")
-            switches = self.checked_nodes(root)
-            if index >= len(switches):
-                raise RuntimeError(f"Volkswagen climate option not found: {option}")
-            current = switches[index].attrib.get("checked") == "true"
+                _root, switch = self.wait_for_checked_option(
+                    "vw-option-zones.xml", labels
+                )
+            else:
+                _root, switch = self.wait_for_checked_option(
+                    "vw-option-settings.xml", labels
+                )
+            current = switch.attrib.get("checked") == "true"
             if current != desired:
-                center = self.node_center(switches[index])
+                center = self.node_center(switch)
                 assert center is not None
                 self.shell("input", "tap", str(center[0]), str(center[1]))
-                time.sleep(5)
-                verify = self.checked_nodes(self.dump_ui("vw-option-verify.xml"))
-                if (verify[index].attrib.get("checked") == "true") != desired:
-                    raise RuntimeError(f"Volkswagen climate option verification failed: {option}")
+                _root, verify = self.wait_for_checked_option(
+                    "vw-option-verify.xml", labels, desired
+                )
             return desired
 
 
@@ -1195,6 +1449,7 @@ class BackgroundCache(Generic[T]):
         empty_factory: Callable[[], T],
         initial_delay: float = 0,
         error_retry_interval: float = 900,
+        state_path: Path | None = None,
     ) -> None:
         self.name = name
         self.loader = loader
@@ -1211,10 +1466,49 @@ class BackgroundCache(Generic[T]):
         self.wakeup = threading.Event()
         self.initial_delay = initial_delay
         self.error_retry_interval = error_retry_interval
+        self.state_path = state_path
+        self._load_persisted()
         threading.Thread(target=self._worker, name=f"{name}-refresh", daemon=True).start()
 
+    def _load_persisted(self) -> None:
+        if self.state_path is None:
+            return
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+            raw_value = payload["value"]
+            value = self.empty_factory()
+            for key in vars(value):
+                if key in raw_value:
+                    setattr(value, key, raw_value[key])
+            last_success_at = str(getattr(value, "lastSuccessfulAt", ""))
+            saved_at = datetime.fromisoformat(last_success_at)
+            age = max(
+                0.0,
+                (datetime.now().astimezone() - saved_at).total_seconds(),
+            )
+            self.value = value
+            self.last_success_at = last_success_at
+            self.last_success_monotonic = time.monotonic() - age
+            setattr(value, "stale", age >= self.interval(value))
+            setattr(value, "error", "")
+            setattr(value, "errorCategory", "")
+        except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
+            return
+
+    def _save_persisted(self, value: T) -> None:
+        if self.state_path is None:
+            return
+        self.state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = self.state_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps({"version": 1, "value": asdict(value)}),
+            encoding="utf-8",
+        )
+        temporary.chmod(0o600)
+        temporary.replace(self.state_path)
+
     def _worker(self) -> None:
-        if self.initial_delay:
+        if self.initial_delay and self.value is None:
             time.sleep(self.initial_delay)
             self.wakeup.clear()
         while True:
@@ -1260,7 +1554,8 @@ class BackgroundCache(Generic[T]):
                 self.last_error = ""
                 self.last_error_category = ""
                 self.next_attempt_monotonic = 0.0
-                return self.value
+            self._save_persisted(value)
+            return value
         except ActionPriority:
             LOG.info("%s refresh yielded to a pending action", self.name)
             self.trigger()
@@ -1312,6 +1607,7 @@ class BackgroundCache(Generic[T]):
             self.last_success_at = now
             self.last_error = ""
             self.last_error_category = ""
+        self._save_persisted(value)
         return value
 
     def patch_value(self, value: T) -> T:
@@ -1338,6 +1634,9 @@ class AppState:
         location_interval = float(os.getenv("LOCATION_INTERVAL_SECONDS", "14400"))
         error_retry_interval = float(
             os.getenv("BACKGROUND_ERROR_RETRY_SECONDS", "900")
+        )
+        cache_dir = Path(
+            os.getenv("CACHE_STATE_DIR", "/var/lib/vw-app-connector/cache")
         )
 
         def priority_pending() -> bool:
@@ -1387,6 +1686,7 @@ class AppState:
                 else idle_interval
             ),
             VehicleData,
+            state_path=cache_dir / "charge.json",
         )
         self.details = BackgroundCache(
             "details",
@@ -1395,6 +1695,7 @@ class AppState:
             DetailData,
             initial_delay=600,
             error_retry_interval=error_retry_interval,
+            state_path=cache_dir / "details.json",
         )
         self.location = BackgroundCache(
             "location",
@@ -1403,6 +1704,7 @@ class AppState:
             LocationData,
             initial_delay=300,
             error_retry_interval=error_retry_interval,
+            state_path=cache_dir / "location.json",
         )
 
     def action(self, name: str, query: dict[str, list[str]]) -> object:
@@ -1511,14 +1813,6 @@ class RequestHandler(BaseHTTPRequestHandler):
             "/details": self.state.details,  # type: ignore[dict-item]
             "/location": self.state.location,  # type: ignore[dict-item]
         }
-        if path == "/refresh":
-            values = {
-                "charge": asdict(self.state.charge.refresh()),
-                "details": asdict(self.state.details.refresh()),
-                "location": asdict(self.state.location.refresh()),
-            }
-            self.send_json(values, 200)
-            return
         if path not in caches:
             self.send_error(404)
             return

@@ -46,6 +46,15 @@ coordinates, screenshots, raw UI dumps, and private network details.
   position-based address fallback. The current view did not expose a parked
   duration label, so `parkedDuration` can remain empty even when address and
   coordinates are functional.
+- Verified again on 2026-06-19 with Volkswagen app `3.63.2`: nearby charging
+  POIs can overlap the map center after Car Locate. The vehicle marker label is
+  rendered inside the Google Maps canvas and has no accessibility bounds. Tap
+  the label position proportionally above the refreshed map center, then verify
+  that the selected detail card contains the vehicle name parsed from the
+  German or English overview before accepting its address or route intent.
+  The complete location flow was live-verified on the production Redmi in both
+  German and English; address, parked duration and navigation coordinates were
+  present in both localizations.
 
 ## Pixel 10 / Android 16
 
@@ -65,11 +74,14 @@ coordinates, screenshots, raw UI dumps, and private network details.
   or the secure lock disabled. If the connector puts the screen to sleep, the
   next wake cannot dismiss the secure keyguard and app operations fail before
   parsing.
-- During the verification, the running connector still reported `ADB_MODE=auto`
-  with Wi-Fi transport because the old Redmi Wi-Fi device was still available.
-  To make the Pixel the production device, update the runtime `ADB_SERIAL` to
-  the Pixel USB serial on the evcc LXC and reload/restart the connector, then
-  verify `/health` reports USB transport.
+- Verified on 2026-06-19 with the Pixel 10 temporarily selected for the
+  compatibility test: `/health` reported USB transport, USB power and an
+  authorized ADB device. The Redmi remains the production phone; do not leave
+  the Pixel configured as the runtime `ADB_SERIAL` after Pixel testing.
+- After the 2026-06-19 Pixel test, the runtime target was restored to the Redmi
+  over USB with `ADB_MODE=auto` and `SLEEP_AFTER_OPERATION=true`. `/health` and
+  `/charge` were healthy, the charge cache was fresh and the display-off
+  cleanup worked.
 - Functional Pixel/USB test on 2026-06-16:
   `/health`, `/charge`, and `/details` worked after adding the UI-dump and
   foreground-detection fallbacks. `/location` reached the Volkswagen app but
@@ -81,9 +93,22 @@ coordinates, screenshots, raw UI dumps, and private network details.
   and face unlock for apps, unlock succeeded and lock restore succeeded. Setting
   target temperature to 21.0 failed verification both before and after disabling
   fingerprint/face unlock for apps; restoring 20.5 succeeded.
+- Pixel/USB follow-up on 2026-06-19: direct charge, details and location reads
+  succeeded. The location result contained an address, parked duration and
+  navigation coordinates. The previous address-parsing failure is resolved by
+  the current location parser.
+- The Pixel temperature selector places its clickable values lower than the old
+  fixed tap coordinates. After a temperature change, a side value can also be
+  wider than the selected center value. Selecting the visible numeric value by
+  its accessibility bounds and parsing the value nearest the horizontal screen
+  center fixed both problems. A live 20.5 -> 21.0 -> 20.5 test succeeded and
+  restored the original temperature.
 
 ## Verification
 
+- The latest production-Redmi verification on 2026-06-19 used Volkswagen app
+  `3.63.2` (`versionCode 41262`). Record app versions as tested baselines, not
+  strict compatibility pins.
 - After wake, overlay, selector, or localization changes, test on a real phone
   before committing.
 - Verify `/health`, the affected cached endpoint, service logs, screen-off
