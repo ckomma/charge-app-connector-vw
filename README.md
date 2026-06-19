@@ -68,6 +68,7 @@ Status follows evcc's vehicle convention:
 - Xiaomi devices: `USB debugging (Security settings)` for simulated taps
 - `adb` available to the service user
 - Python 3.11 or newer
+- Python dependencies from `requirements.txt` when MQTT is enabled
 
 The connector supports German and English Volkswagen app localizations. It
 matches localized visible labels and accessibility descriptions for vehicle,
@@ -115,6 +116,14 @@ Environment variables:
   then switch the display off again
 - `API_KEY`: required for `POST /action/*`
 - `VW_SPIN`: required for lock and unlock actions
+- `MQTT_HOST`: optional broker host; enables read-only MQTT publishing and
+  Home Assistant discovery
+- `MQTT_PORT`: default `1883`
+- `MQTT_USERNAME`, `MQTT_PASSWORD`: optional broker credentials
+- `MQTT_TOPIC_PREFIX`: default `vw_app_connector`
+- `MQTT_DISCOVERY_PREFIX`: default `homeassistant`
+- `MQTT_CLIENT_ID`: default `vw-app-connector`; use a unique value per connector
+- `MQTT_TLS`: default `false`; enable TLS using the system CA store
 
 Due detail and location refreshes take priority over routine charge refreshes.
 This prevents the five-minute charge polling interval from repeatedly delaying
@@ -227,6 +236,29 @@ restart or after disabling wireless debugging. In that case update
 `adbWifiConfigured` and the latest connection error.
 
 ## Home Assistant
+
+### MQTT discovery
+
+MQTT is the simplest Home Assistant setup when HA is already connected to the
+same broker. Install the optional dependency on the connector host:
+
+On Debian or Ubuntu, install `python3-paho-mqtt` from the distribution. On
+other systems, install the dependencies from `requirements.txt` in the Python
+environment used by the service.
+
+Set `MQTT_HOST`, `MQTT_USERNAME` and `MQTT_PASSWORD` in
+`/etc/default/vw-app-connector`, then restart the service. Home Assistant
+automatically creates a `Volkswagen App Connector` device with charge, range,
+charging, climate, lock, vehicle-detail and location entities. No HA YAML is
+required. MQTT publishes retained copies of existing cache updates and never
+causes an additional Volkswagen app operation. REST remains enabled for evcc
+and existing clients.
+
+The integration is intentionally read-only. Vehicle actions continue to use
+the authenticated HTTP endpoints. Location includes address and coordinates;
+do not enable MQTT location publishing on a broker that is not trusted.
+
+### REST package
 
 [`examples/vw_app_connector.yaml`](examples/vw_app_connector.yaml)
 provides an example Home Assistant package with REST sensors, a vehicle

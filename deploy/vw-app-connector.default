@@ -23,3 +23,13 @@ UI_UPDATE_TIMEOUT_SECONDS=8
 SLEEP_AFTER_OPERATION=true
 API_KEY=replace-with-a-random-secret
 VW_SPIN=replace-with-your-volkswagen-spin
+
+# Optional MQTT state publishing and Home Assistant discovery:
+# MQTT_HOST=mqtt.example.internal
+# MQTT_PORT=1883
+# MQTT_USERNAME=replace-with-mqtt-user
+# MQTT_PASSWORD=replace-with-mqtt-password
+# MQTT_TOPIC_PREFIX=vw_app_connector
+# MQTT_DISCOVERY_PREFIX=homeassistant
+# MQTT_CLIENT_ID=vw-app-connector
+# MQTT_TLS=false

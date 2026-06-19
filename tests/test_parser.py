@@ -1,3 +1,4 @@
+import json
 import unittest
 import xml.etree.ElementTree as ET
 from contextlib import nullcontext
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from vw_app_connector import (
+    AppState,
     BackgroundCache,
     ChargingLocationSettingsData,
     ChargingLocationsData,
@@ -17,9 +19,114 @@ from vw_app_connector import (
     VehicleData,
     VolkswagenReader,
 )
+from mqtt_publisher import MqttPublisher
+
+
+class FakeMqttClient:
+    def __init__(self) -> None:
+        self.published = []
+        self.username = None
+        self.password = None
+
+    def username_pw_set(self, username, password):
+        self.username = username
+        self.password = password
+
+    def tls_set(self):
+        self.tls = True
+
+    def will_set(self, *args, **kwargs):
+        self.will = (args, kwargs)
+
+    def reconnect_delay_set(self, **kwargs):
+        self.reconnect = kwargs
+
+    def connect_async(self, *args, **kwargs):
+        self.connection = (args, kwargs)
+
+    def loop_start(self):
+        self.loop_started = True
+
+    def publish(self, *args, **kwargs):
+        self.published.append((args, kwargs))
+
+    def disconnect(self):
+        pass
+
+    def loop_stop(self):
+        pass
+
+
+class FakeMqttModule:
+    def __init__(self) -> None:
+        self.client = FakeMqttClient()
+
+    def Client(self, **kwargs):
+        self.client.client_options = kwargs
+        return self.client
 
 
 class ParserTests(unittest.TestCase):
+    def test_mqtt_discovery_and_retained_state_are_published_on_connect(self):
+        mqtt = FakeMqttModule()
+        environment = {
+            "MQTT_HOST": "mqtt.example",
+            "MQTT_USERNAME": "connector",
+            "MQTT_PASSWORD": "secret",
+        }
+        state = VehicleData(status="B", soc=55, locked=True)
+        with patch.dict("os.environ", environment, clear=True):
+            publisher = MqttPublisher(lambda: {"charge": state}, mqtt)
+            publisher.start()
+            publisher._on_connect(mqtt.client, None, None, 0)
+
+        topics = [call[0][0] for call in mqtt.client.published]
+        self.assertIn("vw_app_connector/charge", topics)
+        self.assertIn("vw_app_connector/availability", topics)
+        self.assertIn(
+            "homeassistant/sensor/vw-app-connector/soc/config", topics
+        )
+        self.assertIn(
+            "homeassistant/device_tracker/vw-app-connector/location/config",
+            topics,
+        )
+        self.assertIn(
+            "homeassistant/sensor/vw-app-connector/connector_status/config",
+            topics,
+        )
+        state_call = next(
+            call for call in mqtt.client.published
+            if call[0][0] == "vw_app_connector/charge"
+        )
+        self.assertEqual(json.loads(state_call[0][1])["soc"], 55)
+        self.assertTrue(state_call[1]["retain"])
+        self.assertEqual(mqtt.client.username, "connector")
+        self.assertEqual(mqtt.client.password, "secret")
+
+    def test_mqtt_is_disabled_without_host(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertIsNone(MqttPublisher.from_environment(lambda: {}))
+
+    def test_background_cache_notifies_after_successful_update(self):
+        updates = []
+        with patch("threading.Thread.start"):
+            cache = BackgroundCache(
+                "charge",
+                lambda: VehicleData(status="B", soc=60),
+                lambda _: 60,
+                VehicleData,
+                on_update=lambda name, value: updates.append((name, value.soc)),
+            )
+        cache.refresh()
+        self.assertEqual(updates, [("charge", 60)])
+
+    def test_mqtt_failure_does_not_escape_cache_update(self):
+        state = object.__new__(AppState)
+        state.mqtt = Mock()
+        state.mqtt.publish_state.side_effect = RuntimeError("broker unavailable")
+        with self.assertLogs("vw-app-connector", level="ERROR"):
+            state._cache_updated("charge", VehicleData(status="B"))
+
     def test_charging_setting_values_are_sorted_and_localization_independent(self):
         root = ET.fromstring(
             """<hierarchy>

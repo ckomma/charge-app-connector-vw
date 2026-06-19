@@ -7,5 +7,10 @@ screenshots.
 Keep `/etc/default/vw-app-connector` readable only by root. Use the committed
 deployment file only as a template and replace all placeholder values locally.
 
+MQTT state can include vehicle location and lock status. Use broker ACLs so the
+configured connector account can publish only below its state topic and Home
+Assistant discovery topic. Protect remote broker connections with TLS. MQTT
+credentials belong only in the root-readable environment file.
+
 If sensitive data is committed, rotate the affected credential and remove it
 from the complete Git history before publishing or sharing the repository.

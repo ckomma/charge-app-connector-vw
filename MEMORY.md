@@ -38,6 +38,19 @@ coordinates, screenshots, raw UI dumps, and private network details.
   background budget every five minutes.
 - USB remains the preferred transport in `ADB_MODE=auto`; configured ADB Wi-Fi
   is only the fallback while USB is unavailable.
+
+## MQTT And Home Assistant
+
+- MQTT is an optional, read-only output enabled by `MQTT_HOST`. REST remains
+  available and authoritative for vehicle actions and evcc.
+- Publish retained `charge`, `details`, `location`, `health` and `availability`
+  topics only from existing cache updates or connection startup. MQTT must not
+  trigger a Volkswagen app refresh or consume a usage-budget unit.
+- Home Assistant discovery creates one connector device with state, phone,
+  usage and GPS entities. Location topics contain sensitive address and
+  coordinate data and require a trusted broker.
+- Broker or health-publication failures must be logged without changing the
+  result of a successful cache refresh.
 - Location marker details can expose the address as a separate TextView instead
   of a single combined string containing `Geparkt seit` / `Parked since`.
   Verified on 2026-06-17 with the production Redmi connected to the evcc LXC:

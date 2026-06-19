@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Callable, Generic, TypeVar
 from urllib.parse import parse_qs, urlparse
 
+from mqtt_publisher import MqttPublisher
+
 
 LOG = logging.getLogger("vw-app-connector")
 T = TypeVar("T")
@@ -1963,6 +1965,7 @@ class BackgroundCache(Generic[T]):
         initial_delay: float = 0,
         error_retry_interval: float = 900,
         state_path: Path | None = None,
+        on_update: Callable[[str, T], None] | None = None,
     ) -> None:
         self.name = name
         self.loader = loader
@@ -1980,6 +1983,7 @@ class BackgroundCache(Generic[T]):
         self.initial_delay = initial_delay
         self.error_retry_interval = error_retry_interval
         self.state_path = state_path
+        self.on_update = on_update
         self._load_persisted()
         threading.Thread(target=self._worker, name=f"{name}-refresh", daemon=True).start()
 
@@ -2068,6 +2072,8 @@ class BackgroundCache(Generic[T]):
                 self.last_error_category = ""
                 self.next_attempt_monotonic = 0.0
             self._save_persisted(value)
+            if self.on_update is not None:
+                self.on_update(self.name, value)
             return value
         except ActionPriority:
             LOG.info("%s refresh yielded to a pending action", self.name)
@@ -2121,6 +2127,8 @@ class BackgroundCache(Generic[T]):
             self.last_error = ""
             self.last_error_category = ""
         self._save_persisted(value)
+        if self.on_update is not None:
+            self.on_update(self.name, value)
         return value
 
     def patch_value(self, value: T) -> T:
@@ -2137,6 +2145,7 @@ class BackgroundCache(Generic[T]):
 
 class AppState:
     def __init__(self) -> None:
+        self.mqtt: MqttPublisher | None = None
         self.reader = VolkswagenReader()
         self.usage = UsageLimiter()
         self.priority_lock = threading.Lock()
@@ -2200,6 +2209,7 @@ class AppState:
             ),
             VehicleData,
             state_path=cache_dir / "charge.json",
+            on_update=self._cache_updated,
         )
         self.details = BackgroundCache(
             "details",
@@ -2209,6 +2219,7 @@ class AppState:
             initial_delay=600,
             error_retry_interval=error_retry_interval,
             state_path=cache_dir / "details.json",
+            on_update=self._cache_updated,
         )
         self.location = BackgroundCache(
             "location",
@@ -2218,7 +2229,30 @@ class AppState:
             initial_delay=300,
             error_retry_interval=error_retry_interval,
             state_path=cache_dir / "location.json",
+            on_update=self._cache_updated,
         )
+
+        self.mqtt = MqttPublisher.from_environment(self.mqtt_state)
+        if self.mqtt is not None:
+            self.mqtt.start()
+
+    def _cache_updated(self, name: str, value: object) -> None:
+        if self.mqtt is None:
+            return
+        try:
+            self.mqtt.publish_state(name, value)
+            if name == "charge":
+                self.mqtt.publish_state("health", self.health())
+        except Exception:
+            LOG.exception("MQTT update failed for %s", name)
+
+    def mqtt_state(self) -> dict[str, object]:
+        return {
+            "charge": self.charge.value,
+            "details": self.details.value,
+            "location": self.location.value,
+            "health": self.health(),
+        }
 
     def action(self, name: str, query: dict[str, list[str]]) -> object:
         self.reader.action_pending.set()
