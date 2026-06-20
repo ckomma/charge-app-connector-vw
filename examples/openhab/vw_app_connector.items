@@ -1,0 +1,3 @@
+Switch Volkswagen_Charging_Command "Volkswagen charging command"
+Switch Volkswagen_Climate_Command "Volkswagen climate command"
+Number:Temperature Volkswagen_Target_Temperature_Command "Volkswagen target temperature [%.1f %unit%]"

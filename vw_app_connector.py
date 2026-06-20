@@ -2545,8 +2545,11 @@ class AppState:
         if name == "charging/target-soc":
             settings = self.reader.set_target_soc(int(query["value"][0]))
             with self.charge.lock:
-                if self.charge.value is not None:
-                    self.charge.value.targetSoc = settings.targetSoc
+                current = self.charge.value
+            if current is not None:
+                self.charge.patch_value(
+                    replace(current, targetSoc=settings.targetSoc)
+                )
             return settings
         if name == "charging/mode":
             self.reader.set_charging_mode(query["value"][0])

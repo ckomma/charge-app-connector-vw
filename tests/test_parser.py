@@ -268,6 +268,18 @@ class ParserTests(unittest.TestCase):
             "homeassistant/binary_sensor/vw-app-connector/action_available/config",
             topics,
         )
+        self.assertIn(
+            "homeassistant/binary_sensor/vw-app-connector/automatic_window_heating/config",
+            topics,
+        )
+        self.assertIn(
+            "homeassistant/binary_sensor/vw-app-connector/climate_zone_front_left/config",
+            topics,
+        )
+        self.assertIn(
+            "homeassistant/binary_sensor/vw-app-connector/climate_zone_front_right/config",
+            topics,
+        )
         state_call = next(
             call for call in mqtt.client.published
             if call[0][0] == "vw_app_connector/charge"
@@ -361,6 +373,25 @@ class ParserTests(unittest.TestCase):
             reader.read_charging_settings(root),
             ChargingSettingsData(targetSoc=80, batteryCare=True, reducedAc=False),
         )
+
+    def test_target_soc_action_patches_charge_cache(self):
+        state = object.__new__(AppState)
+        state.reader = Mock()
+        state.reader.set_target_soc.return_value = ChargingSettingsData(
+            targetSoc=90
+        )
+        state.charge = SimpleNamespace(
+            lock=threading.Lock(),
+            value=VehicleData(status="C", targetSoc=100),
+            patch_value=Mock(),
+        )
+
+        result = state._action("charging/target-soc", {"value": ["90"]})
+
+        self.assertEqual(result.targetSoc, 90)
+        patched = state.charge.patch_value.call_args.args[0]
+        self.assertEqual(patched.status, "C")
+        self.assertEqual(patched.targetSoc, 90)
 
     def test_german_charging_location_settings(self):
         root = ET.fromstring(

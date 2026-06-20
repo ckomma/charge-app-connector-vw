@@ -314,6 +314,18 @@ connector performs background refreshes according to its own rate limits;
 reading its cached HTTP endpoints from Home Assistant does not trigger one
 Volkswagen app operation per request.
 
+## openHAB
+
+openHAB 5 can consume the existing Home Assistant MQTT discovery messages.
+Install the MQTT and Home Assistant bindings, connect openHAB to the same
+broker and approve the discovered `Volkswagen App Connector` Thing. The Thing
+is read-only and does not cause additional Volkswagen app operations.
+
+[`examples/openhab/README.md`](examples/openhab/README.md) documents the setup
+and provides optional Rules DSL examples for authenticated charging and climate
+actions. Lock and unlock are intentionally omitted because their app gesture
+must be reverified before unattended use.
+
 ## evcc
 
 [`examples/evcc.yaml`](examples/evcc.yaml) provides a complete custom vehicle

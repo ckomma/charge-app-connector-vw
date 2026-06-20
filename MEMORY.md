@@ -119,6 +119,27 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## Verification
 
+- openHAB 5.1.4 end-to-end verification on 2026-06-20/21 used the separate
+  Home Assistant binding with the existing MQTT broker. The discovered
+  `Volkswagen App Connector` Thing was online and read-only. After adding
+  discovery entries for automatic window heating and the two front climate
+  zones, the live Thing updated automatically from 31 to 34 channels.
+- A live target-SoC action verified the cache publication fix: changing
+  100 -> 90 -> 100 percent updated the linked openHAB
+  `Number:Dimensionless` Item immediately from `1` to `0.9` and back to `1`.
+  This factor representation is openHAB's unit conversion for percent values,
+  not a connector scaling error.
+- The same openHAB test exercised charging stop/start, climate start/stop,
+  target temperature, automatic window heating, both front climate zones,
+  target SoC, Battery Care and reduced AC current. All successful changes were
+  restored to their recorded initial values. Temporary openHAB Items and links
+  were removed afterward.
+- Lock succeeded during the live test, but the connector's unlock gesture no
+  longer opened the S-PIN dialog on the production Redmi. Manual app unlock
+  auto-relocked when no door was opened; a later physical unlock was observed
+  correctly. Do not expose unattended lock/unlock controls to openHAB until the
+  current Volkswagen app gesture has been reverified and fixed.
+
 - App-version quarantine and asynchronous actions were deployed and verified on
   2026-06-20. A temporary version mismatch kept `/health` and `/charge` at HTTP
   200, reported `status: degraded` and `actionAvailable: false`, rejected a

@@ -1,0 +1,57 @@
+import java.util.Map
+
+val String volkswagenConnectorUrl = "http://CONNECTOR_HOST:9920"
+val String volkswagenConnectorApiKey = System.getenv("VW_APP_CONNECTOR_API_KEY")
+val Map<String, String> volkswagenConnectorHeaders = newHashMap(
+    "X-API-Key" -> volkswagenConnectorApiKey
+)
+
+rule "Volkswagen charging command"
+when
+    Item Volkswagen_Charging_Command received command
+then
+    val path = if (receivedCommand == ON) {
+        "/action/charging/start"
+    } else {
+        "/action/charging/stop"
+    }
+    sendHttpPostRequest(
+        volkswagenConnectorUrl + path,
+        "application/json",
+        "",
+        volkswagenConnectorHeaders,
+        180000
+    )
+end
+
+rule "Volkswagen climate command"
+when
+    Item Volkswagen_Climate_Command received command
+then
+    val path = if (receivedCommand == ON) {
+        "/action/climate/start"
+    } else {
+        "/action/climate/stop"
+    }
+    sendHttpPostRequest(
+        volkswagenConnectorUrl + path,
+        "application/json",
+        "",
+        volkswagenConnectorHeaders,
+        180000
+    )
+end
+
+rule "Volkswagen target temperature command"
+when
+    Item Volkswagen_Target_Temperature_Command received command
+then
+    val value = (receivedCommand as Number).doubleValue
+    sendHttpPostRequest(
+        volkswagenConnectorUrl + "/action/climate/temperature?value=" + value,
+        "application/json",
+        "",
+        volkswagenConnectorHeaders,
+        180000
+    )
+end
