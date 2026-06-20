@@ -77,6 +77,10 @@ rest:
           - adbWifiConfigured
           - adbLastConnectError
           - appVersion
+          - verifiedAppVersion
+          - appVersionVerified
+          - actionAvailable
+          - actionBlockedReason
           - phoneBatteryLevel
           - phoneBatteryTemperatureC
           - phoneBatteryStatus

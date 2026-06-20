@@ -110,6 +110,7 @@ class MqttPublisher:
             ("binary_sensor", "climater", "Climate", "charge", "climater", None, "running", None, None),
             ("binary_sensor", "locked", "Locked", "charge", "locked", None, "lock", None, None),
             ("binary_sensor", "charge_stale", "Charge data stale", "charge", "stale", None, "problem", None, None),
+            ("binary_sensor", "action_available", "Vehicle actions available", "health", "actionAvailable", None, None, None, "mdi:shield-check-outline"),
             ("sensor", "target_temperature", "Target temperature", "details", "targetTemperatureC", "°C", "temperature", "measurement", None),
             ("sensor", "odometer", "Odometer", "details", "odometerKm", "km", "distance", "total_increasing", None),
             ("sensor", "service_days", "Service due", "details", "serviceDays", "d", "duration", "measurement", None),

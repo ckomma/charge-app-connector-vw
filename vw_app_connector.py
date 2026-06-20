@@ -10,13 +10,15 @@ import hmac
 import json
 import logging
 import os
+import queue
 import re
 import subprocess
 import threading
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,6 +37,18 @@ class ActionPriority(RuntimeError):
 
 
 class UsageLimit(RuntimeError):
+    pass
+
+
+class ActionQuarantined(RuntimeError):
+    def __init__(self, reason: str, app_version: str, verified_version: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.app_version = app_version
+        self.verified_version = verified_version
+
+
+class IdempotencyConflict(RuntimeError):
     pass
 
 
@@ -258,6 +272,10 @@ class HealthData:
     adbWifiConfigured: bool = False
     adbLastConnectError: str = ""
     appVersion: str = ""
+    verifiedAppVersion: str = ""
+    appVersionVerified: bool = True
+    actionAvailable: bool = True
+    actionBlockedReason: str = ""
     phoneBatteryLevel: int | None = None
     phoneBatteryTemperatureC: float | None = None
     phoneBatteryStatus: str = ""
@@ -2143,11 +2161,148 @@ class BackgroundCache(Generic[T]):
         return value
 
 
+class ActionJobManager:
+    def __init__(
+        self,
+        executor: Callable[[str, dict[str, list[str]]], object],
+        max_history: int = 100,
+    ) -> None:
+        self.executor = executor
+        self.max_history = max_history
+        self.jobs: dict[str, dict[str, object]] = {}
+        self.order: list[str] = []
+        self.idempotency: dict[str, tuple[str, str]] = {}
+        self.lock = threading.Lock()
+        self.pending: queue.Queue[tuple[str, str, dict[str, list[str]]]] = queue.Queue()
+        threading.Thread(
+            target=self._worker,
+            name="action-job-worker",
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def now() -> str:
+        return datetime.now().astimezone().isoformat(timespec="seconds")
+
+    def submit(
+        self,
+        action: str,
+        query: dict[str, list[str]],
+        idempotency_key: str = "",
+    ) -> dict[str, object]:
+        signature = json.dumps(
+            [action, {key: list(values) for key, values in sorted(query.items())}],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        with self.lock:
+            existing = self.idempotency.get(idempotency_key) if idempotency_key else None
+            if existing is not None:
+                job_id, existing_signature = existing
+                if signature != existing_signature:
+                    raise IdempotencyConflict(
+                        "Idempotency-Key was already used for another action"
+                    )
+                job = self.jobs.get(job_id)
+                if job is not None:
+                    return json.loads(json.dumps(job, ensure_ascii=False))
+        job_id = uuid.uuid4().hex
+        job: dict[str, object] = {
+            "jobId": job_id,
+            "action": action,
+            "state": "queued",
+            "createdAt": self.now(),
+            "startedAt": "",
+            "completedAt": "",
+            "result": None,
+            "error": "",
+            "errorCategory": "",
+        }
+        with self.lock:
+            self.jobs[job_id] = job
+            self.order.append(job_id)
+            if idempotency_key:
+                self.idempotency[idempotency_key] = (job_id, signature)
+            while len(self.order) > self.max_history:
+                expired = next(
+                    (
+                        candidate
+                        for candidate in self.order
+                        if self.jobs[candidate]["state"] in ("succeeded", "failed")
+                    ),
+                    None,
+                )
+                if expired is None:
+                    break
+                self.order.remove(expired)
+                self.jobs.pop(expired, None)
+                for key, value in list(self.idempotency.items()):
+                    if value[0] == expired:
+                        self.idempotency.pop(key, None)
+            submitted = json.loads(json.dumps(job, ensure_ascii=False))
+        copied_query = {key: list(values) for key, values in query.items()}
+        self.pending.put((job_id, action, copied_query))
+        return submitted
+
+    def snapshot(self, job_id: str) -> dict[str, object] | None:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return None
+            return json.loads(json.dumps(job, ensure_ascii=False))
+
+    def _update(self, job_id: str, **values: object) -> None:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is not None:
+                job.update(values)
+
+    def _worker(self) -> None:
+        while True:
+            job_id, action, query = self.pending.get()
+            self._update(job_id, state="running", startedAt=self.now())
+            try:
+                value = self.executor(action, query)
+                result = asdict(value) if is_dataclass(value) else value
+                self._update(
+                    job_id,
+                    state="succeeded",
+                    completedAt=self.now(),
+                    result=result,
+                )
+            except Exception as exc:
+                category = (
+                    "APP_VERSION"
+                    if isinstance(exc, ActionQuarantined)
+                    else "RATE_LIMIT"
+                    if isinstance(exc, UsageLimit)
+                    else VolkswagenReader.error_category(exc)
+                )
+                self._update(
+                    job_id,
+                    state="failed",
+                    completedAt=self.now(),
+                    error=str(exc),
+                    errorCategory=category,
+                )
+            finally:
+                self.pending.task_done()
+
+
 class AppState:
+    READ_ONLY_ACTIONS = {
+        "charging/settings",
+        "charging-location/settings",
+        "charging-locations",
+    }
+
     def __init__(self) -> None:
         self.mqtt: MqttPublisher | None = None
         self.reader = VolkswagenReader()
         self.usage = UsageLimiter()
+        self.verified_app_version = os.getenv(
+            "VERIFIED_APP_VERSION", "3.63.2"
+        ).strip()
         self.priority_lock = threading.Lock()
         self.priority_waiters = 0
         charging_interval = float(os.getenv("CHARGING_INTERVAL_SECONDS", "300"))
@@ -2235,6 +2390,7 @@ class AppState:
         self.mqtt = MqttPublisher.from_environment(self.mqtt_state)
         if self.mqtt is not None:
             self.mqtt.start()
+        self.action_jobs = ActionJobManager(self.action)
 
     def _cache_updated(self, name: str, value: object) -> None:
         if self.mqtt is None:
@@ -2254,7 +2410,83 @@ class AppState:
             "health": self.health(),
         }
 
+    @staticmethod
+    def version_policy(
+        app_version: str, verified_app_version: str
+    ) -> tuple[bool, str]:
+        if not verified_app_version:
+            return True, ""
+        if not app_version:
+            return False, "APP_VERSION_UNKNOWN"
+        if app_version != verified_app_version:
+            return False, "UNVERIFIED_APP_VERSION"
+        return True, ""
+
+    @classmethod
+    def is_write_action(cls, name: str) -> bool:
+        return name not in cls.READ_ONLY_ACTIONS
+
+    @staticmethod
+    def supports_action(name: str) -> bool:
+        exact = {
+            "lock",
+            "unlock",
+            "charging/start",
+            "charging/stop",
+            "charging/target-soc",
+            "charging/mode",
+            "charging/settings",
+            "charging-location/settings",
+            "charging-location/direct-soc",
+            "charging-location/target-soc",
+            "charging-locations",
+            "climate/start",
+            "climate/stop",
+            "climate/temperature",
+        }
+        return (
+            name in exact
+            or name.startswith("climate/option/")
+            or name.startswith("charging/option/")
+            or name.startswith("charging-location/option/")
+        )
+
+    def ensure_action_allowed(self, name: str, app_version: str | None = None) -> None:
+        if not self.is_write_action(name):
+            return
+        actual = (
+            app_version
+            if app_version is not None
+            else self.reader.phone_health().appVersion
+        )
+        available, reason = self.version_policy(
+            actual, self.verified_app_version
+        )
+        if not available:
+            raise ActionQuarantined(
+                reason,
+                actual,
+                self.verified_app_version,
+            )
+
+    def submit_action(
+        self,
+        name: str,
+        query: dict[str, list[str]],
+        idempotency_key: str = "",
+    ) -> dict[str, object]:
+        if not self.supports_action(name):
+            raise KeyError(name)
+        self.ensure_action_allowed(name)
+        return self.action_jobs.submit(name, query, idempotency_key)
+
+    def action_job(self, job_id: str) -> dict[str, object] | None:
+        return self.action_jobs.snapshot(job_id)
+
     def action(self, name: str, query: dict[str, list[str]]) -> object:
+        if not self.supports_action(name):
+            raise KeyError(name)
+        self.ensure_action_allowed(name)
         self.reader.action_pending.set()
         try:
             self.usage.acquire_action()
@@ -2344,6 +2576,11 @@ class AppState:
 
     def health(self) -> HealthData:
         value = self.reader.phone_health()
+        value.verifiedAppVersion = self.verified_app_version
+        value.appVersionVerified, value.actionBlockedReason = self.version_policy(
+            value.appVersion, self.verified_app_version
+        )
+        value.actionAvailable = value.appVersionVerified
         value.chargeLastSuccessfulAt = self.charge.last_success_at
         value.chargeAgeSeconds = (
             round(self.charge.age()) if self.charge.last_success_at else None
@@ -2365,7 +2602,11 @@ class AppState:
         value.usageCooldownSeconds = int(usage["cooldownSeconds"])
         if self.charge.value is None or value.adbState != "device":
             value.status = "error"
-        elif self.charge.last_error or value.usageCooldownSeconds:
+        elif (
+            self.charge.last_error
+            or value.usageCooldownSeconds
+            or not value.actionAvailable
+        ):
             value.status = "degraded"
         return value
 
@@ -2376,6 +2617,20 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        job_prefix = "/actions/"
+        if path.startswith(job_prefix):
+            supplied_key = self.headers.get("X-API-Key", "")
+            if not self.api_key or not hmac.compare_digest(
+                supplied_key, self.api_key
+            ):
+                self.send_error(401)
+                return
+            job = self.state.action_job(path.removeprefix(job_prefix))
+            if job is None:
+                self.send_error(404)
+                return
+            self.send_json(job, 200)
+            return
         if path == "/health":
             value = self.state.health()
             self.send_json(asdict(value), 200 if value.status != "error" else 503)
@@ -2405,9 +2660,54 @@ class RequestHandler(BaseHTTPRequestHandler):
         try:
             action = parsed.path[len(prefix):]
             LOG.info("Action requested: %s", action)
-            value = self.state.action(action, parse_qs(parsed.query))
+            query = parse_qs(parsed.query)
+            prefer = self.headers.get("Prefer", "")
+            respond_async = any(
+                token.strip().casefold() == "respond-async"
+                for token in prefer.split(",")
+            )
+            if respond_async:
+                job = self.state.submit_action(
+                    action,
+                    query,
+                    self.headers.get("Idempotency-Key", "").strip(),
+                )
+                job_id = str(job["jobId"])
+                status_url = f"/actions/{job_id}"
+                self.send_json(
+                    {
+                        "jobId": job_id,
+                        "state": job["state"],
+                        "statusUrl": status_url,
+                    },
+                    202,
+                    {"Location": status_url},
+                )
+                return
+            value = self.state.action(action, query)
         except KeyError:
             self.send_error(404)
+            return
+        except ActionQuarantined as exc:
+            self.send_json(
+                {
+                    "error": "Vehicle actions are quarantined for this app version",
+                    "errorCategory": "APP_VERSION",
+                    "reason": exc.reason,
+                    "appVersion": exc.app_version,
+                    "verifiedAppVersion": exc.verified_version,
+                },
+                409,
+            )
+            return
+        except IdempotencyConflict as exc:
+            self.send_json(
+                {
+                    "error": str(exc),
+                    "errorCategory": "IDEMPOTENCY",
+                },
+                409,
+            )
             return
         except UsageLimit as exc:
             self.send_json({"error": str(exc), "errorCategory": "RATE_LIMIT"}, 429)
@@ -2417,11 +2717,18 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         self.send_json(asdict(value), 200)
 
-    def send_json(self, value: object, status: int) -> None:
+    def send_json(
+        self,
+        value: object,
+        status: int,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         body = json.dumps(value, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for name, header_value in (headers or {}).items():
+            self.send_header(name, header_value)
         self.end_headers()
         try:
             self.wfile.write(body)

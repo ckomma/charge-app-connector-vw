@@ -1,4 +1,7 @@
+import http.client
 import json
+import threading
+import time
 import unittest
 import xml.etree.ElementTree as ET
 from contextlib import nullcontext
@@ -8,17 +11,23 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from vw_app_connector import (
+    ActionJobManager,
+    ActionQuarantined,
     AppState,
     BackgroundCache,
     ChargingLocationSettingsData,
     ChargingLocationsData,
     ChargingSettingsData,
+    HealthData,
+    IdempotencyConflict,
     LocationData,
+    RequestHandler,
     UsageLimit,
     UsageLimiter,
     VehicleData,
     VolkswagenReader,
 )
+from http.server import ThreadingHTTPServer
 from mqtt_publisher import MqttPublisher
 
 
@@ -67,6 +76,167 @@ class FakeMqttModule:
 
 
 class ParserTests(unittest.TestCase):
+    def test_app_version_policy(self):
+        self.assertEqual(AppState.version_policy("3.63.2", "3.63.2"), (True, ""))
+        self.assertEqual(
+            AppState.version_policy("3.64.0", "3.63.2"),
+            (False, "UNVERIFIED_APP_VERSION"),
+        )
+        self.assertEqual(
+            AppState.version_policy("", "3.63.2"),
+            (False, "APP_VERSION_UNKNOWN"),
+        )
+        self.assertEqual(AppState.version_policy("3.64.0", ""), (True, ""))
+
+    def test_quarantine_skips_read_only_actions(self):
+        state = object.__new__(AppState)
+        state.verified_app_version = "3.63.2"
+        state.reader = Mock()
+        state.ensure_action_allowed("charging/settings")
+        state.reader.phone_health.assert_not_called()
+
+        with self.assertRaises(ActionQuarantined):
+            state.ensure_action_allowed("charging/start", "3.64.0")
+
+    def test_health_reports_quarantine_as_degraded(self):
+        state = object.__new__(AppState)
+        state.verified_app_version = "3.63.2"
+        state.reader = Mock()
+        state.reader.phone_health.return_value = HealthData(
+            adbState="device", appVersion="3.64.0"
+        )
+        state.charge = SimpleNamespace(
+            last_success_at="now",
+            refreshing=False,
+            value=VehicleData(status="B"),
+            last_error="",
+            age=lambda: 1,
+        )
+        state.details = SimpleNamespace(last_success_at="", age=lambda: 0)
+        state.location = SimpleNamespace(last_success_at="", age=lambda: 0)
+        state.usage = Mock()
+        state.usage.snapshot.return_value = {
+            "backgroundUsed": 0,
+            "backgroundLimit": 180,
+            "actionsUsed": 0,
+            "actionsLimit": 20,
+            "cooldownSeconds": 0,
+        }
+        health = state.health()
+        self.assertEqual(health.status, "degraded")
+        self.assertFalse(health.actionAvailable)
+        self.assertEqual(health.actionBlockedReason, "UNVERIFIED_APP_VERSION")
+
+    def test_action_job_lifecycle(self):
+        completed = threading.Event()
+
+        def execute(action, query):
+            completed.set()
+            return ChargingSettingsData(targetSoc=int(query["value"][0]))
+
+        jobs = ActionJobManager(execute)
+        submitted = jobs.submit("charging/target-soc", {"value": ["80"]})
+        self.assertEqual(submitted["state"], "queued")
+        self.assertTrue(completed.wait(1))
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            result = jobs.snapshot(str(submitted["jobId"]))
+            if result and result["state"] == "succeeded":
+                break
+            time.sleep(0.01)
+        assert result is not None
+        self.assertEqual(result["state"], "succeeded")
+        self.assertEqual(result["result"]["targetSoc"], 80)
+
+    def test_action_jobs_are_idempotent(self):
+        release = threading.Event()
+        calls = []
+
+        def execute(action, query):
+            calls.append((action, query))
+            release.wait(1)
+            return ChargingSettingsData(targetSoc=80)
+
+        jobs = ActionJobManager(execute)
+        first = jobs.submit(
+            "charging/target-soc", {"value": ["80"]}, "request-1"
+        )
+        duplicate = jobs.submit(
+            "charging/target-soc", {"value": ["80"]}, "request-1"
+        )
+        self.assertEqual(first["jobId"], duplicate["jobId"])
+        with self.assertRaises(IdempotencyConflict):
+            jobs.submit("charging/target-soc", {"value": ["90"]}, "request-1")
+        release.set()
+
+    def test_http_action_contracts_remain_backward_compatible(self):
+        state = Mock()
+        state.action.return_value = ChargingSettingsData(targetSoc=80)
+        state.submit_action.return_value = {"jobId": "job-1", "state": "queued"}
+        state.action_job.return_value = {
+            "jobId": "job-1",
+            "state": "succeeded",
+            "result": {"targetSoc": 80},
+        }
+        RequestHandler.state = state
+        RequestHandler.api_key = "test-key"
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RequestHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(*server.server_address)
+            headers = {"X-API-Key": "test-key"}
+            connection.request(
+                "POST", "/action/charging/target-soc?value=80", headers=headers
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read())["targetSoc"], 80)
+
+            async_headers = {**headers, "Prefer": "respond-async"}
+            connection.request(
+                "POST",
+                "/action/charging/target-soc?value=80",
+                headers=async_headers,
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 202)
+            self.assertEqual(response.getheader("Location"), "/actions/job-1")
+            self.assertEqual(json.loads(response.read())["state"], "queued")
+
+            connection.request("GET", "/actions/job-1", headers=headers)
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read())["state"], "succeeded")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_http_quarantine_returns_409(self):
+        state = Mock()
+        state.action.side_effect = ActionQuarantined(
+            "UNVERIFIED_APP_VERSION", "3.64.0", "3.63.2"
+        )
+        RequestHandler.state = state
+        RequestHandler.api_key = "test-key"
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RequestHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(*server.server_address)
+            connection.request(
+                "POST",
+                "/action/charging/start",
+                headers={"X-API-Key": "test-key"},
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 409)
+            payload = json.loads(response.read())
+            self.assertEqual(payload["reason"], "UNVERIFIED_APP_VERSION")
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_mqtt_discovery_and_retained_state_are_published_on_connect(self):
         mqtt = FakeMqttModule()
         environment = {
@@ -92,6 +262,10 @@ class ParserTests(unittest.TestCase):
         )
         self.assertIn(
             "homeassistant/sensor/vw-app-connector/connector_status/config",
+            topics,
+        )
+        self.assertIn(
+            "homeassistant/binary_sensor/vw-app-connector/action_available/config",
             topics,
         )
         state_call = next(
@@ -1085,3 +1259,5 @@ class ParserTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+    HealthData,
+    RequestHandler,

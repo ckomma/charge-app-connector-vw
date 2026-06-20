@@ -108,6 +108,8 @@ Environment variables:
   successful endpoint values so restarts can serve data during cache refresh
 - `DIAGNOSTICS_DIR`: default `/var/lib/vw-app-connector/diagnostics`
 - `APP_PACKAGE`: default `com.volkswagen.weconnect`
+- `VERIFIED_APP_VERSION`: default `3.63.2`; write actions are quarantined when
+  the installed Volkswagen app version differs
 - `APP_START_WAIT_SECONDS`: default `8`
 - `DETAIL_WAIT_SECONDS`: default `3`
 - `UI_UPDATE_TIMEOUT_SECONDS`: default `8`; maximum wait for an expected UI
@@ -165,6 +167,34 @@ On the live-tested Volkswagen app `3.63.2`, the charging-mode row is readable
 but exposes no clickable accessibility element. The connector therefore fails
 that action safely instead of using an unverified fixed coordinate. Charging
 locations can only be controlled when the app account has a location configured.
+
+### App version quarantine
+
+Read endpoints and MQTT remain available after a Volkswagen app update. If the
+installed version differs from `VERIFIED_APP_VERSION`, `/health` stays HTTP 200
+with `status: degraded`, `actionAvailable: false` and
+`actionBlockedReason: UNVERIFIED_APP_VERSION`. Read-only settings actions remain
+available, while write actions return HTTP 409 before consuming action budget.
+Set `VERIFIED_APP_VERSION` to an empty value to disable this guard deliberately.
+
+### Optional asynchronous actions
+
+Existing calls remain synchronous and return the verified result with HTTP 200.
+Clients can opt into a serialized background job using:
+
+```http
+POST /action/charging/target-soc?value=80
+Prefer: respond-async
+Idempotency-Key: unique-request-id
+X-API-Key: replace-with-the-connector-api-key
+```
+
+The response is HTTP 202 with a job ID and `Location` header. Read the result
+from authenticated `GET /actions/JOB_ID`. States are `queued`, `running`,
+`succeeded` and `failed`. Reusing an `Idempotency-Key` with the same request
+returns the original job; using it for another request returns HTTP 409. Job
+history is memory-only, limited to 100 completed entries and resets when the
+service restarts.
 
 Send the API key in the `X-API-Key` header. Keep the environment file readable
 only by root because it contains the Volkswagen S-PIN.

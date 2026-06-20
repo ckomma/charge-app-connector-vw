@@ -119,6 +119,18 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## Verification
 
+- App-version quarantine and asynchronous actions were deployed and verified on
+  2026-06-20. A temporary version mismatch kept `/health` and `/charge` at HTTP
+  200, reported `status: degraded` and `actionAvailable: false`, rejected a
+  charging write with HTTP 409, and did not increment the action counter.
+- With the verified version restored, two asynchronous read-only settings calls
+  using the same `Idempotency-Key` returned the same job. The job completed as
+  `succeeded` and consumed one action-budget unit. The legacy synchronous
+  settings call still returned HTTP 200 after the configured minimum interval.
+- `VERIFIED_APP_VERSION=3.63.2` is active on the verified runtime. Quarantine
+  applies only to writes; cached REST reads, MQTT and read-only settings actions
+  remain available.
+
 - Live deployment verification on 2026-06-19 with Volkswagen app `3.63.2`:
   global target SoC changed 100 -> 90 -> 100 successfully. Battery Care changed
   true -> false -> true and reduced AC changed false -> true -> false. Enabling
