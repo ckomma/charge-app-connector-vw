@@ -265,9 +265,11 @@ restart or after disabling wireless debugging. In that case update
 `ADB_WIFI_ADDRESS`. `/health` exposes `adbMode`, `adbTransport`,
 `adbWifiConfigured` and the latest connection error.
 
-## Home Assistant
+## Integrations
 
-### MQTT discovery
+### Home Assistant
+
+#### MQTT discovery
 
 MQTT is the simplest Home Assistant setup when HA is already connected to the
 same broker. Install the optional dependency on the connector host:
@@ -288,7 +290,7 @@ The integration is intentionally read-only. Vehicle actions continue to use
 the authenticated HTTP endpoints. Location includes address and coordinates;
 do not enable MQTT location publishing on a broker that is not trusted.
 
-### REST package
+#### REST package
 
 [`examples/vw_app_connector.yaml`](examples/vw_app_connector.yaml)
 provides an example Home Assistant package with REST sensors, a vehicle
@@ -314,7 +316,7 @@ connector performs background refreshes according to its own rate limits;
 reading its cached HTTP endpoints from Home Assistant does not trigger one
 Volkswagen app operation per request.
 
-## openHAB
+### openHAB
 
 openHAB 5 can consume the existing Home Assistant MQTT discovery messages.
 Install the MQTT and Home Assistant bindings, connect openHAB to the same
@@ -326,7 +328,7 @@ and provides optional Rules DSL examples for authenticated charging and climate
 actions. Lock and unlock are intentionally omitted because their app gesture
 must be reverified before unattended use.
 
-## evcc
+### evcc
 
 [`examples/evcc.yaml`](examples/evcc.yaml) provides a complete custom vehicle
 entry for evcc. It exposes state of charge, connection/charging status and
