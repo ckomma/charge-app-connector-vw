@@ -325,8 +325,8 @@ is read-only and does not cause additional Volkswagen app operations.
 
 [`examples/openhab/README.md`](examples/openhab/README.md) documents the setup
 and provides optional Rules DSL examples for authenticated charging and climate
-actions. Lock and unlock are intentionally omitted because their app gesture
-must be reverified before unattended use.
+actions. Lock and unlock are intentionally omitted because physical vehicle
+access should not be exposed as an unattended example control.
 
 ### evcc
 

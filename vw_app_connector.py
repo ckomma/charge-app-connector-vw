@@ -641,6 +641,33 @@ class VolkswagenReader:
                 return center
         raise RuntimeError("Volkswagen S-PIN input field not found")
 
+    def wait_for_lock_control(self, expected: bool) -> ET.Element:
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            root = self.dump_ui_with_overlay_recovery("vw-lock-control.xml")
+            current = self.parse_locked("\n".join(self.strings(root)))
+            if current is expected:
+                return root
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Volkswagen lock control not found")
+            time.sleep(0.5)
+
+    def wait_for_pin_dialog(self) -> ET.Element:
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            root = self.dump_ui("vw-pin.xml")
+            text = "\n".join(self.strings(root))
+            if re.search(r"S-?PIN", text, re.IGNORECASE):
+                try:
+                    self.editable_node_center(root)
+                except RuntimeError:
+                    pass
+                else:
+                    return root
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Volkswagen S-PIN dialog not found")
+            time.sleep(0.5)
+
     @classmethod
     def parse_location_details(cls, root: ET.Element) -> tuple[str, str]:
         for value in cls.strings(root):
@@ -1129,32 +1156,33 @@ class VolkswagenReader:
                 overview, ("Fahrzeug.", "Vehicle.")
             )
             self.shell("input", "tap", str(x), str(y))
-            time.sleep(self.detail_wait)
-            width, height = self.viewport_size(overview)
-            swipe_x = width // 2
-            lower_y = round(height * 0.85)
-            upper_y = round(height * 0.63)
-            # The lock control exposes no stable accessibility node until the
-            # vehicle graphic has been swiped, so this gesture is viewport-relative.
-            if desired:
-                self.shell(
-                    "input", "swipe", str(swipe_x), str(lower_y),
-                    str(swipe_x), str(upper_y), "900"
-                )
-            else:
-                self.shell(
-                    "input", "swipe", str(swipe_x), str(upper_y),
-                    str(swipe_x), str(lower_y), "900"
-                )
-            time.sleep(2)
+            try:
+                self.wait_for_lock_control(current)
+                width, height = self.display_size()
+                swipe_x = width // 2
+                lower_y = round(height * 0.85)
+                upper_y = round(height * 0.63)
+                # The Compose lock graphic has no stable accessibility node.
+                # Use physical display coordinates because MIUI clips the app's
+                # accessibility viewport above the gesture's actual touch area.
+                if desired:
+                    self.shell(
+                        "input", "swipe", str(swipe_x), str(lower_y),
+                        str(swipe_x), str(upper_y), "900"
+                    )
+                else:
+                    self.shell(
+                        "input", "swipe", str(swipe_x), str(upper_y),
+                        str(swipe_x), str(lower_y), "900"
+                    )
 
-            pin_root = self.dump_ui("vw-pin.xml")
-            pin_text = "\n".join(self.strings(pin_root))
-            if not re.search(r"S-?PIN", pin_text, re.IGNORECASE):
-                raise RuntimeError("Volkswagen S-PIN dialog not found")
-            x, y = self.editable_node_center(pin_root)
-            self.shell("input", "tap", str(x), str(y))
-            self.shell("input", "text", self.spin)
+                pin_root = self.wait_for_pin_dialog()
+                x, y = self.editable_node_center(pin_root)
+                self.shell("input", "tap", str(x), str(y))
+                self.shell("input", "text", self.spin)
+            except Exception as exc:
+                self.save_diagnostics("LOCK" if desired else "UNLOCK", exc)
+                raise
             time.sleep(8)
             return self.with_retries(self._read, "ACTION_VERIFY")
 

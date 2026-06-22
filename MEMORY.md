@@ -39,6 +39,21 @@ coordinates, screenshots, raw UI dumps, and private network details.
 - USB remains the preferred transport in `ADB_MODE=auto`; configured ADB Wi-Fi
   is only the fallback while USB is unavailable.
 
+## Live Test Budget Policy
+
+- For every explicitly requested live phone or runtime test, daily budgets must
+  not constrain test execution. Before testing, save the exact configured
+  `ACTION_DAILY_LIMIT` and `BACKGROUND_DAILY_LIMIT` values root-only and raise
+  both limits temporarily to a practically unlimited test value.
+- Do not reset, reduce or replace persisted usage counters. Test operations
+  remain visible in usage telemetry even while the temporary limits are high.
+- Do not disable action/background minimum intervals, Volkswagen rate-limit
+  cooldowns, API-key authentication or app-version quarantine.
+- After vehicle state restoration and test completion, restore both exact
+  production limits, restart only `vw-app-connector`, and verify `/health`, the
+  usage counters and the absence of a cooldown. Runtime restoration takes
+  priority over further testing if a test wrapper or command fails.
+
 ## MQTT And Home Assistant
 
 - MQTT is an optional, read-only output enabled by `MQTT_HOST`. REST remains
@@ -87,6 +102,11 @@ coordinates, screenshots, raw UI dumps, and private network details.
   or the secure lock disabled. If the connector puts the screen to sleep, the
   next wake cannot dismiss the secure keyguard and app operations fail before
   parsing.
+- For every Pixel test, keep screen-off cleanup disabled for the entire time
+  the Pixel is selected: set `SLEEP_AFTER_OPERATION=false` and keep Android's
+  stay-awake mode active. Do not send sleep or power-key cleanup events during
+  the Pixel test. The temporary stay-awake setting may be cleared only after
+  testing is complete and the runtime has been restored to the Redmi.
 - Verified on 2026-06-19 with the Pixel 10 temporarily selected for the
   compatibility test: `/health` reported USB transport, USB power and an
   authorized ADB device. The Redmi remains the production phone; do not leave
@@ -110,6 +130,15 @@ coordinates, screenshots, raw UI dumps, and private network details.
   succeeded. The location result contained an address, parked duration and
   navigation coordinates. The previous address-parsing failure is resolved by
   the current location parser.
+- The physical-display lock gesture fix was live-verified on the Pixel 10 on
+  2026-06-22 with Volkswagen app `3.63.2` over USB. The runtime temporarily
+  used `SLEEP_AFTER_OPERATION=false` and kept the Pixel awake because of its
+  secure keyguard.
+  A locked -> unlocked -> locked API test returned HTTP 200 for both actions,
+  physically changed the vehicle state, and restored the original lock,
+  charging and climate states. The runtime was then restored to the production
+  Redmi with `ADB_MODE=auto`, `SLEEP_AFTER_OPERATION=true`, healthy Wi-Fi
+  fallback, the normal 20-action limit and no cooldown.
 - The Pixel temperature selector places its clickable values lower than the old
   fixed tap coordinates. After a temperature change, a side value can also be
   wider than the selected center value. Selecting the visible numeric value by
@@ -134,11 +163,26 @@ coordinates, screenshots, raw UI dumps, and private network details.
   target SoC, Battery Care and reduced AC current. All successful changes were
   restored to their recorded initial values. Temporary openHAB Items and links
   were removed afterward.
-- Lock succeeded during the live test, but the connector's unlock gesture no
-  longer opened the S-PIN dialog on the production Redmi. Manual app unlock
+- Lock succeeded during the live test, but the connector's unlock gesture did
+  not open the S-PIN dialog on the production Redmi. Manual app unlock then
   auto-relocked when no door was opened; a later physical unlock was observed
-  correctly. Do not expose unattended lock/unlock controls to openHAB until the
-  current Volkswagen app gesture has been reverified and fixed.
+  correctly.
+- A supervised manual Redmi retest on 2026-06-22 started with the vehicle
+  locked. The lock slider appeared, a downward swipe to unlock opened the
+  S-PIN dialog, entering the S-PIN closed the dialog without a separate
+  confirmation, and the vehicle physically unlocked. This confirms that the
+  current app, S-PIN dialog and vehicle-side unlock action work manually. The
+  connector failure was therefore isolated to its automated swipe geometry,
+  not S-PIN entry or API authentication.
+- The Redmi lock/unlock regression was fixed and live-verified on 2026-06-22.
+  The connector had scaled the gesture from the MIUI accessibility viewport
+  height of 2168 pixels, placing the unlock start above the Compose slider.
+  Scaling from the physical 1080x2400 display restores the verified gesture.
+  The connector now also waits for the current lock control and the complete
+  S-PIN dialog, and saves diagnostics immediately if either step fails. A live
+  locked -> unlocked -> locked API test returned HTTP 200 for both actions and
+  restored the original vehicle, charging and climate states. The temporary
+  test action limit was restored to 20 without resetting persisted usage.
 
 - App-version quarantine and asynchronous actions were deployed and verified on
   2026-06-20. A temporary version mismatch kept `/health` and `/charge` at HTTP

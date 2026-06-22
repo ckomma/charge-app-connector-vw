@@ -72,6 +72,16 @@ project context. Do not add personal infrastructure values to the repository.
 
 ## Live Verification
 
+For every explicitly requested live phone or runtime test, daily budgets must
+not constrain execution. Save `ACTION_DAILY_LIMIT` and
+`BACKGROUND_DAILY_LIMIT` root-only, raise both temporarily to a practically
+unlimited test value, and restart only the connector service. Never reset the
+persisted usage counters. Keep minimum intervals, rate-limit cooldowns,
+API-key authentication and app-version quarantine active. After the test and
+vehicle-state restoration, restore both exact production limits, restart the
+connector, verify `/health`, counters and cooldown, and remove the temporary
+restore file.
+
 For read changes:
 
 1. Deploy the exact locally tested file.
@@ -83,7 +93,7 @@ For read changes:
 For action changes:
 
 1. Record current lock, climate, charging, and evcc states.
-2. Confirm sufficient action budget remains.
+2. Confirm the temporary test-budget override is active and no cooldown exists.
 3. Exercise the requested state transition.
 4. Verify the state through a fresh UI read.
 5. Restore the original state.

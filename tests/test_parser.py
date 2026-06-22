@@ -702,6 +702,101 @@ class ParserTests(unittest.TestCase):
             VolkswagenReader.editable_node_center(root), (540, 1211)
         )
 
+    def test_lock_swipe_uses_physical_display_size(self):
+        states = (
+            (False, True, ("540", "2040", "540", "1512")),
+            (True, False, ("540", "1512", "540", "2040")),
+        )
+        for current, desired, coordinates in states:
+            with self.subTest(desired=desired), TemporaryDirectory() as directory:
+                environment = {
+                    "ADB_SERIAL": "usb-serial",
+                    "DIAGNOSTICS_DIR": directory,
+                    "VW_SPIN": "1234",
+                }
+                overview = ET.fromstring(
+                    '<hierarchy><node content-desc="Fahrzeug. '
+                    + ("Verriegelt." if current else "Entriegelt.")
+                    + '" bounds="[100,200][300,400]"/></hierarchy>'
+                )
+                pin = ET.fromstring(
+                    '<hierarchy><node text="S-PIN"/>'
+                    '<node class="android.widget.EditText" '
+                    'bounds="[100,500][500,700]"/></hierarchy>'
+                )
+                with patch.dict("os.environ", environment, clear=False):
+                    reader = VolkswagenReader()
+                    with (
+                        patch.object(reader, "screen_session", return_value=nullcontext()),
+                        patch.object(reader, "launch"),
+                        patch.object(reader, "open_overview", return_value=overview),
+                        patch.object(reader, "wait_for_lock_control", return_value=overview),
+                        patch.object(reader, "display_size", return_value=(1080, 2400)),
+                        patch.object(reader, "wait_for_pin_dialog", return_value=pin),
+                        patch.object(reader, "with_retries", return_value=VehicleData()) as retries,
+                        patch.object(reader, "shell") as shell,
+                        patch("time.sleep"),
+                    ):
+                        reader.set_locked(desired)
+                self.assertIn(
+                    ("input", "swipe", *coordinates, "900"),
+                    [value.args for value in shell.call_args_list],
+                )
+                self.assertIn(
+                    ("input", "text", "1234"),
+                    [value.args for value in shell.call_args_list],
+                )
+                retries.assert_called_once()
+
+    def test_pin_dialog_waits_for_editable_field(self):
+        loading = ET.fromstring('<hierarchy><node text="S-PIN"/></hierarchy>')
+        ready = ET.fromstring(
+            '<hierarchy><node text="S-PIN"/>'
+            '<node class="android.widget.EditText" '
+            'bounds="[100,500][500,700]"/></hierarchy>'
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb-serial", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "dump_ui", side_effect=(loading, ready)),
+                    patch("time.sleep") as sleep,
+                ):
+                    self.assertIs(reader.wait_for_pin_dialog(), ready)
+                sleep.assert_called_once_with(0.5)
+
+    def test_unlock_failure_saves_diagnostics(self):
+        overview = ET.fromstring(
+            '<hierarchy><node content-desc="Fahrzeug. Verriegelt." '
+            'bounds="[100,200][300,400]"/></hierarchy>'
+        )
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+                "VW_SPIN": "1234",
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                error = RuntimeError("Volkswagen S-PIN dialog not found")
+                with (
+                    patch.object(reader, "screen_session", return_value=nullcontext()),
+                    patch.object(reader, "launch"),
+                    patch.object(reader, "open_overview", return_value=overview),
+                    patch.object(reader, "wait_for_lock_control", return_value=overview),
+                    patch.object(reader, "display_size", return_value=(1080, 2400)),
+                    patch.object(reader, "wait_for_pin_dialog", side_effect=error),
+                    patch.object(reader, "save_diagnostics") as diagnostics,
+                    patch.object(reader, "shell"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "S-PIN dialog"):
+                        reader.set_locked(False)
+                diagnostics.assert_called_once_with("UNLOCK", error)
+
     def test_climate_switch_is_selected_by_nearby_label(self):
         root = ET.fromstring(
             """<hierarchy>

@@ -19,6 +19,10 @@ truth across Windows, Linux, Termux/mobile, and Codex Cloud.
   and document the reason in code.
 - Preserve background/action budgets, cooldowns, and action priority unless a
   change is explicitly intended to alter App usage.
+- For every explicitly requested live phone or runtime test, follow the
+  temporary test-budget override in `MEMORY.md`: raise both daily limits for
+  the test without resetting persisted counters, keep cooldowns and minimum
+  intervals active, and restore the exact production limits afterward.
 
 ## Verification
 
