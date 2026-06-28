@@ -41,24 +41,16 @@ times. `GET /health` is a cheap endpoint that does not wake the display. It
 reports ADB/app status, phone battery telemetry and cache ages.
 
 `GET /capabilities` returns a read-only description of the connector's current
-operational surface: supported read endpoints, supported action names,
-read-only versus write actions, MQTT availability, app-version verification,
-ADB mode/transport and cache availability. Integrations can use it to disable
-controls when write actions are quarantined or when a cache has not refreshed
-successfully yet.
+operational surface, including supported endpoints, actions, ADB transport,
+MQTT and app-version verification.
 
 `GET /metrics` exposes Prometheus text-format gauges for connector health,
-action availability, usage counters and limits, cooldown seconds, phone battery
-level, cache age, cache refresh state, cache error categories, ADB transport
-and app-version verification. It reads only in-memory connector state plus the
-same cheap phone-health data used by `/health`; it does not trigger a
-Volkswagen app refresh.
+usage counters, cache state, ADB transport and app-version verification. It
+does not trigger a Volkswagen app refresh.
 
 `GET /diagnostics` returns a safe diagnostics index for the files stored below
-`DIAGNOSTICS_DIR`. The response includes metadata such as category, timestamp,
-artifact presence, error type and total artifact size. It intentionally does
-not return XML dumps, screenshots, local file paths, UI text, addresses,
-coordinates, device identifiers or other raw diagnostic contents.
+`DIAGNOSTICS_DIR`. It returns metadata only, not raw UI dumps, screenshots,
+addresses, coordinates or device identifiers.
 
 The connector refreshes data in background. API reads return immediately and
 continue serving the last successful value with `stale: true` when a refresh
@@ -68,11 +60,10 @@ error summary in the diagnostics directory.
 Usage protection is enforced inside the connector and persisted across service
 restarts. Defaults are deliberately conservative: 15 minutes while parked,
 5 minutes while charging, details every 12 hours and location every 4 hours.
-Background work has a weighted budget of 180 units per local calendar day;
-the detail read costs three units because it opens three app views. Actions
-have a separate budget of 20 per day and a 60-second minimum interval. If the
-app reports too many requests, all app operations pause for 12 hours. Current
-usage and cooldown are exposed by `/health`.
+Background work has a weighted daily budget, actions have a separate daily
+budget and 60-second minimum interval, and Volkswagen rate-limit responses
+pause app operations for 12 hours. Current usage and cooldown are exposed by
+`/health`.
 
 Status follows evcc's vehicle convention:
 
@@ -176,17 +167,11 @@ Authenticated action endpoints:
 - `POST /action/climate/option/zone-front-left?value=true`
 - `POST /action/climate/option/zone-front-right?value=true`
 
-The target state of charge supports 50, 60, 70, 80, 90 and 100 percent. Charging
-modes are `immediate`, `preferred-times`, `departure` and `departure-climate`.
-Location-specific direct-charge limits support 0 through 50 percent in ten-point
-steps; location target limits use the same values as the global target. Slider
-positions are derived from the current accessibility layout and every change is
-checked against the displayed value before it is saved.
-
-On the live-tested Volkswagen app `3.63.2`, the charging-mode row is readable
-but exposes no clickable accessibility element. The connector therefore fails
-that action safely instead of using an unverified fixed coordinate. Charging
-locations can only be controlled when the app account has a location configured.
+The target state of charge supports 50, 60, 70, 80, 90 and 100 percent.
+Charging modes are `immediate`, `preferred-times`, `departure` and
+`departure-climate`. Location-specific direct-charge limits support 0 through
+50 percent in ten-point steps. The connector verifies displayed values after
+changes and fails safely when the Volkswagen app exposes no stable control.
 
 ### App version quarantine
 
@@ -199,8 +184,8 @@ Set `VERIFIED_APP_VERSION` to an empty value to disable this guard deliberately.
 
 ### Optional asynchronous actions
 
-Existing calls remain synchronous and return the verified result with HTTP 200.
-Clients can opt into a serialized background job using:
+Existing action calls remain synchronous. Clients can opt into a serialized
+background job with `Prefer: respond-async` and an optional `Idempotency-Key`:
 
 ```http
 POST /action/charging/target-soc?value=80
@@ -210,11 +195,7 @@ X-API-Key: replace-with-the-connector-api-key
 ```
 
 The response is HTTP 202 with a job ID and `Location` header. Read the result
-from authenticated `GET /actions/JOB_ID`. States are `queued`, `running`,
-`succeeded` and `failed`. Reusing an `Idempotency-Key` with the same request
-returns the original job; using it for another request returns HTTP 409. Job
-history is memory-only, limited to 100 completed entries and resets when the
-service restarts.
+from authenticated `GET /actions/JOB_ID`.
 
 Send the API key in the `X-API-Key` header. Keep the environment file readable
 only by root because it contains the Volkswagen S-PIN.
@@ -244,29 +225,17 @@ After pairing Android wireless debugging, Docker users can instead set
 `ADB_MODE=wifi` or `ADB_MODE=auto` with `ADB_WIFI_ADDRESS` and remove the USB
 device mapping if their setup no longer needs it.
 
-An end-to-end Docker smoke test needs a Linux Docker host with the Android
-phone connected or paired, the Volkswagen app signed in, and the edited
-`deploy/docker/.env` file in place:
+After startup, run a small smoke test:
 
 ```bash
-docker compose -f deploy/docker/docker-compose-example.yaml up -d --build
 docker compose -f deploy/docker/docker-compose-example.yaml exec vw-app-connector adb devices -l
 curl -sS http://127.0.0.1:9920/health
-curl -sS http://127.0.0.1:9920/capabilities
 curl -sS http://127.0.0.1:9920/charge
-docker compose -f deploy/docker/docker-compose-example.yaml down
-docker compose -f deploy/docker/docker-compose-example.yaml up -d
-curl -sS http://127.0.0.1:9920/health
 ```
 
-The test passes when the image builds, the phone is authorized in `adb devices`,
-`/health` reports the expected ADB transport and no Volkswagen rate-limit
-cooldown, `/capabilities` and `/charge` return JSON, and the second startup
-keeps the ADB authorization plus connector state through the named volumes.
-Use `/details` and `/location` only when their budget and privacy impact are
-acceptable. Treat lock, charging and climate actions as separate live vehicle
-tests: record the initial vehicle state, use the temporary test-budget policy,
-verify the changed state, and restore the original state afterward.
+The smoke test passes when the phone is authorized in `adb devices`, `/health`
+reports the expected ADB transport and no Volkswagen rate-limit cooldown, and
+`/charge` returns JSON.
 
 The connector intentionally contains no shared ADB keys. Authorize the key
 generated on the target host using the dialog on the phone.
@@ -292,21 +261,9 @@ unattended use.
 
 Pixel devices use standard Android USB debugging and do not need Xiaomi's
 additional `USB debugging (Security settings)` option. Before unattended use,
-verify that the target host sees the phone in `adb devices -l`, that the
-Volkswagen app is installed and signed in, and that `/health` reports the
-expected ADB transport. If ADB lists no device, check the USB cable/data mode,
-developer options, USB debugging, and the authorization dialog on the phone
-before changing connector code.
-
-On Android 16, UI dumps may be written under `/storage/emulated/0` even when
-`uiautomator` reports a `/sdcard` path. The connector keeps a fallback for that
-storage-path difference.
-
-Android 16 also reports focused-window fields in `dumpsys window`; the
-connector uses that broader output for foreground detection. If the Pixel keeps
-a secure display lock, set `SLEEP_AFTER_OPERATION=false` or disable the secure
-lock. Otherwise the connector can wake the phone but cannot dismiss the
-keyguard unattended.
+verify that `adb devices -l` sees the phone, the Volkswagen app is signed in,
+and `/health` reports the expected ADB transport. If the Pixel keeps a secure
+display lock, set `SLEEP_AFTER_OPERATION=false` or disable the secure lock.
 
 ## Optional ADB over Wi-Fi
 
