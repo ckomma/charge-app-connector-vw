@@ -212,6 +212,147 @@ class ParserTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_http_operational_endpoints(self):
+        state = Mock()
+        state.capabilities.return_value = {"version": 1}
+        state.metrics_text.return_value = "vw_app_connector_up 1\n"
+        state.diagnostics_index.return_value = {"count": 0, "entries": []}
+        RequestHandler.state = state
+        RequestHandler.api_key = "test-key"
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RequestHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(*server.server_address)
+            connection.request("GET", "/capabilities")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read())["version"], 1)
+
+            connection.request("GET", "/metrics")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertIn("text/plain", response.getheader("Content-Type"))
+            self.assertEqual(response.read().decode(), "vw_app_connector_up 1\n")
+
+            connection.request("GET", "/diagnostics?limit=5")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read())["count"], 0)
+            state.diagnostics_index.assert_called_with(5)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_capabilities_describe_actions_and_caches_without_refresh(self):
+        state = object.__new__(AppState)
+        state.verified_app_version = "3.63.2"
+        state.reader = Mock()
+        state.reader.phone_health.return_value = HealthData(
+            status="ok",
+            adbState="device",
+            adbMode="auto",
+            adbTransport="usb",
+            appVersion="3.63.2",
+        )
+        state.mqtt = object()
+        state.usage = Mock()
+        state.usage.snapshot.return_value = {
+            "backgroundUsed": 1,
+            "backgroundLimit": 180,
+            "actionsUsed": 2,
+            "actionsLimit": 20,
+            "cooldownSeconds": 0,
+        }
+        with patch("threading.Thread.start"):
+            state.charge = BackgroundCache(
+                "charge", VehicleData, lambda _: 900, VehicleData
+            )
+            state.details = BackgroundCache(
+                "details", ChargingSettingsData, lambda _: 900, ChargingSettingsData
+            )
+            state.location = BackgroundCache(
+                "location", LocationData, lambda _: 900, LocationData
+            )
+        state.charge.set_value(VehicleData(status="B", soc=55))
+
+        result = state.capabilities()
+
+        self.assertTrue(result["features"]["mqtt"])
+        self.assertIn("charging/target-soc", result["actions"]["write"])
+        self.assertIn("charging/settings", result["actions"]["readOnly"])
+        self.assertTrue(result["caches"]["charge"]["available"])
+        self.assertFalse(result["caches"]["details"]["available"])
+
+    def test_metrics_report_usage_cache_and_version_labels(self):
+        state = object.__new__(AppState)
+        state.verified_app_version = "3.63.2"
+        state.reader = Mock()
+        state.reader.phone_health.return_value = HealthData(
+            adbState="device",
+            adbTransport="usb",
+            appVersion="3.63.2",
+            phoneBatteryLevel=87,
+        )
+        state.usage = Mock()
+        state.usage.snapshot.return_value = {
+            "backgroundUsed": 3,
+            "backgroundLimit": 180,
+            "actionsUsed": 4,
+            "actionsLimit": 20,
+            "cooldownSeconds": 0,
+        }
+        with patch("threading.Thread.start"):
+            state.charge = BackgroundCache(
+                "charge", VehicleData, lambda _: 900, VehicleData
+            )
+            state.details = BackgroundCache(
+                "details", ChargingSettingsData, lambda _: 900, ChargingSettingsData
+            )
+            state.location = BackgroundCache(
+                "location", LocationData, lambda _: 900, LocationData
+            )
+        state.charge.set_value(VehicleData(status="B", soc=55))
+
+        text = state.metrics_text()
+
+        self.assertIn('vw_app_connector_usage_used{kind="background"} 3', text)
+        self.assertIn("vw_app_connector_phone_battery_level_percent 87", text)
+        self.assertIn('vw_app_connector_cache_age_seconds{cache="charge"}', text)
+        self.assertIn(
+            'vw_app_connector_app_version_info{app_version="3.63.2",'
+            'verified_app_version="3.63.2",verified="true"} 1',
+            text,
+        )
+
+    def test_diagnostics_index_returns_only_safe_metadata(self):
+        with TemporaryDirectory() as directory:
+            diagnostics_dir = Path(directory)
+            (diagnostics_dir / "20260628-120000-location.txt").write_text(
+                "RuntimeError: Example Street 1 should not be exposed\n",
+                encoding="utf-8",
+            )
+            (diagnostics_dir / "20260628-120000-location.xml").write_text(
+                "<hierarchy><node text='sensitive ui'/></hierarchy>",
+                encoding="utf-8",
+            )
+            (diagnostics_dir / "20260628-120000-location.png").write_bytes(
+                b"screenshot-bytes"
+            )
+            state = object.__new__(AppState)
+            state.reader = SimpleNamespace(diagnostics_dir=diagnostics_dir)
+
+            result = state.diagnostics_index()
+
+            self.assertEqual(result["count"], 1)
+            entry = result["entries"][0]
+            self.assertEqual(entry["category"], "LOCATION")
+            self.assertEqual(entry["errorType"], "RuntimeError")
+            self.assertTrue(entry["artifacts"]["summary"])
+            self.assertTrue(entry["artifacts"]["uiDump"])
+            self.assertTrue(entry["artifacts"]["screenshot"])
+            self.assertNotIn("Example Street", json.dumps(result))
+
     def test_http_quarantine_returns_409(self):
         state = Mock()
         state.action.side_effect = ActionQuarantined(

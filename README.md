@@ -40,6 +40,26 @@ front climate zones, odometer, service interval, warning status and departure
 times. `GET /health` is a cheap endpoint that does not wake the display. It
 reports ADB/app status, phone battery telemetry and cache ages.
 
+`GET /capabilities` returns a read-only description of the connector's current
+operational surface: supported read endpoints, supported action names,
+read-only versus write actions, MQTT availability, app-version verification,
+ADB mode/transport and cache availability. Integrations can use it to disable
+controls when write actions are quarantined or when a cache has not refreshed
+successfully yet.
+
+`GET /metrics` exposes Prometheus text-format gauges for connector health,
+action availability, usage counters and limits, cooldown seconds, phone battery
+level, cache age, cache refresh state, cache error categories, ADB transport
+and app-version verification. It reads only in-memory connector state plus the
+same cheap phone-health data used by `/health`; it does not trigger a
+Volkswagen app refresh.
+
+`GET /diagnostics` returns a safe diagnostics index for the files stored below
+`DIAGNOSTICS_DIR`. The response includes metadata such as category, timestamp,
+artifact presence, error type and total artifact size. It intentionally does
+not return XML dumps, screenshots, local file paths, UI text, addresses,
+coordinates, device identifiers or other raw diagnostic contents.
+
 The connector refreshes data in background. API reads return immediately and
 continue serving the last successful value with `stale: true` when a refresh
 fails. Failed UI reads are retried once and store a UI dump, screenshot and

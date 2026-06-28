@@ -2323,6 +2323,29 @@ class AppState:
         "charging-location/settings",
         "charging-locations",
     }
+    SUPPORTED_ACTIONS = (
+        "lock",
+        "unlock",
+        "charging/start",
+        "charging/stop",
+        "charging/target-soc",
+        "charging/mode",
+        "charging/settings",
+        "charging/option/battery-care",
+        "charging/option/reduced-ac",
+        "charging-location/direct-soc",
+        "charging-location/target-soc",
+        "charging-location/settings",
+        "charging-location/option/reduced-ac",
+        "charging-location/option/auto-unlock",
+        "charging-locations",
+        "climate/start",
+        "climate/stop",
+        "climate/temperature",
+        "climate/option/automatic-window-heating",
+        "climate/option/zone-front-left",
+        "climate/option/zone-front-right",
+    )
 
     def __init__(self) -> None:
         self.mqtt: MqttPublisher | None = None
@@ -2439,6 +2462,219 @@ class AppState:
         }
 
     @staticmethod
+    def _cache_snapshot(cache: BackgroundCache[object]) -> dict[str, object]:
+        with cache.lock:
+            value = cache.value
+            last_success_at = cache.last_success_at
+            last_error_category = cache.last_error_category
+            refreshing = cache.refreshing
+            next_attempt = cache.next_attempt_monotonic
+        return {
+            "available": value is not None and bool(last_success_at),
+            "lastSuccessfulAt": last_success_at,
+            "ageSeconds": round(cache.age()) if last_success_at else None,
+            "stale": bool(getattr(value, "stale", False)) if value is not None else False,
+            "refreshing": refreshing,
+            "lastErrorCategory": last_error_category,
+            "retryInSeconds": (
+                max(0, round(next_attempt - time.monotonic()))
+                if next_attempt
+                else 0
+            ),
+        }
+
+    def capabilities(self) -> dict[str, object]:
+        health = self.health()
+        supported = list(self.SUPPORTED_ACTIONS)
+        read_only = [name for name in supported if not self.is_write_action(name)]
+        write = [name for name in supported if self.is_write_action(name)]
+        return {
+            "version": 1,
+            "status": health.status,
+            "readEndpoints": {
+                "charge": True,
+                "details": True,
+                "location": True,
+                "health": True,
+                "capabilities": True,
+                "metrics": True,
+                "diagnostics": True,
+            },
+            "features": {
+                "adbMode": health.adbMode,
+                "adbTransport": health.adbTransport,
+                "adbWifiFallbackConfigured": health.adbWifiConfigured,
+                "appVersion": health.appVersion,
+                "verifiedAppVersion": health.verifiedAppVersion,
+                "appVersionVerified": health.appVersionVerified,
+                "mqtt": self.mqtt is not None,
+                "cachePersistence": True,
+                "asyncActions": True,
+                "diagnosticsIndex": True,
+                "germanLocalization": True,
+                "englishLocalization": True,
+            },
+            "actions": {
+                "available": health.actionAvailable,
+                "blockedReason": health.actionBlockedReason,
+                "readOnlyAvailable": True,
+                "supported": supported,
+                "readOnly": read_only,
+                "write": write,
+            },
+            "caches": {
+                "charge": self._cache_snapshot(self.charge),  # type: ignore[arg-type]
+                "details": self._cache_snapshot(self.details),  # type: ignore[arg-type]
+                "location": self._cache_snapshot(self.location),  # type: ignore[arg-type]
+            },
+            "usage": self.usage.snapshot(),
+        }
+
+    @staticmethod
+    def _metric_label(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+    def metrics_text(self) -> str:
+        health = self.health()
+        usage = self.usage.snapshot()
+        caches = {
+            "charge": self.charge,
+            "details": self.details,
+            "location": self.location,
+        }
+        lines = [
+            "# HELP vw_app_connector_up Connector health status, 1 when not error.",
+            "# TYPE vw_app_connector_up gauge",
+            f'vw_app_connector_up{{status="{self._metric_label(health.status)}"}} '
+            f"{1 if health.status != 'error' else 0}",
+            "# HELP vw_app_connector_action_available Write actions allowed by the app-version guard.",
+            "# TYPE vw_app_connector_action_available gauge",
+            f"vw_app_connector_action_available {1 if health.actionAvailable else 0}",
+            "# HELP vw_app_connector_usage_used Current local-day usage counter.",
+            "# TYPE vw_app_connector_usage_used gauge",
+            f'vw_app_connector_usage_used{{kind="background"}} {usage["backgroundUsed"]}',
+            f'vw_app_connector_usage_used{{kind="actions"}} {usage["actionsUsed"]}',
+            "# HELP vw_app_connector_usage_limit Current local-day usage limit.",
+            "# TYPE vw_app_connector_usage_limit gauge",
+            f'vw_app_connector_usage_limit{{kind="background"}} {usage["backgroundLimit"]}',
+            f'vw_app_connector_usage_limit{{kind="actions"}} {usage["actionsLimit"]}',
+            "# HELP vw_app_connector_cooldown_seconds Active Volkswagen rate-limit cooldown.",
+            "# TYPE vw_app_connector_cooldown_seconds gauge",
+            f'vw_app_connector_cooldown_seconds {usage["cooldownSeconds"]}',
+            "# HELP vw_app_connector_phone_battery_level_percent Android phone battery level.",
+            "# TYPE vw_app_connector_phone_battery_level_percent gauge",
+        ]
+        if health.phoneBatteryLevel is not None:
+            lines.append(
+                f"vw_app_connector_phone_battery_level_percent {health.phoneBatteryLevel}"
+            )
+        lines.extend(
+            [
+                "# HELP vw_app_connector_cache_age_seconds Seconds since a cache last refreshed successfully.",
+                "# TYPE vw_app_connector_cache_age_seconds gauge",
+            ]
+        )
+        for name, cache in caches.items():
+            with cache.lock:
+                last_success_at = cache.last_success_at
+                refreshing = cache.refreshing
+                last_error_category = cache.last_error_category
+            if last_success_at:
+                lines.append(
+                    f'vw_app_connector_cache_age_seconds{{cache="{name}"}} '
+                    f"{round(cache.age())}"
+                )
+            lines.append(
+                f'vw_app_connector_cache_refreshing{{cache="{name}"}} '
+                f"{1 if refreshing else 0}"
+            )
+            lines.append(
+                f'vw_app_connector_cache_error{{cache="{name}",category="'
+                f'{self._metric_label(last_error_category)}"}} '
+                f"{1 if last_error_category else 0}"
+            )
+        lines.extend(
+            [
+                "# HELP vw_app_connector_adb_transport Current ADB transport selected by the connector.",
+                "# TYPE vw_app_connector_adb_transport gauge",
+                f'vw_app_connector_adb_transport{{transport="{self._metric_label(health.adbTransport)}"}} 1',
+                "# HELP vw_app_connector_app_version_info Installed and verified Volkswagen app versions.",
+                "# TYPE vw_app_connector_app_version_info gauge",
+                "vw_app_connector_app_version_info{"
+                f'app_version="{self._metric_label(health.appVersion)}",'
+                f'verified_app_version="{self._metric_label(health.verifiedAppVersion)}",'
+                f'verified="{str(health.appVersionVerified).lower()}"'
+                "} 1",
+            ]
+        )
+        return "\n".join(lines) + "\n"
+
+    def diagnostics_index(self, limit: int = 20) -> dict[str, object]:
+        groups: dict[str, dict[str, object]] = {}
+        try:
+            files = sorted(
+                self.reader.diagnostics_dir.glob("*"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            files = []
+        for path in files:
+            if path.suffix not in (".txt", ".xml", ".png"):
+                continue
+            stem = path.stem
+            if "-" not in stem:
+                continue
+            _stamp, category = stem.rsplit("-", 1)
+            group = groups.setdefault(
+                stem,
+                {
+                    "id": stem,
+                    "category": category.upper(),
+                    "createdAt": "",
+                    "artifacts": {
+                        "summary": False,
+                        "uiDump": False,
+                        "screenshot": False,
+                    },
+                    "errorType": "",
+                    "artifactBytes": 0,
+                },
+            )
+            try:
+                modified = datetime.fromtimestamp(
+                    path.stat().st_mtime
+                ).astimezone().isoformat(timespec="seconds")
+                if not group["createdAt"] or modified < group["createdAt"]:
+                    group["createdAt"] = modified
+                group["artifactBytes"] = int(group["artifactBytes"]) + path.stat().st_size
+            except OSError:
+                pass
+            artifacts = group["artifacts"]
+            assert isinstance(artifacts, dict)
+            if path.suffix == ".txt":
+                artifacts["summary"] = True
+                try:
+                    first_line = path.read_text(encoding="utf-8").splitlines()[0]
+                    group["errorType"] = first_line.split(":", 1)[0][:80]
+                except (IndexError, OSError, UnicodeDecodeError):
+                    pass
+            elif path.suffix == ".xml":
+                artifacts["uiDump"] = True
+            elif path.suffix == ".png":
+                artifacts["screenshot"] = True
+        entries = sorted(
+            groups.values(),
+            key=lambda item: str(item.get("createdAt", "")),
+            reverse=True,
+        )[:limit]
+        return {
+            "diagnosticsDirConfigured": True,
+            "count": len(entries),
+            "entries": entries,
+        }
+
+    @staticmethod
     def version_policy(
         app_version: str, verified_app_version: str
     ) -> tuple[bool, str]:
@@ -2456,24 +2692,8 @@ class AppState:
 
     @staticmethod
     def supports_action(name: str) -> bool:
-        exact = {
-            "lock",
-            "unlock",
-            "charging/start",
-            "charging/stop",
-            "charging/target-soc",
-            "charging/mode",
-            "charging/settings",
-            "charging-location/settings",
-            "charging-location/direct-soc",
-            "charging-location/target-soc",
-            "charging-locations",
-            "climate/start",
-            "climate/stop",
-            "climate/temperature",
-        }
         return (
-            name in exact
+            name in AppState.SUPPORTED_ACTIONS
             or name.startswith("climate/option/")
             or name.startswith("charging/option/")
             or name.startswith("charging-location/option/")
@@ -2666,6 +2886,25 @@ class RequestHandler(BaseHTTPRequestHandler):
             value = self.state.health()
             self.send_json(asdict(value), 200 if value.status != "error" else 503)
             return
+        if path == "/capabilities":
+            self.send_json(self.state.capabilities(), 200)
+            return
+        if path == "/metrics":
+            self.send_text(
+                self.state.metrics_text(),
+                200,
+                "text/plain; version=0.0.4; charset=utf-8",
+            )
+            return
+        if path == "/diagnostics":
+            query = parse_qs(urlparse(self.path).query)
+            try:
+                limit = max(1, min(100, int(query.get("limit", ["20"])[0])))
+            except ValueError:
+                self.send_error(400)
+                return
+            self.send_json(self.state.diagnostics_index(limit), 200)
+            return
         caches: dict[str, BackgroundCache[object]] = {
             "/charge": self.state.charge,  # type: ignore[dict-item]
             "/details": self.state.details,  # type: ignore[dict-item]
@@ -2760,6 +2999,22 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         for name, header_value in (headers or {}).items():
             self.send_header(name, header_value)
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            pass
+
+    def send_text(
+        self,
+        value: str,
+        status: int,
+        content_type: str,
+    ) -> None:
+        body = value.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:
             self.wfile.write(body)
