@@ -1,0 +1,35 @@
+services:
+  vw-app-connector:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: vw-app-connector
+    restart: unless-stopped
+
+    # Bind to localhost on the Docker host by default. Put a reverse proxy or
+    # firewall in front before exposing vehicle data to another network.
+    ports:
+      - "127.0.0.1:9920:9920"
+
+    env_file:
+      - .env
+    environment:
+      LISTEN_ADDRESS: "0.0.0.0"
+      PORT: "9920"
+      USAGE_STATE_FILE: "/var/lib/vw-app-connector/usage.json"
+      CACHE_STATE_DIR: "/var/lib/vw-app-connector/cache"
+      DIAGNOSTICS_DIR: "/var/lib/vw-app-connector/diagnostics"
+
+    volumes:
+      - vw_app_connector_state:/var/lib/vw-app-connector
+      - vw_app_connector_adb:/root/.android
+
+    # USB ADB access usually needs direct USB device access. For ADB over Wi-Fi,
+    # remove privileged/devices after pairing and set ADB_MODE=wifi or auto.
+    privileged: true
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+
+volumes:
+  vw_app_connector_state:
+  vw_app_connector_adb:

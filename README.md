@@ -221,6 +221,53 @@ only by root because it contains the Volkswagen S-PIN.
 
 Install the files from `deploy/` and adjust `/etc/default/vw-app-connector`.
 
+### Docker Compose
+
+Docker support is provided as an example for users who prefer Compose over a
+systemd service:
+
+```bash
+cp deploy/docker/env.example deploy/docker/.env
+editor deploy/docker/.env
+docker compose -f deploy/docker/docker-compose-example.yaml up -d --build
+```
+
+The example installs ADB and the optional Python dependencies from
+`requirements.txt`, keeps connector state below `/var/lib/vw-app-connector` in
+a named volume, and persists the container's ADB keys below `/root/.android`.
+The host port is bound to `127.0.0.1` by default. Change that only behind a
+trusted reverse proxy or firewall because the read endpoints can expose vehicle
+state and location data.
+
+For USB ADB, the Compose example uses `/dev/bus/usb` with `privileged: true`.
+After pairing Android wireless debugging, Docker users can instead set
+`ADB_MODE=wifi` or `ADB_MODE=auto` with `ADB_WIFI_ADDRESS` and remove the USB
+device mapping if their setup no longer needs it.
+
+An end-to-end Docker smoke test needs a Linux Docker host with the Android
+phone connected or paired, the Volkswagen app signed in, and the edited
+`deploy/docker/.env` file in place:
+
+```bash
+docker compose -f deploy/docker/docker-compose-example.yaml up -d --build
+docker compose -f deploy/docker/docker-compose-example.yaml exec vw-app-connector adb devices -l
+curl -sS http://127.0.0.1:9920/health
+curl -sS http://127.0.0.1:9920/capabilities
+curl -sS http://127.0.0.1:9920/charge
+docker compose -f deploy/docker/docker-compose-example.yaml down
+docker compose -f deploy/docker/docker-compose-example.yaml up -d
+curl -sS http://127.0.0.1:9920/health
+```
+
+The test passes when the image builds, the phone is authorized in `adb devices`,
+`/health` reports the expected ADB transport and no Volkswagen rate-limit
+cooldown, `/capabilities` and `/charge` return JSON, and the second startup
+keeps the ADB authorization plus connector state through the named volumes.
+Use `/details` and `/location` only when their budget and privacy impact are
+acceptable. Treat lock, charging and climate actions as separate live vehicle
+tests: record the initial vehicle state, use the temporary test-budget policy,
+verify the changed state, and restore the original state afterward.
+
 The connector intentionally contains no shared ADB keys. Authorize the key
 generated on the target host using the dialog on the phone.
 

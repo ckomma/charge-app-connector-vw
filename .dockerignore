@@ -1,0 +1,9 @@
+.git
+.agents
+__pycache__
+*.pyc
+.env
+deploy/docker/.env
+*.log
+diagnostics
+cache
