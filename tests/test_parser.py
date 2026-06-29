@@ -1075,6 +1075,18 @@ class ParserTests(unittest.TestCase):
             (48.114598, 11.480513),
         )
 
+    def test_navigation_coordinates_use_latest_activity_intent(self):
+        activity = (
+            "Hist #1: intent={act=android.intent.action.VIEW "
+            "dat=google.navigation:q=48.114598%2C11.480513&mode=w}\n"
+            "Hist #0: intent={act=android.intent.action.VIEW "
+            "dat=google.navigation:q=48.120000%2C11.520000&mode=w}"
+        )
+        self.assertEqual(
+            VolkswagenReader.parse_navigation_coordinates(activity),
+            (48.12, 11.52),
+        )
+
     def test_map_view_center_uses_visible_texture_view(self):
         root = ET.fromstring(
             """<hierarchy>
@@ -1261,6 +1273,70 @@ class ParserTests(unittest.TestCase):
                 ):
                     reader.read_location()
                 self.assertEqual(retries.call_args.args[1], "LOCATION")
+
+    def test_location_read_restarts_google_maps_before_route_intent(self):
+        start = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Navigation Tab" bounds="[10,10][110,110]"/>
+            </hierarchy>"""
+        )
+        map_root = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Car Locate Button" bounds="[20,20][120,120]"/>
+            </hierarchy>"""
+        )
+        centered = ET.fromstring(
+            """<hierarchy>
+            <node class="android.view.TextureView" bounds="[0,0][1080,2148]"/>
+            </hierarchy>"""
+        )
+        details = ET.fromstring(
+            """<hierarchy>
+            <node text="Example Street 1&#10;Geparkt seit 2 Std."
+                bounds="[55,1565][1025,1631]"/>
+            <node text="Route" bounds="[502,1987][622,2042]"/>
+            </hierarchy>"""
+        )
+        calls: list[tuple[str, ...]] = []
+
+        def shell(*args: str, **_kwargs: object) -> str:
+            calls.append(args)
+            if args[:3] == ("dumpsys", "activity", "activities"):
+                return "dat=google.navigation:q=48.114598%2C11.480513&mode=w"
+            if args[:3] == ("dumpsys", "window", "windows"):
+                return "mCurrentFocus=com.volkswagen.weconnect/.SingleActivity"
+            return ""
+
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "launch"),
+                    patch.object(
+                        reader,
+                        "dump_ui_with_overlay_recovery",
+                        return_value=start,
+                    ),
+                    patch.object(
+                        reader,
+                        "dump_ui",
+                        side_effect=(map_root, centered, details),
+                    ),
+                    patch.object(reader, "shell", side_effect=shell),
+                    patch("time.sleep"),
+                ):
+                    result = reader._read_location()
+
+        self.assertEqual((result.latitude, result.longitude), (48.114598, 11.480513))
+        maps_stop = ("am", "force-stop", "com.google.android.apps.maps")
+        route_tap = ("input", "tap", "562", "2014")
+        self.assertIn(maps_stop, calls)
+        self.assertIn(route_tap, calls)
+        self.assertLess(calls.index(maps_stop), calls.index(route_tap))
 
     def test_miui_obscuring_window_counts_as_foreground(self):
         with TemporaryDirectory() as directory:

@@ -83,6 +83,23 @@ coordinates, screenshots, raw UI dumps, and private network details.
   The complete location flow was live-verified on the production Redmi in both
   German and English; address, parked duration and navigation coordinates were
   present in both localizations.
+- On 2026-06-29, Home Assistant history showed changing location addresses with
+  an unchanged coordinate set. Root cause: Android `dumpsys activity activities`
+  can retain older Google Maps navigation intents, and the connector used the
+  first `google.navigation:q=` match. The parser now uses the latest match from
+  the activity dump. A production Redmi refresh after deployment returned a new
+  coordinate set, no location error, no cooldown, and restored normal production
+  usage limits afterward.
+- Follow-up on 2026-06-30 showed the new coordinate set was still not the
+  current address. External geocoding was used only for diagnostics and showed
+  the connector coordinates were far from the displayed address. Stopping
+  Google Maps before tapping the Volkswagen Route button caused the subsequent
+  Google Maps navigation intent to match the geocoded address within roughly
+  ten metres. The connector now stops `MAPS_PACKAGE` before opening Route,
+  still deriving coordinates through Google Maps rather than an external
+  geocoding fallback. The fix was deployed to the production Redmi runtime,
+  live-verified with a fresh location refresh, and production limits were
+  restored.
 
 ## Pixel 10 / Android 16
 

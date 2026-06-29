@@ -310,6 +310,7 @@ class VolkswagenReader:
         self.adb_last_connect_error = ""
         self.adb_connection_lock = threading.Lock()
         self.package = os.getenv("APP_PACKAGE", "com.volkswagen.weconnect")
+        self.maps_package = os.getenv("MAPS_PACKAGE", "com.google.android.apps.maps")
         self.start_wait = float(os.getenv("APP_START_WAIT_SECONDS", "8"))
         self.detail_wait = float(os.getenv("DETAIL_WAIT_SECONDS", "3"))
         self.ui_update_timeout = float(
@@ -896,15 +897,16 @@ class VolkswagenReader:
 
     @staticmethod
     def parse_navigation_coordinates(text: str) -> tuple[float, float]:
-        match = re.search(
+        matches = re.findall(
             r"google\.navigation:q=(-?\d+(?:\.\d+)?)(?:%2C|,)"
             r"(-?\d+(?:\.\d+)?)",
             text,
             re.IGNORECASE,
         )
-        if not match:
+        if not matches:
             raise RuntimeError("Volkswagen navigation coordinates not found")
-        return (float(match.group(1)), float(match.group(2)))
+        latitude, longitude = matches[-1]
+        return (float(latitude), float(longitude))
 
     def launch(self) -> None:
         self.shell("am", "force-stop", self.package)
@@ -1217,6 +1219,8 @@ class VolkswagenReader:
             raise RuntimeError("Volkswagen vehicle address not found")
 
         x, y = self.described_node_center(details, "Route")
+        self.shell("am", "force-stop", self.maps_package)
+        time.sleep(1)
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
         activity = self.shell("dumpsys", "activity", "activities", timeout=20)

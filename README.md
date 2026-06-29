@@ -119,6 +119,9 @@ Environment variables:
   successful endpoint values so restarts can serve data during cache refresh
 - `DIAGNOSTICS_DIR`: default `/var/lib/vw-app-connector/diagnostics`
 - `APP_PACKAGE`: default `com.volkswagen.weconnect`
+- `MAPS_PACKAGE`: default `com.google.android.apps.maps`; package stopped before
+  opening the location Route intent so Google Maps does not reuse stale
+  navigation state
 - `VERIFIED_APP_VERSION`: default `3.63.2`; write actions are quarantined when
   the installed Volkswagen app version differs
 - `APP_START_WAIT_SECONDS`: default `8`
