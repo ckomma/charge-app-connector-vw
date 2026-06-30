@@ -199,6 +199,18 @@ TARGET_ANCHORS = (
         "purpose": "German charging-method row.",
     },
     {
+        "id": "autoReleaseAcConnector",
+        "kind": "content_desc_contains",
+        "value": "Automatically release AC connector",
+        "purpose": "English automatic AC connector release charging setting.",
+    },
+    {
+        "id": "autoReleaseAcConnectorGerman",
+        "kind": "content_desc_contains",
+        "value": "automatisch entriegel",
+        "purpose": "German automatic connector release charging setting.",
+    },
+    {
         "id": "departureTimes",
         "kind": "content_desc_contains",
         "value": "Departure",
@@ -441,7 +453,8 @@ def anchor_matches(root: ET.Element) -> dict[str, list[dict[str, object]]]:
             elif kind == "text_exact":
                 matched = text == value
             elif kind == "content_desc_contains":
-                matched = value.casefold() in description.casefold()
+                combined = f"{text}\n{description}"
+                matched = value.casefold() in combined.casefold()
             if matched:
                 matches[anchor["id"]].append(node_excerpt(node))
     return {key: value for key, value in matches.items() if value}

@@ -105,6 +105,7 @@ and PHEV work, including:
 - Battery Care labels
 - reduced AC labels
 - charging-method labels
+- automatic AC connector release labels
 - `LO` / `HI` temperature labels
 - departure-time labels in English and German
 

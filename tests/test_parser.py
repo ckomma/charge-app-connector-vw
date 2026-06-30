@@ -508,12 +508,44 @@ class ParserTests(unittest.TestCase):
             <node text="Reduced AC current" bounds="[50,700][600,760]"/>
             <node checkable="true" clickable="true" checked="false"
                 bounds="[880,670][1030,790]"/>
+            <node text="Automatically release AC connector" bounds="[50,900][700,960]"/>
+            <node checkable="true" clickable="true" checked="true"
+                bounds="[880,870][1030,990]"/>
             </hierarchy>"""
         )
         reader = object.__new__(VolkswagenReader)
         self.assertEqual(
             reader.read_charging_settings(root),
-            ChargingSettingsData(targetSoc=80, batteryCare=True, reducedAc=False),
+            ChargingSettingsData(
+                targetSoc=80,
+                batteryCare=True,
+                reducedAc=False,
+                autoReleaseAcConnector=True,
+            ),
+        )
+
+    def test_gte_charging_settings_accept_missing_battery_care(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node resource-id="com.volkswagen.weconnect:id/value" text="80%"
+                bounds="[900,300][1030,360]"/>
+            <node text="Reduced AC charging current" bounds="[50,500][700,560]"/>
+            <node checkable="true" clickable="true" checked="false"
+                bounds="[880,470][1030,590]"/>
+            <node text="Automatically release AC connector" bounds="[50,700][760,760]"/>
+            <node checkable="true" clickable="true" checked="true"
+                bounds="[880,670][1030,790]"/>
+            </hierarchy>"""
+        )
+        reader = object.__new__(VolkswagenReader)
+        self.assertEqual(
+            reader.read_charging_settings(root),
+            ChargingSettingsData(
+                targetSoc=80,
+                batteryCare=None,
+                reducedAc=False,
+                autoReleaseAcConnector=True,
+            ),
         )
 
     def test_target_soc_action_patches_charge_cache(self):

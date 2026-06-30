@@ -161,6 +161,7 @@ Authenticated action endpoints:
 - `POST /action/charging/settings`
 - `POST /action/charging/option/battery-care?value=true`
 - `POST /action/charging/option/reduced-ac?value=true`
+- `POST /action/charging/option/auto-release-ac?value=true`
 - `POST /action/charging-location/direct-soc?name=Home&value=30`
 - `POST /action/charging-location/target-soc?name=Home&value=80`
 - `POST /action/charging-location/settings?name=Home`
@@ -179,6 +180,8 @@ Charging modes are `immediate`, `preferred-times`, `departure` and
 `departure-climate`. Location-specific direct-charge limits support 0 through
 50 percent in ten-point steps. The connector verifies displayed values after
 changes and fails safely when the Volkswagen app exposes no stable control.
+Some PHEV variants expose automatic AC connector release in global charging
+settings; when present, it is reported as `autoReleaseAcConnector`.
 
 ### App version quarantine
 

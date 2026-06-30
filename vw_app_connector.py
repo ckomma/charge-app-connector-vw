@@ -213,6 +213,7 @@ class ChargingSettingsData:
     targetSoc: int | None = None
     batteryCare: bool | None = None
     reducedAc: bool | None = None
+    autoReleaseAcConnector: bool | None = None
 
 
 @dataclass
@@ -298,6 +299,19 @@ class HealthData:
 
 
 class VolkswagenReader:
+    BATTERY_CARE_LABELS = ("Batterieschutz", "Battery Care", "Battery care")
+    REDUCED_AC_LABELS = (
+        "Reduzierter AC-Ladestrom",
+        "Reduced AC current",
+        "Reduced AC charging current",
+    )
+    AUTO_RELEASE_AC_LABELS = (
+        "Automatisch entriegeln",
+        "Automatic unlock",
+        "Auto unlock",
+        "Automatically release AC connector",
+    )
+
     def __init__(self) -> None:
         self.usb_serial = required_env("ADB_SERIAL")
         self.adb_mode = os.getenv("ADB_MODE", "usb").casefold()
@@ -1801,8 +1815,9 @@ class VolkswagenReader:
         values = self.setting_values(root)
         result = ChargingSettingsData(targetSoc=values[0][1] if values else None)
         for attribute, labels in (
-            ("batteryCare", ("Batterieschutz", "Battery Care", "Battery care")),
-            ("reducedAc", ("Reduzierter AC-Ladestrom", "Reduced AC current")),
+            ("batteryCare", self.BATTERY_CARE_LABELS),
+            ("reducedAc", self.REDUCED_AC_LABELS),
+            ("autoReleaseAcConnector", self.AUTO_RELEASE_AC_LABELS),
         ):
             try:
                 setattr(result, attribute, self.option_state(root, labels))
@@ -1823,15 +1838,20 @@ class VolkswagenReader:
             )
             result = self.read_charging_settings(root)
             for attribute, labels in (
-                ("batteryCare", ("Batterieschutz", "Battery Care", "Battery care")),
-                ("reducedAc", ("Reduzierter AC-Ladestrom", "Reduced AC current")),
+                ("batteryCare", self.BATTERY_CARE_LABELS),
+                ("reducedAc", self.REDUCED_AC_LABELS),
+                ("autoReleaseAcConnector", self.AUTO_RELEASE_AC_LABELS),
             ):
                 if getattr(result, attribute) is not None:
                     continue
-                root, switch = self.checked_option_with_scroll(
-                    root, labels, "vw-target-soc-settings-scroll.xml"
-                )
-                setattr(result, attribute, switch.attrib.get("checked") == "true")
+                try:
+                    root, switch = self.checked_option_with_scroll(
+                        root, labels, "vw-target-soc-settings-scroll.xml"
+                    )
+                except RuntimeError:
+                    continue
+                else:
+                    setattr(result, attribute, switch.attrib.get("checked") == "true")
             self.save_settings(root)
             return result
 
@@ -1841,25 +1861,34 @@ class VolkswagenReader:
             root = self.open_charging_settings()
             result = self.read_charging_settings(root)
             for attribute, labels in (
-                ("batteryCare", ("Batterieschutz", "Battery Care", "Battery care")),
-                ("reducedAc", ("Reduzierter AC-Ladestrom", "Reduced AC current")),
+                ("batteryCare", self.BATTERY_CARE_LABELS),
+                ("reducedAc", self.REDUCED_AC_LABELS),
+                ("autoReleaseAcConnector", self.AUTO_RELEASE_AC_LABELS),
             ):
                 if getattr(result, attribute) is not None:
                     continue
-                root, switch = self.checked_option_with_scroll(
-                    root, labels, "vw-charging-settings-read-scroll.xml"
-                )
-                setattr(result, attribute, switch.attrib.get("checked") == "true")
+                try:
+                    root, switch = self.checked_option_with_scroll(
+                        root, labels, "vw-charging-settings-read-scroll.xml"
+                    )
+                except RuntimeError:
+                    continue
+                else:
+                    setattr(result, attribute, switch.attrib.get("checked") == "true")
             return result
 
     def set_charging_option(self, option: str, desired: bool) -> ChargingSettingsData:
         specs = {
-            "battery-care": ("Batterieschutz", "Battery Care", "Battery care"),
-            "reduced-ac": ("Reduzierter AC-Ladestrom", "Reduced AC current"),
+            "battery-care": ("batteryCare", self.BATTERY_CARE_LABELS),
+            "reduced-ac": ("reducedAc", self.REDUCED_AC_LABELS),
+            "auto-release-ac": (
+                "autoReleaseAcConnector",
+                self.AUTO_RELEASE_AC_LABELS,
+            ),
         }
         if option not in specs:
             raise KeyError(option)
-        labels = specs[option]
+        attribute, labels = specs[option]
         with self.screen_session():
             self.launch()
             root = self.open_charging_settings()
@@ -1881,7 +1910,7 @@ class VolkswagenReader:
                     "vw-charging-option-verify.xml", labels, desired
                 )
                 self.save_settings(root)
-            setattr(result, "batteryCare" if option == "battery-care" else "reducedAc", desired)
+            setattr(result, attribute, desired)
             return result
 
     def set_charging_mode(self, mode: str) -> str:
@@ -2401,6 +2430,7 @@ class AppState:
         "charging/settings",
         "charging/option/battery-care",
         "charging/option/reduced-ac",
+        "charging/option/auto-release-ac",
         "charging-location/direct-soc",
         "charging-location/target-soc",
         "charging-location/settings",
