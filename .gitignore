@@ -12,3 +12,4 @@ diagnostics/
 usage.json
 __pycache__/
 *.py[cod]
+build/

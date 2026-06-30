@@ -1,0 +1,88 @@
+name: Volkswagen App Connector
+version: 0.1.0
+slug: vw_app_connector
+description: ADB-based connector for the Volkswagen Android app.
+url: https://github.com/ckomma/charge-app-connector-vw
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+startup: services
+boot: manual
+init: false
+host_network: true
+usb: true
+ports:
+  9920/tcp: 9920
+ports_description:
+  9920/tcp: Connector REST API
+map:
+  - addon_config:rw
+options:
+  adb_serial: ""
+  adb_mode: auto
+  adb_wifi_address: ""
+  listen_address: 0.0.0.0
+  port: 9920
+  charging_interval_seconds: 300
+  idle_interval_seconds: 900
+  detail_interval_seconds: 43200
+  location_interval_seconds: 14400
+  background_min_interval_seconds: 300
+  background_error_retry_seconds: 900
+  background_daily_limit: 180
+  action_min_interval_seconds: 60
+  action_daily_limit: 20
+  rate_limit_cooldown_seconds: 43200
+  app_package: com.volkswagen.weconnect
+  maps_package: com.google.android.apps.maps
+  verified_app_version: 3.63.2
+  app_start_wait_seconds: 8
+  detail_wait_seconds: 3
+  ui_update_timeout_seconds: 8
+  sleep_after_operation: true
+  api_key: ""
+  vw_spin: ""
+  mqtt_host: ""
+  mqtt_port: 1883
+  mqtt_username: ""
+  mqtt_password: ""
+  mqtt_topic_prefix: vw_app_connector
+  mqtt_discovery_prefix: homeassistant
+  mqtt_client_id: vw-app-connector
+  mqtt_tls: false
+schema:
+  adb_serial: str
+  adb_mode: list(usb|wifi|auto)
+  adb_wifi_address: str?
+  listen_address: str
+  port: port
+  charging_interval_seconds: int(60,)
+  idle_interval_seconds: int(60,)
+  detail_interval_seconds: int(300,)
+  location_interval_seconds: int(300,)
+  background_min_interval_seconds: int(0,)
+  background_error_retry_seconds: int(60,)
+  background_daily_limit: int(1,)
+  action_min_interval_seconds: int(0,)
+  action_daily_limit: int(1,)
+  rate_limit_cooldown_seconds: int(0,)
+  app_package: str
+  maps_package: str
+  verified_app_version: str?
+  app_start_wait_seconds: int(1,)
+  detail_wait_seconds: int(0,)
+  ui_update_timeout_seconds: int(1,)
+  sleep_after_operation: bool
+  api_key: password
+  vw_spin: password
+  mqtt_host: str?
+  mqtt_port: port
+  mqtt_username: str?
+  mqtt_password: password?
+  mqtt_topic_prefix: str
+  mqtt_discovery_prefix: str
+  mqtt_client_id: str
+  mqtt_tls: bool
