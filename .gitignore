@@ -7,6 +7,8 @@ adbkey.pub
 insecure_shared_adbkey
 insecure_shared_adbkey.pub
 diagnostics/
+/gte-phev-diagnostics-output/
+*.local-review-only.png
 usage.json
 __pycache__/
 *.py[cod]
