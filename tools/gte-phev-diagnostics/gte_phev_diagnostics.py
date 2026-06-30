@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Collect read-only Volkswagen app UI diagnostics for GTE/PHEV support.
+"""Collect Volkswagen app UI diagnostics for GTE/PHEV support.
 
-The script does not tap, swipe, sync, save or change vehicle settings. It asks
-the tester to manually navigate to relevant Volkswagen app screens, then stores
-sanitized UI hierarchy dumps and a compact summary that can be shared for
-parser development.
+By default the script does not tap, swipe, sync, save or change vehicle
+settings. It asks the tester to manually navigate to relevant Volkswagen app
+screens, then stores sanitized UI hierarchy dumps and a compact summary that
+can be shared for parser development.
 """
 
 from __future__ import annotations
@@ -234,6 +234,36 @@ TARGET_ANCHORS = (
         "value": "HI",
         "purpose": "Climate picker upper boundary label.",
     },
+    {
+        "id": "googleMap",
+        "kind": "content_desc_contains",
+        "value": "Google Map",
+        "purpose": "Navigation map canvas.",
+    },
+    {
+        "id": "carLocateButton",
+        "kind": "content_desc_contains",
+        "value": "Car Locate Button",
+        "purpose": "Navigation control used to center the vehicle marker.",
+    },
+    {
+        "id": "routeButton",
+        "kind": "text_exact",
+        "value": "Route",
+        "purpose": "Vehicle-location detail action used for coordinate extraction.",
+    },
+    {
+        "id": "parkedSince",
+        "kind": "content_desc_contains",
+        "value": "Parked",
+        "purpose": "English vehicle-location detail parked-duration label.",
+    },
+    {
+        "id": "parkedSinceGerman",
+        "kind": "content_desc_contains",
+        "value": "Geparkt",
+        "purpose": "German vehicle-location detail parked-duration label.",
+    },
 )
 
 
@@ -290,6 +320,10 @@ def adb_bytes(serial: str | None, *args: str, timeout: float = 30) -> bytes:
     return result.stdout
 
 
+def adb_tap(serial: str | None, x: int, y: int) -> None:
+    adb_text(serial, "shell", "input", "tap", str(x), str(y), timeout=10)
+
+
 def dump_ui(serial: str | None, remote_name: str) -> ET.Element:
     remote_path = f"/sdcard/{remote_name}"
     fallback_path = f"/storage/emulated/0/{remote_name}"
@@ -305,6 +339,58 @@ def node_bounds(node: ET.Element) -> tuple[int, int, int, int] | None:
     if not match:
         return None
     return tuple(map(int, match.groups()))
+
+
+def node_center(node: ET.Element) -> tuple[int, int] | None:
+    bounds = node_bounds(node)
+    if not bounds:
+        return None
+    left, top, right, bottom = bounds
+    return ((left + right) // 2, (top + bottom) // 2)
+
+
+def viewport_size(root: ET.Element) -> tuple[int, int]:
+    bounds = [
+        value
+        for node in root.iter()
+        if (value := node_bounds(node)) is not None
+    ]
+    if not bounds:
+        raise RuntimeError("Volkswagen UI viewport not found")
+    return (
+        max(value[2] for value in bounds),
+        max(value[3] for value in bounds),
+    )
+
+
+def described_node_center(root: ET.Element, description: str) -> tuple[int, int]:
+    for node in root.iter():
+        if node.attrib.get("content-desc", "").strip() != description:
+            continue
+        center = node_center(node)
+        if center:
+            return center
+    raise RuntimeError(f"Volkswagen UI element not found: {description}")
+
+
+def map_view_center(root: ET.Element) -> tuple[int, int]:
+    for node in root.iter():
+        if node.attrib.get("class") == "android.view.TextureView":
+            center = node_center(node)
+            if center:
+                return center
+    for node in root.iter():
+        if node.attrib.get("resource-id", "").endswith("catNavMapFragment"):
+            center = node_center(node)
+            if center:
+                return center
+    return (540, 786)
+
+
+def vehicle_marker_label_center(root: ET.Element) -> tuple[int, int]:
+    x, y = map_view_center(root)
+    _width, height = viewport_size(root)
+    return (x, y - max(40, round(height * 0.075)))
 
 
 def is_sensitive_resource(value: str) -> bool:
@@ -492,6 +578,48 @@ def summarize_screen(name: str, root: ET.Element, output_dir: Path) -> ScreenCap
     )
 
 
+def capture_screen(
+    serial: str | None,
+    name: str,
+    output_dir: Path,
+    screenshots: bool,
+) -> tuple[ScreenCapture, ET.Element]:
+    root = dump_ui(serial, f"vw-{name}.xml")
+    capture = summarize_screen(name, root, output_dir)
+    if screenshots:
+        maybe_save_screenshot(serial, output_dir, name)
+    return capture, root
+
+
+def collect_location_marker_details(
+    serial: str | None,
+    map_root: ET.Element,
+    output_dir: Path,
+    screenshots: bool,
+    wait_seconds: float,
+) -> list[ScreenCapture]:
+    captures: list[ScreenCapture] = []
+
+    x, y = described_node_center(map_root, "Car Locate Button")
+    adb_tap(serial, x, y)
+    time.sleep(wait_seconds)
+
+    centered_capture, centered_root = capture_screen(
+        serial, "location-centered-map", output_dir, screenshots
+    )
+    captures.append(centered_capture)
+
+    x, y = vehicle_marker_label_center(centered_root)
+    adb_tap(serial, x, y)
+    time.sleep(wait_seconds)
+
+    details_capture, _details_root = capture_screen(
+        serial, "location-details", output_dir, screenshots
+    )
+    captures.append(details_capture)
+    return captures
+
+
 def write_report(
     output_dir: Path,
     captures: list[ScreenCapture],
@@ -500,7 +628,7 @@ def write_report(
     data = {
         "version": 1,
         "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "purpose": "Volkswagen GTE/PHEV read-only UI diagnostics",
+        "purpose": "Volkswagen GTE/PHEV UI diagnostics",
         "privacyNote": (
             "Review all files before sharing. The script redacts common sensitive "
             "patterns, but app UI wording can vary."
@@ -587,7 +715,7 @@ def maybe_save_screenshot(serial: str | None, output_dir: Path, name: str) -> No
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Collect read-only VW app UI diagnostics for GTE/PHEV support."
+        description="Collect VW app UI diagnostics for GTE/PHEV support."
     )
     parser.add_argument("--serial", help="ADB serial. Defaults to adb's selected device.")
     parser.add_argument(
@@ -616,6 +744,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Capture screens immediately without pressing Enter between screens.",
     )
+    parser.add_argument(
+        "--location-marker-details",
+        action="store_true",
+        help=(
+            "When capturing location-map, tap Car Locate and the estimated vehicle "
+            "marker label, then save sanitized location-centered-map and "
+            "location-details dumps. This is read-oriented but not tap-free."
+        ),
+    )
+    parser.add_argument(
+        "--location-action-wait",
+        type=float,
+        default=3.0,
+        help="Seconds to wait after optional location taps. Default: 3.0",
+    )
     return parser.parse_args()
 
 
@@ -628,8 +771,10 @@ def main() -> int:
     output_dir = Path(args.output).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Volkswagen GTE/PHEV read-only diagnostics")
-    print("This script only reads the current screen UI hierarchy.")
+    print("Volkswagen GTE/PHEV diagnostics")
+    print("By default this script only reads the current screen UI hierarchy.")
+    if args.location_marker_details:
+        print("Location marker details mode will tap map controls but not save settings.")
     print("Manually open the Volkswagen app and navigate when prompted.")
     print()
 
@@ -650,11 +795,23 @@ def main() -> int:
                 "then press Enter..."
             )
         try:
-            root = dump_ui(args.serial, f"vw-{safe_name}.xml")
-            captures.append(summarize_screen(safe_name, root, output_dir))
-            if args.screenshots:
-                maybe_save_screenshot(args.serial, output_dir, safe_name)
+            capture, root = capture_screen(
+                args.serial, safe_name, output_dir, args.screenshots
+            )
+            captures.append(capture)
             print(f"Captured {safe_name}")
+            if safe_name == "location-map" and args.location_marker_details:
+                captures.extend(
+                    collect_location_marker_details(
+                        args.serial,
+                        root,
+                        output_dir,
+                        args.screenshots,
+                        args.location_action_wait,
+                    )
+                )
+                print("Captured location-centered-map")
+                print("Captured location-details")
         except Exception as exc:
             print(f"Failed to capture {safe_name}: {exc}", file=sys.stderr)
 

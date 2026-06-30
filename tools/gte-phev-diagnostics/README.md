@@ -1,12 +1,13 @@
 # GTE/PHEV diagnostics
 
-This directory contains a read-only helper for collecting Volkswagen app UI
-information needed to add GTE/PHEV support.
+This directory contains a helper for collecting Volkswagen app UI information
+needed to add GTE/PHEV support.
 
-The script does not tap, swipe, sync, save or change vehicle settings. The
-tester manually navigates to each relevant Volkswagen app screen and presses
-Enter. The script then reads the currently visible Android accessibility tree
-through ADB, writes sanitized XML dumps and creates a compact summary.
+By default the script does not tap, swipe, sync, save or change vehicle
+settings. The tester manually navigates to each relevant Volkswagen app screen
+and presses Enter. The script then reads the currently visible Android
+accessibility tree through ADB, writes sanitized XML dumps and creates a compact
+summary.
 
 ## Requirements
 
@@ -75,6 +76,32 @@ For `charging-settings`, navigate to the charging settings page that shows
 settings such as target SoC, Battery Care and reduced AC current. Do not change
 or save any setting; only wait until the screen is stable and press Enter.
 
+## Optional location marker details
+
+The normal `location-map` capture only verifies the visible map canvas and map
+controls. It cannot prove that the connector can select the vehicle marker and
+read the address detail sheet, because the vehicle marker is rendered inside
+the Google Maps canvas.
+
+To collect that additional state, open the Volkswagen app navigation/map tab
+and run:
+
+```bash
+python tools/gte-phev-diagnostics/gte_phev_diagnostics.py --screens location-map --location-marker-details
+```
+
+With this option the script taps `Car Locate Button`, waits, taps the estimated
+vehicle marker label above the centered map pin, then stores additional
+sanitized dumps:
+
+- `location-centered-map.sanitized.xml`
+- `location-details.sanitized.xml`
+
+This mode is still read-oriented and does not save settings, start charging or
+open vehicle actions. It is not tap-free. Review the sanitized files before
+sharing because the location detail sheet can contain address or parking
+duration text.
+
 The list can be overridden:
 
 ```bash
@@ -108,6 +135,9 @@ and PHEV work, including:
 - automatic AC connector release labels
 - `LO` / `HI` temperature labels
 - departure-time labels in English and German
+- Google Map / Car Locate / Route anchors
+- parked-duration labels in English and German
 
 These anchors are used only for reporting. The script does not execute any
-action based on them.
+action based on them, except for the explicitly enabled
+`--location-marker-details` diagnostic flow described above.
