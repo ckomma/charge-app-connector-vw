@@ -243,6 +243,22 @@ reports the expected ADB transport and no Volkswagen rate-limit cooldown, and
 The connector intentionally contains no shared ADB keys. Authorize the key
 generated on the target host using the dialog on the phone.
 
+### Home Assistant App
+
+Home Assistant App/Add-on packaging is available in
+[`deploy/home-assistant/`](deploy/home-assistant/). It is an optional
+deployment method alongside systemd and Docker Compose for HA OS or Supervisor
+installations.
+
+The app runs the same connector service, stores state below its Supervisor
+managed `/data` directory, and exposes the same REST API on port `9920`.
+Home Assistant can still consume the connector through MQTT discovery or the
+REST package below. ADB over Wi-Fi is usually the cleanest HA OS setup; USB ADB
+requires that the Android device is visible to the HA host or VM.
+
+See [`deploy/home-assistant/README.md`](deploy/home-assistant/README.md) for
+packaging, installation, configuration and smoke-test steps.
+
 The Android device must not use a secure display PIN, password or pattern when
 `SLEEP_AFTER_OPERATION=true`. ADB wakes the display and dismisses the
 non-secure keyguard automatically.
