@@ -727,12 +727,15 @@ class VolkswagenReader:
         candidates: list[tuple[int, str]] = []
         ignored = {
             "Route",
+            "Share",
             "Navigation Tab",
+            "Google Map",
             "Google Maps",
             "Map Back Button",
             "Map Settings Button",
             "Car Locate Button",
             "Device Location Button",
+            "Close details view",
         }
         for node in root.iter():
             if node.attrib.get("class") != "android.widget.TextView":
@@ -750,7 +753,7 @@ class VolkswagenReader:
 
         if candidates:
             candidates.sort()
-            return candidates[0][1], parked_duration
+            return candidates[-1][1], parked_duration
         return "", ""
 
     @staticmethod
@@ -1050,12 +1053,16 @@ class VolkswagenReader:
 
     def app_in_foreground(self) -> bool:
         windows = self.shell("dumpsys", "window", timeout=20)
+        current_focus = re.search(r"mCurrentFocus=([^\n]+)", windows)
+        if current_focus:
+            focused_window = current_focus.group(1)
+            if self.package in focused_window:
+                return True
+            if "null" not in focused_window.casefold():
+                return False
         return bool(
-            re.search(
-                rf"(?:mCurrentFocus|mObscuringWindow|mFocusedApp)="
-                rf".*{re.escape(self.package)}",
-                windows,
-            )
+            re.search(rf"mObscuringWindow=.*{re.escape(self.package)}", windows)
+            or re.search(rf"mFocusedApp=.*{re.escape(self.package)}", windows)
         )
 
     def keyguard_showing(self) -> bool:

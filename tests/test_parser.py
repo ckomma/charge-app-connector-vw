@@ -1246,6 +1246,23 @@ class ParserTests(unittest.TestCase):
             ("Example Street 1, Example City", ""),
         )
 
+    def test_location_details_prefers_address_below_vehicle_name(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node class="android.widget.TextView" text="11 m" bounds="[56,1630][153,1687]"/>
+            <node class="android.widget.TextView" text="Golf GTE OPF 8.5"
+                bounds="[56,1721][451,1783]"/>
+            <node class="android.widget.TextView" text="[REDACTED_ADDRESS]"
+                bounds="[56,1789][728,1894]"/>
+            <node class="android.widget.TextView" text="Route" bounds="[169,2000][273,2048]"/>
+            <node class="android.widget.TextView" text="Share" bounds="[465,2000][563,2048]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(
+            VolkswagenReader.parse_location_details(root),
+            ("[REDACTED_ADDRESS]", ""),
+        )
+
     def test_english_location_parses_separate_parked_duration(self):
         root = ET.fromstring(
             """<hierarchy>
@@ -1458,6 +1475,46 @@ class ParserTests(unittest.TestCase):
                 ) as shell:
                     self.assertTrue(reader.app_in_foreground())
                 shell.assert_called_once_with("dumpsys", "window", timeout=20)
+
+    def test_focused_app_does_not_override_notification_shade(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with patch.object(
+                    reader,
+                    "shell",
+                    return_value=(
+                        "mCurrentFocus=Window{a266eae u0 NotificationShade}\n"
+                        "mFocusedApp=ActivityRecord{233671720 u0 "
+                        "com.volkswagen.weconnect/.SingleActivity t971}\n"
+                        "mObscuringWindow=Window{5932d67 u0 "
+                        "com.android.systemui.wallpapers.ImageWallpaper}"
+                    ),
+                ):
+                    self.assertFalse(reader.app_in_foreground())
+
+    def test_focused_app_does_not_override_launcher_focus(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with patch.object(
+                    reader,
+                    "shell",
+                    return_value=(
+                        "mCurrentFocus=Window{12 u0 com.microsoft.launcher/.Launcher}\n"
+                        "mFocusedApp=ActivityRecord{34 u0 "
+                        "com.volkswagen.weconnect/.SingleActivity}"
+                    ),
+                ):
+                    self.assertFalse(reader.app_in_foreground())
 
     def test_xiaomi_proximity_overlay_is_detected(self):
         root = ET.fromstring(
