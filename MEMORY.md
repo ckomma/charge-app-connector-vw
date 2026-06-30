@@ -58,6 +58,24 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 - MQTT is an optional, read-only output enabled by `MQTT_HOST`. REST remains
   available and authoritative for vehicle actions and evcc.
+- Home Assistant App/Add-on packaging lives under `deploy/home-assistant/` as
+  an optional deployment method alongside systemd and Docker Compose. The
+  packaging script stages the current connector sources into `build/` and the
+  app defaults to manual boot so an unconfigured HA OS instance does not start
+  consuming app budget or producing ADB errors.
+- The HA app uses Supervisor-managed `/data` for usage state, caches,
+  diagnostics and generated ADB keys. The app healthcheck targets
+  `/capabilities`, not `/health`, so Supervisor can distinguish a running
+  connector process from an unavailable phone or unconfigured ADB transport.
+- HA OS read-only E2E verification on 2026-06-30 used temporary Wi-Fi ADB and
+  raised HA app daily budgets only for the test. `/health`, `/charge` and
+  `/location` worked through the HA app with Volkswagen app `3.63.2`; location
+  returned address and coordinates but those values were not retained. Details
+  remained initializing during the limited test window. No vehicle write action
+  was executed because the vehicle was not connected to a wallbox and was being
+  used with another account. The temporary ADB key and HA app options were
+  removed/restored afterward, and the production connector remained healthy
+  with normal limits.
 - Publish retained `charge`, `details`, `location`, `health` and `availability`
   topics only from existing cache updates or connection startup. MQTT must not
   trigger a Volkswagen app refresh or consume a usage-budget unit.
