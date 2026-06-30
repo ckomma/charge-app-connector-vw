@@ -25,7 +25,8 @@ from pathlib import Path
 DEFAULT_PACKAGE = "com.volkswagen.weconnect"
 DEFAULT_SCREENS = (
     "overview",
-    "charging",
+    "charging-overview",
+    "charging-settings",
     "climate",
     "departure-times",
     "vehicle-details",
@@ -76,6 +77,24 @@ TARGET_ANCHORS = (
         "kind": "resource_suffix",
         "value": "rangeArcBatterySoc",
         "purpose": "Charge/range detail SoC node.",
+    },
+    {
+        "id": "rangeArcRangeAndUnit",
+        "kind": "resource_suffix",
+        "value": "rangeArcRangeAndUnit",
+        "purpose": "Charge/range detail electric range node.",
+    },
+    {
+        "id": "chargingStatsTargetSoc",
+        "kind": "resource_suffix",
+        "value": "chargingStatsTargetSoc",
+        "purpose": "Charge/range detail target SoC node.",
+    },
+    {
+        "id": "subtitle",
+        "kind": "resource_suffix",
+        "value": "subtitle",
+        "purpose": "Settings subtitle node, often adjacent to sliders.",
     },
     {
         "id": "vehicleCarPlus",
@@ -142,6 +161,42 @@ TARGET_ANCHORS = (
         "kind": "resource_suffix",
         "value": "vwd_save_button",
         "purpose": "Settings save button.",
+    },
+    {
+        "id": "batteryCare",
+        "kind": "content_desc_contains",
+        "value": "Battery Care",
+        "purpose": "English Battery Care charging setting.",
+    },
+    {
+        "id": "batteryCareGerman",
+        "kind": "content_desc_contains",
+        "value": "Batterieschon",
+        "purpose": "German Battery Care charging setting.",
+    },
+    {
+        "id": "reducedAc",
+        "kind": "content_desc_contains",
+        "value": "Reduced AC",
+        "purpose": "English reduced AC charging setting.",
+    },
+    {
+        "id": "reducedAcGerman",
+        "kind": "content_desc_contains",
+        "value": "reduzier",
+        "purpose": "German reduced AC charging setting.",
+    },
+    {
+        "id": "chargingMethod",
+        "kind": "content_desc_contains",
+        "value": "Charging method",
+        "purpose": "English charging-method row.",
+    },
+    {
+        "id": "chargingMethodGerman",
+        "kind": "content_desc_contains",
+        "value": "Ladeverfahren",
+        "purpose": "German charging-method row.",
     },
     {
         "id": "departureTimes",

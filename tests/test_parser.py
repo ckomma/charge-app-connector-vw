@@ -18,6 +18,7 @@ from vw_app_connector import (
     ChargingLocationSettingsData,
     ChargingLocationsData,
     ChargingSettingsData,
+    DetailData,
     HealthData,
     IdempotencyConflict,
     LocationData,
@@ -1128,15 +1129,64 @@ class ParserTests(unittest.TestCase):
         for description in (
             "Ihr Fahrzeug: ID.7 Tourer Pro. Gerade synchronisiert.",
             "Your vehicle: ID.7 Tourer Pro. Just synced.",
+            "Your vehicle: Golf GTE OPF 8.5. Synchronised 3 hours 14 minutes ago",
         ):
             with self.subTest(description=description):
                 root = ET.fromstring(
                     f'<hierarchy><node content-desc="{description}"/></hierarchy>'
                 )
-                self.assertEqual(
-                    VolkswagenReader.parse_vehicle_name(root),
-                    "ID.7 Tourer Pro",
+                expected = (
+                    "Golf GTE OPF 8.5"
+                    if "Golf GTE" in description
+                    else "ID.7 Tourer Pro"
                 )
+                self.assertEqual(VolkswagenReader.parse_vehicle_name(root), expected)
+
+    def test_gte_overview_parses_electric_and_fuel_range(self):
+        text = (
+            "Range overview. Battery range: 84 kilometres. "
+            "Fuel range: 560 kilometres. Open details"
+        )
+        self.assertEqual(
+            VolkswagenReader.parse_range_value(
+                text, ("Batteriereichweite", "Battery range", "Electric range")
+            ),
+            84,
+        )
+        self.assertEqual(
+            VolkswagenReader.parse_range_value(
+                text, ("Kraftstoffreichweite", "Fuel range")
+            ),
+            560,
+        )
+
+    def test_gte_vehicle_report_parses_separate_label_value_nodes(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node text="Vehicle Health Report"/>
+            <node text="Total distance"/>
+            <node text="12,345 km"/>
+            <node text="Next service"/>
+            <node text="151 days / 12,300 km"/>
+            <node text="Next oil service"/>
+            <node text="No issues found"/>
+            <node text="Synchronised: 3 h 42 min ago"/>
+            </hierarchy>"""
+        )
+        result = DetailData()
+        VolkswagenReader.parse_vehicle_report(root, result)
+        self.assertEqual(result.odometerKm, 12345)
+        self.assertEqual(result.serviceDays, 151)
+        self.assertEqual(result.warningStatus, "Keine Meldungen")
+        self.assertEqual(result.reportSyncAge, "3 h 42 min ago")
+
+    def test_gte_vehicle_report_tile_falls_back_to_vehicle_details(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Vehicle. Locked. Open details" bounds="[10,20][110,220]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(VolkswagenReader.vehicle_report_center(root), (60, 120))
 
     def test_location_details_parse_combined_address_and_parked_duration(self):
         root = ET.fromstring(

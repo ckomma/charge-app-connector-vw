@@ -101,6 +101,7 @@ class MqttPublisher:
         entities = [
             ("sensor", "soc", "State of charge", "charge", "soc", "%", "battery", "measurement", None),
             ("sensor", "range", "Range", "charge", "range", "km", "distance", "measurement", None),
+            ("sensor", "fuel_range", "Fuel range", "charge", "fuelRange", "km", "distance", "measurement", None),
             ("sensor", "status", "Charging status", "charge", "status", None, None, None, "mdi:ev-station"),
             ("sensor", "remaining_charge", "Remaining charge time", "charge", "remainingChargeMinutes", "min", "duration", "measurement", None),
             ("sensor", "charge_power", "Charge power", "charge", "chargePowerKw", "kW", "power", "measurement", None),

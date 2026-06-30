@@ -61,16 +61,24 @@ Screenshot files are named `*.local-review-only.png` and ignored by Git.
 By default the script asks for:
 
 - `overview`
-- `charging`
+- `charging-overview`
+- `charging-settings`
 - `climate`
 - `departure-times`
 - `vehicle-details`
 - `location-map`
 
+For `charging-overview`, open the small range/charge tile that shows state of
+charge and current charging status.
+
+For `charging-settings`, navigate to the charging settings page that shows
+settings such as target SoC, Battery Care and reduced AC current. Do not change
+or save any setting; only wait until the screen is stable and press Enter.
+
 The list can be overridden:
 
 ```bash
-python tools/gte-phev-diagnostics/gte_phev_diagnostics.py --screens overview climate charging
+python tools/gte-phev-diagnostics/gte_phev_diagnostics.py --screens overview climate charging-settings
 ```
 
 ## Targeted anchors
@@ -86,11 +94,17 @@ and PHEV work, including:
 - `cta_stop`
 - `rangeTile`
 - `rangeArcBatterySoc`
+- `rangeArcRangeAndUnit`
+- `chargingStatsTargetSoc`
 - `vehicleCarPlus`
 - `climateTile`
 - `toggle`
 - `value`
+- `subtitle`
 - `vwd_save_button`
+- Battery Care labels
+- reduced AC labels
+- charging-method labels
 - `LO` / `HI` temperature labels
 - departure-time labels in English and German
 

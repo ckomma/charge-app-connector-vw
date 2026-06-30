@@ -191,6 +191,7 @@ class VehicleData:
     status: str = "A"
     soc: int | None = None
     range: int | None = None
+    fuelRange: int | None = None
     remainingChargeMinutes: int | None = None
     chargeRateKmH: int | None = None
     chargePowerKw: int | None = None
@@ -612,11 +613,25 @@ class VolkswagenReader:
         match = re.search(
             r"(?:Ihr Fahrzeug|Your vehicle):\s*(.+?)\.\s*"
             r"(?:Gerade synchronisiert|Just synchronized|Just synchronised|"
-            r"Just synced)\b",
+            r"Just synced|Synchronisiert|Synchronised|Synced)\b",
             text,
             re.IGNORECASE,
         )
         return match.group(1).strip() if match else ""
+
+    @classmethod
+    def vehicle_report_center(cls, root: ET.Element) -> tuple[int, int]:
+        try:
+            return cls.described_node_center_any(
+                root,
+                (
+                    "Fahrzeugzustandsbericht.",
+                    "Vehicle health report.",
+                    "Vehicle status report.",
+                ),
+            )
+        except RuntimeError:
+            return cls.described_node_center_any(root, ("Fahrzeug.", "Vehicle."))
 
     @classmethod
     def viewport_size(cls, root: ET.Element) -> tuple[int, int]:
@@ -781,6 +796,17 @@ class VolkswagenReader:
         return int(match.group(1)) if match else None
 
     @staticmethod
+    def parse_range_value(text: str, labels: tuple[str, ...]) -> int | None:
+        label_pattern = "|".join(re.escape(label) for label in labels)
+        match = re.search(
+            rf"(?:{label_pattern}):\s*(\d+)\s*"
+            r"(?:Kilometer|kilometres?|km)",
+            text,
+            re.IGNORECASE,
+        )
+        return int(match.group(1)) if match else None
+
+    @staticmethod
     def parse_target_temperature(root: ET.Element) -> float:
         viewport_bounds = [
             bounds
@@ -894,6 +920,77 @@ class VolkswagenReader:
         )
         if mode_match:
             result.chargingMode = mode_match.group(1).strip()
+
+    @classmethod
+    def parse_vehicle_report(cls, root: ET.Element, result: DetailData) -> None:
+        values = cls.strings(root)
+        report_text = "\n".join(values)
+
+        odometer = re.search(
+            r"(?:Gesamtstrecke|Total distance|Odometer)\s*([\d.,]+)\s*km",
+            report_text,
+            re.IGNORECASE,
+        )
+        if not odometer:
+            for index, value in enumerate(values):
+                if not re.fullmatch(
+                    r"Gesamtstrecke|Total distance|Odometer",
+                    value,
+                    re.IGNORECASE,
+                ):
+                    continue
+                for candidate in values[index + 1:index + 4]:
+                    odometer = re.search(r"([\d.,]+)\s*km", candidate, re.IGNORECASE)
+                    if odometer:
+                        break
+                if odometer:
+                    break
+
+        service = re.search(
+            r"(?:Nächster Service|NÃ¤chster Service|Next service)\s*"
+            r"(?:in\s*)?(\d+)\s*(?:Tage|days)",
+            report_text,
+            re.IGNORECASE,
+        )
+        if not service:
+            for index, value in enumerate(values):
+                if not re.fullmatch(
+                    r"Nächster Service|NÃ¤chster Service|Next service",
+                    value,
+                    re.IGNORECASE,
+                ):
+                    continue
+                for candidate in values[index + 1:index + 4]:
+                    service = re.search(
+                        r"(\d+)\s*(?:Tage|days)",
+                        candidate,
+                        re.IGNORECASE,
+                    )
+                    if service:
+                        break
+                if service:
+                    break
+
+        report_sync = re.search(
+            r"(?:Synchronisiert|Synchronised|Synced):\s*([^\n]+)",
+            report_text,
+            re.IGNORECASE,
+        )
+
+        result.odometerKm = (
+            int(re.sub(r"[.,]", "", odometer.group(1))) if odometer else None
+        )
+        result.serviceDays = int(service.group(1)) if service else None
+        result.warningStatus = (
+            "Keine Meldungen"
+            if re.search(
+                r"Keine Meldungen|No messages|No warnings|No issues found",
+                report_text,
+                re.IGNORECASE,
+            )
+            else "Meldungen vorhanden"
+        )
+        result.reportSyncAge = report_sync.group(1).strip() if report_sync else ""
 
     @staticmethod
     def parse_navigation_coordinates(text: str) -> tuple[float, float]:
@@ -1092,14 +1189,14 @@ class VolkswagenReader:
             observedAt=datetime.now().astimezone().isoformat(timespec="seconds")
         )
 
-        range_match = re.search(
-            r"(?:Batteriereichweite|Battery range|Electric range):\s*(\d+)\s*"
-            r"(?:Kilometer|kilometres?|km)",
+        result.range = self.parse_range_value(
             overview_text,
-            re.IGNORECASE,
+            ("Batteriereichweite", "Battery range", "Electric range"),
         )
-        if range_match:
-            result.range = int(range_match.group(1))
+        result.fuelRange = self.parse_range_value(
+            overview_text,
+            ("Kraftstoffreichweite", "Fuel range"),
+        )
 
         result.syncAgeMinutes = self.parse_sync_age(overview_text)
         result.climater = self.parse_climater(overview_text)
@@ -1406,43 +1503,10 @@ class VolkswagenReader:
 
         self.launch()
         overview = self.open_overview()
-        x, y = self.described_node_center_any(
-            overview,
-            (
-                "Fahrzeugzustandsbericht.",
-                "Vehicle health report.",
-                "Vehicle status report.",
-            ),
-        )
+        x, y = self.vehicle_report_center(overview)
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
-        report_text = "\n".join(self.strings(self.dump_ui("vw-report.xml")))
-        odometer = re.search(
-            r"(?:Gesamtstrecke|Total distance|Odometer)\s*([\d.,]+)\s*km",
-            report_text,
-            re.IGNORECASE,
-        )
-        service = re.search(
-            r"(?:Nächster Service|Next service)\s*(?:in\s*)?(\d+)\s*"
-            r"(?:Tage|days)",
-            report_text,
-            re.IGNORECASE,
-        )
-        report_sync = re.search(
-            r"(?:Synchronisiert|Synced):\s*([^\n]+)",
-            report_text,
-            re.IGNORECASE,
-        )
-        result.odometerKm = (
-            int(re.sub(r"[.,]", "", odometer.group(1))) if odometer else None
-        )
-        result.serviceDays = int(service.group(1)) if service else None
-        result.warningStatus = (
-            "Keine Meldungen"
-            if re.search(r"Keine Meldungen|No messages|No warnings", report_text, re.IGNORECASE)
-            else "Meldungen vorhanden"
-        )
-        result.reportSyncAge = report_sync.group(1).strip() if report_sync else ""
+        self.parse_vehicle_report(self.dump_ui("vw-report.xml"), result)
 
         self.launch()
         overview = self.open_overview()

@@ -23,6 +23,7 @@ rest:
         json_attributes:
           - soc
           - range
+          - fuelRange
           - remainingChargeMinutes
           - chargeRateKmH
           - chargePowerKw
@@ -241,6 +242,14 @@ template:
         device_class: distance
         availability: >
           {{ state_attr('sensor.volkswagen_app_status', 'range') is number }}
+
+      - name: "Volkswagen App Fuel Range"
+        unique_id: volkswagen_app_fuel_range
+        state: "{{ state_attr('sensor.volkswagen_app_status', 'fuelRange') }}"
+        unit_of_measurement: "km"
+        device_class: distance
+        availability: >
+          {{ state_attr('sensor.volkswagen_app_status', 'fuelRange') is number }}
 
       - name: "Volkswagen App Odometer"
         unique_id: volkswagen_app_odometer

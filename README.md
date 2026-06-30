@@ -16,6 +16,7 @@ Optional authenticated actions use the same accessibility UI.
   "status": "B",
   "soc": 30,
   "range": 126,
+  "fuelRange": null,
   "remainingChargeMinutes": null,
   "chargeRateKmH": null,
   "chargePowerKw": null,
@@ -34,6 +35,9 @@ displayed address, parked duration, latitude and longitude. Coordinates are
 read from the navigation intent opened by the Route button. The endpoint is
 intentionally separate because map navigation is slower than the evcc
 charge-data poll.
+
+For PHEV/hybrid vehicles, `range` remains the electric battery range and
+`fuelRange` exposes the fuel range when the Volkswagen app shows it.
 
 `GET /details` returns the target temperature, automatic window heating,
 front climate zones, odometer, service interval, warning status and departure
