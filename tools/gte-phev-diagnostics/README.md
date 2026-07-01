@@ -76,6 +76,11 @@ For `charging-settings`, navigate to the charging settings page that shows
 settings such as target SoC, Battery Care and reduced AC current. Do not change
 or save any setting; only wait until the screen is stable and press Enter.
 
+For `climate`, navigate to the climate screen that shows the target temperature
+picker. The summary reports all detected temperature labels, including
+localized decimal values and the `LO` / `HI` boundary labels when the app shows
+them.
+
 ## Optional location marker details
 
 The normal `location-map` capture only verifies the visible map canvas and map

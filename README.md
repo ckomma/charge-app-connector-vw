@@ -180,6 +180,10 @@ Charging modes are `immediate`, `preferred-times`, `departure` and
 `departure-climate`. Location-specific direct-charge limits support 0 through
 50 percent in ten-point steps. The connector verifies displayed values after
 changes and fails safely when the Volkswagen app exposes no stable control.
+Climate target temperatures support 15.5 through 30.0 degrees Celsius in
+half-degree steps. Volkswagen app variants that label the lower and upper
+climate boundaries as `LO` and `HI` are mapped to 15.5 and 30.0 degrees
+Celsius.
 Some PHEV variants expose automatic AC connector release in global charging
 settings; when present, it is reported as `autoReleaseAcConnector`.
 

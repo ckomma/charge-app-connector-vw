@@ -932,6 +932,27 @@ class VolkswagenReader:
         return int(match.group(1)) if match else None
 
     @staticmethod
+    def temperature_label_value(label: str) -> float | None:
+        value = label.strip().replace(",", ".")
+        if value.casefold() == "lo":
+            return 15.5
+        if value.casefold() == "hi":
+            return 30.0
+        if re.fullmatch(r"\d{2}(?:\.\d)?", value):
+            return float(value)
+        return None
+
+    @staticmethod
+    def temperature_node_value(node: ET.Element) -> float | None:
+        for key in ("text", "content-desc"):
+            value = VolkswagenReader.temperature_label_value(
+                node.attrib.get(key, "")
+            )
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
     def parse_target_temperature(root: ET.Element) -> float:
         viewport_bounds = [
             bounds
@@ -946,14 +967,12 @@ class VolkswagenReader:
         ) / 2
         candidates: list[tuple[float, float]] = []
         for node in root.iter():
-            value = node.attrib.get("text", "").strip()
-            if not re.fullmatch(r"\d{2}(?:[.,]\d)?", value):
+            value = VolkswagenReader.temperature_node_value(node)
+            if value is None:
                 continue
             center = VolkswagenReader.node_center(node)
             if center:
-                candidates.append(
-                    (abs(center[0] - viewport_center), float(value.replace(",", ".")))
-                )
+                candidates.append((abs(center[0] - viewport_center), value))
         if not candidates:
             raise RuntimeError("Volkswagen target temperature not found")
         return min(candidates)[1]
@@ -963,10 +982,8 @@ class VolkswagenReader:
         cls, root: ET.Element, desired: float
     ) -> tuple[int, int]:
         for node in root.iter():
-            value = node.attrib.get("text", "").strip().replace(",", ".")
-            if not re.fullmatch(r"\d{2}(?:\.\d)?", value):
-                continue
-            if float(value) != desired:
+            value = cls.temperature_node_value(node)
+            if value != desired:
                 continue
             center = cls.node_center(node)
             if center:
@@ -1690,8 +1707,8 @@ class VolkswagenReader:
 
     def set_target_temperature(self, desired: float) -> float:
         desired = round(desired * 2) / 2
-        if desired < 16 or desired > 30:
-            raise ValueError("Target temperature must be between 16 and 30 °C")
+        if desired < 15.5 or desired > 30:
+            raise ValueError("Target temperature must be between 15.5 and 30 °C")
         with self.screen_session():
             self.launch()
             climate = self.open_climate()

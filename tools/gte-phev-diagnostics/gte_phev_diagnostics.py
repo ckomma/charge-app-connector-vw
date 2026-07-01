@@ -275,6 +275,7 @@ class ScreenCapture:
     strings: list[str]
     keyword_strings: list[str]
     targeted_anchors: dict[str, list[dict[str, object]]]
+    temperature_labels: list[dict[str, object]]
     class_counts: dict[str, int]
     resource_suffixes: list[str]
     xml_file: str
@@ -546,6 +547,51 @@ def anchor_matches(root: ET.Element) -> dict[str, list[dict[str, object]]]:
     return {key: value for key, value in matches.items() if value}
 
 
+def temperature_label_value(label: str) -> float | None:
+    value = label.strip().replace(",", ".")
+    if value.casefold() == "lo":
+        return 15.5
+    if value.casefold() == "hi":
+        return 30.0
+    if re.fullmatch(r"\d{2}(?:\.\d)?", value):
+        return float(value)
+    return None
+
+
+def temperature_labels(root: ET.Element) -> list[dict[str, object]]:
+    labels: list[dict[str, object]] = []
+    for node in root.iter():
+        for source in ("text", "content-desc"):
+            raw = node.attrib.get(source, "").strip()
+            value = temperature_label_value(raw)
+            if value is None:
+                continue
+            excerpt = node_excerpt(node)
+            excerpt["source"] = source
+            excerpt["label"] = raw
+            excerpt["temperatureC"] = value
+            labels.append(excerpt)
+            break
+    return sorted(
+        labels,
+        key=lambda item: (
+            node_sort_y(str(item.get("bounds", ""))),
+            node_sort_x(str(item.get("bounds", ""))),
+            str(item.get("label", "")),
+        ),
+    )
+
+
+def node_sort_x(bounds: str) -> int:
+    match = re.fullmatch(r"\[(\d+),(\d+)]\[(\d+),(\d+)]", bounds)
+    return int(match.group(1)) if match else 0
+
+
+def node_sort_y(bounds: str) -> int:
+    match = re.fullmatch(r"\[(\d+),(\d+)]\[(\d+),(\d+)]", bounds)
+    return int(match.group(2)) if match else 0
+
+
 def summarize_screen(name: str, root: ET.Element, output_dir: Path) -> ScreenCapture:
     sanitized = sanitize_tree(root)
     xml_file = output_dir / f"{name}.sanitized.xml"
@@ -572,6 +618,7 @@ def summarize_screen(name: str, root: ET.Element, output_dir: Path) -> ScreenCap
         strings=safe_strings,
         keyword_strings=keyword_strings(safe_strings),
         targeted_anchors=anchor_matches(root),
+        temperature_labels=temperature_labels(sanitized) if name == "climate" else [],
         class_counts=dict(classes.most_common()),
         resource_suffixes=resources,
         xml_file=xml_file.name,
@@ -669,6 +716,18 @@ def write_report(
                 lines.append(f"  - {anchor}: {len(matches)}")
         else:
             lines.append("  - none detected")
+        if capture.temperature_labels:
+            lines.extend(
+                [
+                    "- Climate temperature labels:",
+                ]
+            )
+            for label in capture.temperature_labels:
+                lines.append(
+                    "  - "
+                    f"{label.get('label')} -> {label.get('temperatureC')} °C "
+                    f"({label.get('source')}, {label.get('bounds')})"
+                )
         lines.extend(
             [
                 "- PHEV-relevant strings:",

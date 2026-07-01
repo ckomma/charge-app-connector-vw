@@ -839,6 +839,76 @@ class ParserTests(unittest.TestCase):
             (500, 1100),
         )
 
+    def test_target_temperature_accepts_lo_hi_boundaries(self):
+        root = ET.fromstring(
+            '<hierarchy><node text="29.5" bounds="[0,1020][180,1180]"/>'
+            '<node text="HI" bounds="[300,1000][700,1200]"/>'
+            '<node content-desc="LO" bounds="[900,1020][1080,1180]"/></hierarchy>'
+        )
+        self.assertEqual(VolkswagenReader.parse_target_temperature(root), 30.0)
+        self.assertEqual(
+            VolkswagenReader.temperature_value_center(root, 30.0),
+            (500, 1100),
+        )
+        self.assertEqual(
+            VolkswagenReader.temperature_value_center(root, 15.5),
+            (990, 1100),
+        )
+
+    def test_target_temperature_can_step_to_hi(self):
+        initial = ET.fromstring(
+            '<hierarchy><node text="29.5" bounds="[300,1000][700,1200]"/>'
+            '<node text="HI" bounds="[900,1020][1080,1180]"/></hierarchy>'
+        )
+        updated = ET.fromstring(
+            '<hierarchy><node text="29.5" bounds="[0,1020][180,1180]"/>'
+            '<node text="HI" bounds="[300,1000][700,1200]"/></hierarchy>'
+        )
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "screen_session", nullcontext),
+                    patch.object(reader, "launch"),
+                    patch.object(reader, "open_climate", return_value=initial),
+                    patch.object(reader, "dump_ui", side_effect=(updated, updated)),
+                    patch.object(reader, "shell") as shell,
+                    patch("time.sleep"),
+                ):
+                    self.assertEqual(reader.set_target_temperature(30), 30)
+                shell.assert_called_once_with("input", "tap", "990", "1100")
+
+    def test_target_temperature_can_step_to_lo(self):
+        initial = ET.fromstring(
+            '<hierarchy><node content-desc="LO" bounds="[0,1020][180,1180]"/>'
+            '<node text="16" bounds="[300,1000][700,1200]"/></hierarchy>'
+        )
+        updated = ET.fromstring(
+            '<hierarchy><node content-desc="LO" bounds="[300,1000][700,1200]"/>'
+            '<node text="16" bounds="[900,1020][1080,1180]"/></hierarchy>'
+        )
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "screen_session", nullcontext),
+                    patch.object(reader, "launch"),
+                    patch.object(reader, "open_climate", return_value=initial),
+                    patch.object(reader, "dump_ui", side_effect=(updated, updated)),
+                    patch.object(reader, "shell") as shell,
+                    patch("time.sleep"),
+                ):
+                    self.assertEqual(reader.set_target_temperature(15.5), 15.5)
+                shell.assert_called_once_with("input", "tap", "90", "1100")
+
     def test_open_overview_waits_for_range_tile(self):
         loading = ET.fromstring('<hierarchy><node text="Loading"/></hierarchy>')
         ready = ET.fromstring(
