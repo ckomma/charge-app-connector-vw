@@ -858,6 +858,7 @@ class ParserTests(unittest.TestCase):
                         "dump_ui_with_overlay_recovery",
                         side_effect=(loading, ready),
                     ),
+                    patch.object(reader, "app_in_foreground", return_value=False),
                     patch.object(reader, "shell") as shell,
                     patch("time.sleep") as sleep,
                 ):
@@ -1476,6 +1477,25 @@ class ParserTests(unittest.TestCase):
                     self.assertTrue(reader.app_in_foreground())
                 shell.assert_called_once_with("dumpsys", "window", timeout=20)
 
+    def test_resumed_activity_counts_as_foreground_without_current_focus(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with patch.object(
+                    reader,
+                    "shell",
+                    side_effect=(
+                        "mCurrentFocus=null",
+                        "topResumedActivity=ActivityRecord{12 u0 "
+                        "com.volkswagen.weconnect/.SingleActivity t971}",
+                    ),
+                ):
+                    self.assertTrue(reader.app_in_foreground())
+
     def test_focused_app_does_not_override_notification_shade(self):
         with TemporaryDirectory() as directory:
             environment = {
@@ -1516,6 +1536,83 @@ class ParserTests(unittest.TestCase):
                 ):
                     self.assertFalse(reader.app_in_foreground())
 
+    def test_launch_uses_direct_activity_start_first(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            calls: list[tuple[str, ...]] = []
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(
+                        reader,
+                        "shell",
+                        side_effect=lambda *args, **_kwargs: calls.append(args) or "",
+                    ),
+                    patch.object(reader, "app_in_foreground", return_value=True),
+                    patch("time.sleep"),
+                ):
+                    reader.launch()
+            self.assertEqual(
+                calls,
+                [
+                    ("am", "force-stop", "com.volkswagen.weconnect"),
+                    (
+                        "am",
+                        "start",
+                        "-n",
+                        "com.volkswagen.weconnect/.SingleActivity",
+                    ),
+                ],
+            )
+
+    def test_launch_falls_back_to_monkey_when_activity_start_misses(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            calls: list[tuple[str, ...]] = []
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(
+                        reader,
+                        "shell",
+                        side_effect=lambda *args, **_kwargs: calls.append(args) or "",
+                    ),
+                    patch.object(
+                        reader,
+                        "app_in_foreground",
+                        side_effect=(False, True),
+                    ),
+                    patch("time.sleep"),
+                ):
+                    reader.launch()
+            self.assertEqual(calls[0], ("am", "force-stop", "com.volkswagen.weconnect"))
+            self.assertEqual(
+                calls[1],
+                (
+                    "am",
+                    "start",
+                    "-n",
+                    "com.volkswagen.weconnect/.SingleActivity",
+                ),
+            )
+            self.assertEqual(
+                calls[2],
+                (
+                    "monkey",
+                    "-p",
+                    "com.volkswagen.weconnect",
+                    "-c",
+                    "android.intent.category.LAUNCHER",
+                    "1",
+                ),
+            )
+
     def test_xiaomi_proximity_overlay_is_detected(self):
         root = ET.fromstring(
             '<hierarchy><node text="Den Kopfhörerbereich nicht abdecken" /></hierarchy>'
@@ -1551,6 +1648,31 @@ class ParserTests(unittest.TestCase):
                 shell.assert_called_once_with(
                     "input", "keyevent", "KEYCODE_VOLUME_UP"
                 )
+
+    def test_ui_dump_uses_compressed_fallback_for_launcher_tree(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            launcher = ET.fromstring(
+                '<hierarchy><node resource-id="com.microsoft.launcher:id/workspace" text="Search" /></hierarchy>'
+            )
+            app = ET.fromstring(
+                '<hierarchy><node resource-id="com.volkswagen.weconnect:id/rangeTile" /></hierarchy>'
+            )
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "dump_ui", side_effect=(launcher, app)) as dump,
+                    patch.object(reader, "app_in_foreground", return_value=True),
+                ):
+                    result = reader.dump_ui_with_compose_fallback("overview.xml")
+            self.assertIs(result, app)
+            self.assertEqual(
+                dump.call_args_list[1].kwargs,
+                {"compressed": True},
+            )
 
     def test_ui_dump_falls_back_to_explicit_emulated_storage_path(self):
         with TemporaryDirectory() as directory:

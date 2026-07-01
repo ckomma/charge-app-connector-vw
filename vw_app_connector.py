@@ -446,12 +446,16 @@ class VolkswagenReader:
         except RuntimeError:
             return self.shell("cat", fallback_path, timeout=timeout)
 
-    def dump_ui(self, remote_name: str) -> ET.Element:
+    def dump_ui(self, remote_name: str, compressed: bool = False) -> ET.Element:
         remote_path, _ = self.ui_dump_paths(remote_name)
         last_error: Exception | None = None
         for attempt in range(2):
             try:
-                self.shell("uiautomator", "dump", remote_path, timeout=30)
+                args = ["uiautomator", "dump"]
+                if compressed:
+                    args.append("--compressed")
+                args.append(remote_path)
+                self.shell(*args, timeout=30)
                 return ET.fromstring(self.read_ui_dump(remote_name, timeout=10))
             except (RuntimeError, ET.ParseError) as exc:
                 last_error = exc
@@ -481,6 +485,19 @@ class VolkswagenReader:
             root = self.dump_ui(remote_name)
         return root
 
+    def dump_ui_with_compose_fallback(self, remote_name: str) -> ET.Element:
+        root = self.dump_ui_with_overlay_recovery(remote_name)
+        if self.has_app_resource_nodes(root) or not self.app_in_foreground():
+            return root
+        compressed = self.dump_ui(remote_name, compressed=True)
+        return compressed if self.has_app_resource_nodes(compressed) else root
+
+    def has_app_resource_nodes(self, root: ET.Element) -> bool:
+        return any(
+            self.package in node.attrib.get("resource-id", "")
+            for node in root.iter()
+        )
+
     def save_diagnostics(self, category: str, error: Exception) -> None:
         stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
         stem = self.diagnostics_dir / f"{stamp}-{category.casefold()}"
@@ -504,7 +521,7 @@ class VolkswagenReader:
         for navigation_attempt in range(2):
             deadline = time.monotonic() + self.ui_update_timeout
             while True:
-                overview = self.dump_ui_with_overlay_recovery("vw-overview.xml")
+                overview = self.dump_ui_with_compose_fallback("vw-overview.xml")
                 overview_text = "\n".join(self.strings(overview)).casefold()
                 if (
                     "too many requests" in overview_text
@@ -1025,21 +1042,21 @@ class VolkswagenReader:
     def launch(self) -> None:
         self.shell("am", "force-stop", self.package)
         self.shell(
-            "monkey",
-            "-p",
-            self.package,
-            "-c",
-            "android.intent.category.LAUNCHER",
-            "1",
+            "am",
+            "start",
+            "-n",
+            f"{self.package}/.SingleActivity",
             timeout=15,
         )
         time.sleep(self.start_wait)
         if not self.app_in_foreground():
             self.shell(
-                "am",
-                "start",
-                "-n",
-                f"{self.package}/.SingleActivity",
+                "monkey",
+                "-p",
+                self.package,
+                "-c",
+                "android.intent.category.LAUNCHER",
+                "1",
                 timeout=15,
             )
             time.sleep(self.start_wait)
@@ -1060,6 +1077,13 @@ class VolkswagenReader:
                 return True
             if "null" not in focused_window.casefold():
                 return False
+        activity = self.shell("dumpsys", "activity", "activities", timeout=20)
+        for line in activity.splitlines():
+            if (
+                "topResumedActivity" in line
+                or "mResumedActivity" in line
+            ) and self.package in line:
+                return True
         return bool(
             re.search(rf"mObscuringWindow=.*{re.escape(self.package)}", windows)
             or re.search(rf"mFocusedApp=.*{re.escape(self.package)}", windows)

@@ -32,6 +32,16 @@ coordinates, screenshots, raw UI dumps, and private network details.
   display off after the operation.
 - Location reads use the same UI retry and overlay-recovery path as charge and
   detail reads.
+- Since 2026-07-01, app startup first uses the direct Volkswagen
+  `SingleActivity` component and falls back to the launcher intent only if the
+  app is not foreground. Foreground detection must prefer `mCurrentFocus` and
+  treat an active non-Volkswagen focus such as launcher or notification shade
+  as not foreground; `topResumedActivity`, `mResumedActivity`,
+  `mObscuringWindow` and `mFocusedApp` are compatibility fallbacks.
+- If the Volkswagen app is foreground but the accessibility dump still contains
+  only launcher/system resource nodes, retry once with `uiautomator dump
+  --compressed`. This handles Android/Compose dump variants without accepting
+  a launcher tree as Volkswagen UI.
 - A failed background refresh waits
   `BACKGROUND_ERROR_RETRY_SECONDS`, default 900 seconds, before another
   attempt. This prevents a persistent UI obstruction from consuming the daily
@@ -253,6 +263,13 @@ coordinates, screenshots, raw UI dumps, and private network details.
 - The latest production-Redmi verification on 2026-06-19 used Volkswagen app
   `3.63.2` (`versionCode 41262`). Record app versions as tested baselines, not
   strict compatibility pins.
+- On 2026-07-01, the foreground/startup/UI-dump refactoring was deployed for
+  live verification before commit. Production Redmi E2E passed `/health`,
+  `/charge`, `/details`, `/location`, charging settings, climate start/stop,
+  and unlock/lock with vehicle state restored and normal usage limits restored.
+  Pixel 10 USB E2E also passed the same read and write-action path while
+  temporarily selected with test budgets, then the runtime was restored to the
+  production Redmi.
 - After wake, overlay, selector, or localization changes, test on a real phone
   before committing.
 - Verify `/health`, the affected cached endpoint, service logs, screen-off
