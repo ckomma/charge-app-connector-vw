@@ -270,6 +270,24 @@ coordinates, screenshots, raw UI dumps, and private network details.
   Pixel 10 USB E2E also passed the same read and write-action path while
   temporarily selected with test budgets, then the runtime was restored to the
   production Redmi.
+- On 2026-07-01, the overview-menu readiness fix for transient
+  `Discover Volkswagen` banners was deployed to the production Redmi runtime
+  and live-verified. Direct live reads passed charge, details and location,
+  including details navigation through climate settings, vehicle report and
+  departure times. API write E2E passed climate start/stop and unlock/lock,
+  with climate off and the vehicle locked again afterward. Temporary test
+  budgets were restored to the exact production limits and no cooldown was
+  active.
+- Pixel 10 follow-up on 2026-07-01 used USB with `SLEEP_AFTER_OPERATION=false`
+  and temporary test budgets. Charge and details refreshed successfully on the
+  Pixel. Location was not fully verifiable because the Volkswagen app showed
+  `Limited Services` / not logged into the vehicle and a rating nag screen;
+  a Google Maps confirmation dialog was also observed. The connector now
+  dismisses the Google Maps consent and common rating-style app notices, and
+  reports the limited-services state as an app-state error instead of a generic
+  missing navigation element. The runtime was restored to the production Redmi
+  configuration with exact production limits, no cooldown, and Pixel stay-awake
+  cleared.
 - After wake, overlay, selector, or localization changes, test on a real phone
   before committing.
 - Verify `/health`, the affected cached endpoint, service logs, screen-off

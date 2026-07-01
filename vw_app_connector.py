@@ -517,9 +517,13 @@ class VolkswagenReader:
         except Exception:
             LOG.exception("Could not save diagnostics")
 
-    def open_overview(self) -> ET.Element:
+    def open_overview(
+        self, required_prefixes: tuple[str, ...] = ()
+    ) -> ET.Element:
         for navigation_attempt in range(2):
             deadline = time.monotonic() + self.ui_update_timeout
+            saw_overview = False
+            nudged_overview = False
             while True:
                 overview = self.dump_ui_with_compose_fallback("vw-overview.xml")
                 overview_text = "\n".join(self.strings(overview)).casefold()
@@ -530,10 +534,37 @@ class VolkswagenReader:
                     raise UsageLimit("Volkswagen app reports too many requests")
                 try:
                     self.range_tile_center(overview)
-                    return overview
+                    saw_overview = True
+                    if not required_prefixes:
+                        return overview
                 except RuntimeError:
-                    if time.monotonic() >= deadline:
-                        break
+                    pass
+                if required_prefixes:
+                    try:
+                        self.described_node_center_any(overview, required_prefixes)
+                        return overview
+                    except RuntimeError:
+                        pass
+                if time.monotonic() >= deadline:
+                    break
+                if saw_overview and required_prefixes and not nudged_overview:
+                    width, height = self.viewport_size(overview)
+                    # Volkswagen occasionally shows a non-semantic promotional
+                    # banner over the overview menu. A single bounds-derived
+                    # content nudge gives that transient layer time to clear
+                    # without depending on a fixed close-button coordinate.
+                    self.shell(
+                        "input",
+                        "swipe",
+                        str(width // 2),
+                        str(round(height * 0.78)),
+                        str(width // 2),
+                        str(round(height * 0.48)),
+                        "300",
+                    )
+                    nudged_overview = True
+                    time.sleep(1)
+                else:
                     time.sleep(0.5)
             if navigation_attempt == 0:
                 self.shell("input", "keyevent", "KEYCODE_BACK")
@@ -714,6 +745,66 @@ class VolkswagenReader:
             if time.monotonic() >= deadline:
                 raise RuntimeError("Volkswagen S-PIN dialog not found")
             time.sleep(0.5)
+
+    def dismiss_map_notice(self, root: ET.Element) -> ET.Element:
+        text = "\n".join(self.strings(root)).casefold()
+        if "google maps" not in text:
+            return root
+        try:
+            x, y = self.described_node_center_any(
+                root,
+                (
+                    "Agree",
+                    "I agree",
+                    "Accept",
+                    "OK",
+                    "Zustimmen",
+                    "Einverstanden",
+                    "Akzeptieren",
+                ),
+            )
+        except RuntimeError:
+            return root
+        self.shell("input", "tap", str(x), str(y))
+        time.sleep(1)
+        return self.dump_ui_with_overlay_recovery("vw-location-map-notice-dismissed.xml")
+
+    def dismiss_app_notice(self, root: ET.Element, remote_name: str) -> ET.Element:
+        for labels in (
+            (
+                "Not now",
+                "Maybe later",
+                "No thanks",
+                "Later",
+                "Nicht jetzt",
+                "Später",
+                "Spaeter",
+                "Nein danke",
+            ),
+            ("Close", "Schließen", "Schliessen"),
+        ):
+            try:
+                x, y = self.described_node_center_any(root, labels)
+            except RuntimeError:
+                continue
+            self.shell("input", "tap", str(x), str(y))
+            time.sleep(1)
+            return self.dump_ui_with_overlay_recovery(remote_name)
+        return root
+
+    def wait_for_car_locate_button(self, remote_name: str) -> ET.Element:
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            root = self.dismiss_map_notice(
+                self.dump_ui_with_overlay_recovery(remote_name)
+            )
+            try:
+                self.described_node_center(root, "Car Locate Button")
+                return root
+            except RuntimeError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.5)
 
     @classmethod
     def parse_location_details(cls, root: ET.Element) -> tuple[str, str]:
@@ -1332,13 +1423,27 @@ class VolkswagenReader:
 
     def _read_location(self) -> LocationData:
         self.launch()
-        root = self.dump_ui_with_overlay_recovery("vw-location-start.xml")
+        root = self.dismiss_app_notice(
+            self.dump_ui_with_overlay_recovery("vw-location-start.xml"),
+            "vw-location-start-notice-dismissed.xml",
+        )
+        root_text = "\n".join(self.strings(root)).casefold()
+        if (
+            "limited services" in root_text
+            or "not logged into the vehicle" in root_text
+            or "eingeschränkte dienste" in root_text
+            or "eingeschraenkte dienste" in root_text
+            or "nicht im fahrzeug angemeldet" in root_text
+        ):
+            raise RuntimeError(
+                "Volkswagen app reports limited services; not logged into the vehicle"
+            )
         vehicle_name = self.parse_vehicle_name(root)
         x, y = self.described_node_center(root, "Navigation Tab")
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
 
-        map_root = self.dump_ui("vw-location-map.xml")
+        map_root = self.wait_for_car_locate_button("vw-location-map.xml")
         x, y = self.described_node_center(map_root, "Car Locate Button")
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
@@ -1503,7 +1608,9 @@ class VolkswagenReader:
             time.sleep(0.5)
 
     def open_climate(self) -> ET.Element:
-        overview = self.open_overview()
+        overview = self.open_overview(
+            ("Vorklimatisierung.", "Air conditioning.", "Climate control.")
+        )
         x, y = self.described_node_center_any(
             overview,
             ("Vorklimatisierung.", "Air conditioning.", "Climate control."),
@@ -1547,14 +1654,22 @@ class VolkswagenReader:
             result.climateZoneFrontRight = zones[1].attrib.get("checked") == "true"
 
         self.launch()
-        overview = self.open_overview()
+        overview = self.open_overview(
+            (
+                "Fahrzeugzustandsbericht.",
+                "Vehicle health report.",
+                "Vehicle status report.",
+                "Fahrzeug.",
+                "Vehicle.",
+            )
+        )
         x, y = self.vehicle_report_center(overview)
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
         self.parse_vehicle_report(self.dump_ui("vw-report.xml"), result)
 
         self.launch()
-        overview = self.open_overview()
+        overview = self.open_overview(("Abfahrtszeiten.", "Departure times."))
         x, y = self.described_node_center_any(
             overview, ("Abfahrtszeiten.", "Departure times.")
         )

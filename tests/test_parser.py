@@ -866,6 +866,48 @@ class ParserTests(unittest.TestCase):
                 shell.assert_not_called()
                 sleep.assert_called_once_with(0.5)
 
+    def test_open_overview_waits_for_required_overview_tile(self):
+        banner = ET.fromstring(
+            '<hierarchy>'
+            '<node bounds="[0,0][1080,2400]"/>'
+            '<node content-desc="Battery range: 100 kilometres" '
+            'bounds="[10,20][110,120]"/>'
+            '<node text="Discover Volkswagen" bounds="[40,1700][1040,1900]"/>'
+            '</hierarchy>'
+        )
+        ready = ET.fromstring(
+            '<hierarchy>'
+            '<node content-desc="Battery range: 100 kilometres" '
+            'bounds="[10,20][110,120]"/>'
+            '<node content-desc="Vehicle health report. Open" '
+            'bounds="[20,500][300,700]"/>'
+            '</hierarchy>'
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(
+                        reader,
+                        "dump_ui_with_compose_fallback",
+                        side_effect=(banner, ready),
+                    ),
+                    patch.object(reader, "shell") as shell,
+                    patch("time.sleep") as sleep,
+                ):
+                    self.assertIs(
+                        reader.open_overview(("Vehicle health report.",)),
+                        ready,
+                    )
+                shell.assert_called_once_with(
+                    "input", "swipe", "540", "1872", "540", "1152", "300"
+                )
+                sleep.assert_called_once_with(1)
+
     def test_pin_input_and_viewport_are_semantic(self):
         root = ET.fromstring(
             '<hierarchy><node bounds="[0,0][1080,2424]"/>'
@@ -1419,12 +1461,12 @@ class ParserTests(unittest.TestCase):
                     patch.object(
                         reader,
                         "dump_ui_with_overlay_recovery",
-                        return_value=start,
+                        side_effect=(start, map_root),
                     ),
                     patch.object(
                         reader,
                         "dump_ui",
-                        side_effect=(map_root, centered, details),
+                        side_effect=(centered, details),
                     ),
                     patch.object(reader, "shell", side_effect=shell),
                     patch("time.sleep"),
@@ -1437,6 +1479,134 @@ class ParserTests(unittest.TestCase):
         self.assertIn(maps_stop, calls)
         self.assertIn(route_tap, calls)
         self.assertLess(calls.index(maps_stop), calls.index(route_tap))
+
+    def test_location_map_notice_is_dismissed(self):
+        notice = ET.fromstring(
+            """<hierarchy>
+            <node text="This map uses Google Maps"/>
+            <node text="Agree" bounds="[400,1800][700,1900]"/>
+            </hierarchy>"""
+        )
+        ready = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Car Locate Button" bounds="[20,20][120,120]"/>
+            </hierarchy>"""
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "shell") as shell,
+                    patch.object(
+                        reader,
+                        "dump_ui_with_overlay_recovery",
+                        return_value=ready,
+                    ),
+                    patch("time.sleep") as sleep,
+                ):
+                    self.assertIs(reader.dismiss_map_notice(notice), ready)
+                shell.assert_called_once_with("input", "tap", "550", "1850")
+                sleep.assert_called_once_with(1)
+
+    def test_app_rating_notice_is_dismissed(self):
+        notice = ET.fromstring(
+            """<hierarchy>
+            <node text="Enjoying Volkswagen?"/>
+            <node text="Not now" bounds="[320,1800][760,1900]"/>
+            </hierarchy>"""
+        )
+        ready = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Navigation Tab" bounds="[10,10][110,110]"/>
+            </hierarchy>"""
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "shell") as shell,
+                    patch.object(
+                        reader,
+                        "dump_ui_with_overlay_recovery",
+                        return_value=ready,
+                    ),
+                    patch("time.sleep") as sleep,
+                ):
+                    self.assertIs(
+                        reader.dismiss_app_notice(
+                            notice,
+                            "vw-location-start-notice-dismissed.xml",
+                        ),
+                        ready,
+                    )
+                shell.assert_called_once_with("input", "tap", "540", "1850")
+                sleep.assert_called_once_with(1)
+
+    def test_location_limited_services_fails_with_app_state_error(self):
+        limited = ET.fromstring(
+            """<hierarchy>
+            <node text="Limited Services"/>
+            <node text="You are currently not logged into the vehicle"/>
+            </hierarchy>"""
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "launch"),
+                    patch.object(
+                        reader,
+                        "dump_ui_with_overlay_recovery",
+                        return_value=limited,
+                    ),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "limited services"):
+                        reader._read_location()
+
+    def test_location_wait_dismisses_map_notice_before_car_locate(self):
+        notice = ET.fromstring(
+            """<hierarchy>
+            <node text="This map uses Google Maps"/>
+            <node text="Agree" bounds="[400,1800][700,1900]"/>
+            </hierarchy>"""
+        )
+        ready = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Car Locate Button" bounds="[20,20][120,120]"/>
+            </hierarchy>"""
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(
+                        reader,
+                        "dump_ui_with_overlay_recovery",
+                        side_effect=(notice, ready),
+                    ),
+                    patch.object(reader, "shell"),
+                    patch("time.sleep"),
+                ):
+                    self.assertIs(
+                        reader.wait_for_car_locate_button("vw-location-map.xml"),
+                        ready,
+                    )
 
     def test_miui_obscuring_window_counts_as_foreground(self):
         with TemporaryDirectory() as directory:
