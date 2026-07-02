@@ -18,7 +18,7 @@ the HAOS host.
 
 ## Install From The Add-on Store
 
-Add this GitHub repository URL as a custom add-on repository in Home Assistant:
+Add this GitHub repository URL [`charge-app-connector-vw`](../..) as a custom add-on repository in Home Assistant:
 
 ```text
 Settings -> Add-ons -> Add-on Store -> Repositories
