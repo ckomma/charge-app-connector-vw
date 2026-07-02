@@ -2100,6 +2100,60 @@ class ParserTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "Neither USB"):
                         reader.select_serial()
 
+    def test_adb_serial_auto_selects_single_usb_device(self):
+        output = """List of devices attached
+usb-serial device usb:1-1 product:phone model:phone
+192.0.2.10:37123 device product:phone model:phone
+offline-serial offline
+"""
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "auto",
+                "ADB_MODE": "usb",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(
+                        reader,
+                        "run_adb",
+                        return_value=SimpleNamespace(
+                            returncode=0,
+                            stdout=output,
+                            stderr="",
+                        ),
+                    ),
+                    patch.object(reader, "adb_state", return_value="device"),
+                ):
+                    self.assertEqual(reader.select_serial(), "usb-serial")
+                    self.assertEqual(reader.adb_transport, "usb")
+
+    def test_adb_serial_auto_requires_exactly_one_usb_device(self):
+        output = """List of devices attached
+first device usb:1-1
+second device usb:1-2
+"""
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "auto",
+                "ADB_MODE": "usb",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with patch.object(
+                    reader,
+                    "run_adb",
+                    return_value=SimpleNamespace(
+                        returncode=0,
+                        stdout=output,
+                        stderr="",
+                    ),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "Multiple USB"):
+                        reader.select_serial()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$sourceDir = Join-Path $repoRoot "deploy\home-assistant\vw-app-connector"
+$sourceDir = Join-Path $repoRoot "addons\vw-app-connector"
 if (-not $OutputPath) {
     $OutputPath = Join-Path $repoRoot "build\home-assistant\vw-app-connector"
 }

@@ -101,7 +101,8 @@ and accessibility metadata can change independently of the connector.
 
 Environment variables:
 
-- `ADB_SERIAL`: required ADB serial
+- `ADB_SERIAL`: required ADB serial; set to `auto` to select the only
+  authorized USB ADB device
 - `ADB_MODE`: `usb` (default), `wifi` or `auto`
 - `ADB_WIFI_ADDRESS`: optional Android wireless-debugging address as `IP:Port`;
   required for `wifi`, used as fallback by `auto`
@@ -256,10 +257,16 @@ generated on the target host using the dialog on the phone.
 
 ### Home Assistant App
 
-Home Assistant App/Add-on packaging is available in
-[`deploy/home-assistant/`](deploy/home-assistant/). It is an optional
-deployment method alongside systemd and Docker Compose for HA OS or Supervisor
-installations.
+Home Assistant App/Add-on packaging is available as a Home Assistant custom
+add-on repository. In Home Assistant, add this GitHub repository URL to:
+
+```text
+Settings -> Add-ons -> Add-on Store -> Repositories
+```
+
+The add-on metadata lives in [`addons/vw-app-connector/`](addons/vw-app-connector/).
+It is an optional deployment method alongside systemd and Docker Compose for HA
+OS or Supervisor installations.
 
 The app runs the same connector service, stores state below its Supervisor
 managed `/data` directory, and exposes the same REST API on port `9920`.
@@ -268,7 +275,7 @@ REST package below. ADB over Wi-Fi is usually the cleanest HA OS setup; USB ADB
 requires that the Android device is visible to the HA host or VM.
 
 See [`deploy/home-assistant/README.md`](deploy/home-assistant/README.md) for
-packaging, installation, configuration and smoke-test steps.
+custom repository, packaging, installation, configuration and smoke-test steps.
 
 The Android device must not use a secure display PIN, password or pattern when
 `SLEEP_AFTER_OPERATION=true`. ADB wakes the display and dismisses the

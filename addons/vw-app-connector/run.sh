@@ -45,7 +45,9 @@ export MQTT_CLIENT_ID="$(opt mqtt_client_id "vw-app-connector")"
 export MQTT_TLS="$(opt mqtt_tls "false")"
 
 mkdir -p /data/cache /data/diagnostics
-if [ -d /addon_configs/local_vw_app_connector/.android ]; then
+if [ -d /config/.android ]; then
+    export HOME=/config
+elif [ -d /addon_configs/local_vw_app_connector/.android ]; then
     export HOME=/addon_configs/local_vw_app_connector
 else
     export HOME=/data
