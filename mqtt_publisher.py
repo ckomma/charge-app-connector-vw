@@ -109,7 +109,7 @@ class MqttPublisher:
             ("sensor", "target_soc", "Target state of charge", "charge", "targetSoc", "%", "battery", "measurement", None),
             ("sensor", "charging_mode", "Charging mode", "charge", "chargingMode", None, None, None, None),
             ("binary_sensor", "climater", "Climate", "charge", "climater", None, "running", None, None),
-            ("binary_sensor", "locked", "Locked", "charge", "locked", None, "lock", None, None),
+            ("binary_sensor", "locked", "Vehicle locked", "charge", "locked", None, "lock", None, None),
             ("binary_sensor", "charge_stale", "Charge data stale", "charge", "stale", None, "problem", None, None),
             ("binary_sensor", "action_available", "Vehicle actions available", "health", "actionAvailable", None, None, None, "mdi:shield-check-outline"),
             ("binary_sensor", "automatic_window_heating", "Automatic window heating", "details", "automaticWindowHeating", None, None, None, "mdi:car-defrost-front"),

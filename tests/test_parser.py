@@ -411,6 +411,10 @@ class ParserTests(unittest.TestCase):
             topics,
         )
         self.assertIn(
+            "homeassistant/binary_sensor/vw-app-connector/locked/config",
+            topics,
+        )
+        self.assertIn(
             "homeassistant/binary_sensor/vw-app-connector/automatic_window_heating/config",
             topics,
         )
@@ -428,6 +432,13 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(state_call[0][1])["soc"], 55)
         self.assertTrue(state_call[1]["retain"])
+        locked_config_call = next(
+            call for call in mqtt.client.published
+            if call[0][0] == "homeassistant/binary_sensor/vw-app-connector/locked/config"
+        )
+        locked_config = json.loads(locked_config_call[0][1])
+        self.assertEqual(locked_config["name"], "Vehicle locked")
+        self.assertEqual(locked_config["unique_id"], "vw-app-connector_locked")
         self.assertEqual(mqtt.client.username, "connector")
         self.assertEqual(mqtt.client.password, "secret")
 
