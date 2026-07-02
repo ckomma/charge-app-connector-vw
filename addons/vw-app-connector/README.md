@@ -5,6 +5,8 @@ Run the Volkswagen App Connector as a Home Assistant add-on.
 The add-on uses ADB to read the Volkswagen Android app on a connected phone.
 It exposes the connector REST API on port `9920` and can publish read-only
 MQTT discovery/state messages to Home Assistant.
+MQTT never accepts vehicle write commands; actions use the authenticated REST
+`/action/*` endpoints.
 
 ## Quick Start
 

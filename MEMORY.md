@@ -66,8 +66,9 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## MQTT And Home Assistant
 
-- MQTT is an optional, read-only output enabled by `MQTT_HOST`. REST remains
-  available and authoritative for vehicle actions and evcc.
+- MQTT is an optional, read-only output enabled by `MQTT_HOST`. It never accepts
+  vehicle write commands. REST remains available and authoritative for
+  authenticated `/action/*` vehicle actions and evcc.
 - Home Assistant App/Add-on packaging lives under `deploy/home-assistant/` as
   an optional deployment method alongside systemd and Docker Compose. The
   packaging script stages the current connector sources into `build/` and the

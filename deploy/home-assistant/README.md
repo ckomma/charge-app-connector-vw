@@ -107,7 +107,9 @@ Open the app's Configuration tab in Home Assistant and set at least:
 
 Optional MQTT settings enable read-only MQTT publishing and Home Assistant
 discovery. Leave `mqtt_host` empty if Home Assistant will use the REST package
-or if you do not want the app to publish MQTT discovery entities.
+or if you do not want the app to publish MQTT discovery entities. MQTT never
+accepts vehicle write commands; write actions remain REST-only through the
+authenticated `/action/*` endpoints.
 
 The app defaults to `boot: manual`. Enable automatic start in Home Assistant
 only after ADB and `/health` are verified.
@@ -171,7 +173,8 @@ Recommended options:
   [`examples/vw_app_connector.yaml`](../../examples/vw_app_connector.yaml) and
   point `CONNECTOR_HOST` at the HA host or `127.0.0.1` when appropriate.
 
-The connector's REST API remains available for evcc and other clients.
+The connector's REST API remains available for evcc, authenticated actions and
+other clients.
 
 ## Security
 

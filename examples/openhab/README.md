@@ -13,7 +13,8 @@ Tested with openHAB 5.1.4, the MQTT binding and the Home Assistant binding.
 
 The discovered Thing contains retained charge, climate, vehicle-detail,
 connector-health and location channels. MQTT reads existing connector caches
-and never starts a Volkswagen app refresh.
+and never starts a Volkswagen app refresh. MQTT is read-only; it does not
+provide channels for vehicle write commands.
 
 The Home Assistant binding represents percent values as
 `Number:Dimensionless`. Depending on Item metadata, the REST representation can

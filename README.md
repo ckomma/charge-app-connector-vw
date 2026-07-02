@@ -347,9 +347,10 @@ required. MQTT publishes retained copies of existing cache updates and never
 causes an additional Volkswagen app operation. REST remains enabled for evcc
 and existing clients.
 
-The integration is intentionally read-only. Vehicle actions continue to use
-the authenticated HTTP endpoints. Location includes address and coordinates;
-do not enable MQTT location publishing on a broker that is not trusted.
+The MQTT integration is intentionally read-only and does not accept vehicle
+write commands. Vehicle actions continue to use the authenticated REST
+`/action/*` endpoints. Location includes address and coordinates; do not enable
+MQTT location publishing on a broker that is not trusted.
 
 #### REST package
 

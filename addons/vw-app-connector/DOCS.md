@@ -39,7 +39,9 @@ budget. Use them only when you intentionally want to refresh those caches.
 
 Set `mqtt_host` to your broker hostname or IP. The add-on publishes retained
 state from existing connector cache updates and Home Assistant discovery
-payloads. MQTT does not trigger additional Volkswagen app refreshes.
+payloads. MQTT does not trigger additional Volkswagen app refreshes and does
+not accept vehicle write commands. Write actions remain REST-only through the
+authenticated `/action/*` endpoints.
 
 ## USB ADB
 
