@@ -311,6 +311,35 @@ class VolkswagenReader:
         "Auto unlock",
         "Automatically release AC connector",
     )
+    VEHICLE_REPORT_LABELS = (
+        "Fahrzeugzustandsbericht.",
+        "Fahrzeugzustandsbericht",
+        "Fahrzeugzustand.",
+        "Fahrzeugzustand",
+        "Vehicle health report.",
+        "Vehicle health report",
+        "Vehicle Health Report",
+        "Vehicle health.",
+        "Vehicle health",
+        "Vehicle Health",
+        "Vehicle status report.",
+        "Vehicle status report",
+    )
+    VEHICLE_REPORT_CONTENT_LABELS = (
+        "Gesamtstrecke",
+        "Total distance",
+        "Odometer",
+        "Kilometerstand",
+        "Nächster Service",
+        "NÃ¤chster Service",
+        "NÃƒÂ¤chster Service",
+        "Next service",
+        "Keine Meldungen",
+        "No issues found",
+        "Synchronisiert:",
+        "Synchronised:",
+        "Synced:",
+    )
 
     def __init__(self) -> None:
         self.usb_serial = required_env("ADB_SERIAL")
@@ -727,17 +756,15 @@ class VolkswagenReader:
 
     @classmethod
     def vehicle_report_center(cls, root: ET.Element) -> tuple[int, int]:
-        try:
-            return cls.described_node_center_any(
-                root,
-                (
-                    "Fahrzeugzustandsbericht.",
-                    "Vehicle health report.",
-                    "Vehicle status report.",
-                ),
-            )
-        except RuntimeError:
-            return cls.described_node_center_any(root, ("Fahrzeug.", "Vehicle."))
+        return cls.described_node_center_any(root, cls.VEHICLE_REPORT_LABELS)
+
+    @classmethod
+    def is_vehicle_report_page(cls, root: ET.Element) -> bool:
+        text = "\n".join(cls.strings(root)).casefold()
+        return any(
+            label.casefold() in text
+            for label in cls.VEHICLE_REPORT_CONTENT_LABELS
+        )
 
     @classmethod
     def viewport_size(cls, root: ET.Element) -> tuple[int, int]:
@@ -1162,6 +1189,9 @@ class VolkswagenReader:
             report_text,
             re.IGNORECASE,
         )
+
+        if not (odometer or service or report_sync or cls.is_vehicle_report_page(root)):
+            raise RuntimeError("Volkswagen vehicle health report did not open")
 
         result.odometerKm = (
             int(re.sub(r"[.,]", "", odometer.group(1))) if odometer else None
@@ -1715,19 +1745,14 @@ class VolkswagenReader:
             result.climateZoneFrontRight = zones[1].attrib.get("checked") == "true"
 
         self.launch()
-        overview = self.open_overview(
-            (
-                "Fahrzeugzustandsbericht.",
-                "Vehicle health report.",
-                "Vehicle status report.",
-                "Fahrzeug.",
-                "Vehicle.",
-            )
-        )
+        overview = self.open_overview(self.VEHICLE_REPORT_LABELS)
         x, y = self.vehicle_report_center(overview)
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
-        self.parse_vehicle_report(self.dump_ui("vw-report.xml"), result)
+        report = self.dump_ui("vw-report.xml")
+        if not self.is_vehicle_report_page(report):
+            raise RuntimeError("Volkswagen vehicle health report did not open")
+        self.parse_vehicle_report(report, result)
 
         self.launch()
         overview = self.open_overview(("Abfahrtszeiten.", "Departure times."))

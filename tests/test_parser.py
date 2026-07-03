@@ -1336,13 +1336,32 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.warningStatus, "Keine Meldungen")
         self.assertEqual(result.reportSyncAge, "3 h 42 min ago")
 
-    def test_gte_vehicle_report_tile_falls_back_to_vehicle_details(self):
+    def test_gte_vehicle_report_tile_matches_vehicle_health_label(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Vehicle Health. Open" bounds="[10,20][110,220]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(VolkswagenReader.vehicle_report_center(root), (60, 120))
+
+    def test_vehicle_report_tile_does_not_use_generic_vehicle_card(self):
         root = ET.fromstring(
             """<hierarchy>
             <node content-desc="Vehicle. Locked. Open details" bounds="[10,20][110,220]"/>
             </hierarchy>"""
         )
-        self.assertEqual(VolkswagenReader.vehicle_report_center(root), (60, 120))
+        with self.assertRaisesRegex(RuntimeError, "Volkswagen UI element not found"):
+            VolkswagenReader.vehicle_report_center(root)
+
+    def test_vehicle_report_parser_rejects_wrong_page(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Vehicle. Locked. Open details"/>
+            <node text="Charging settings"/>
+            </hierarchy>"""
+        )
+        with self.assertRaisesRegex(RuntimeError, "vehicle health report"):
+            VolkswagenReader.parse_vehicle_report(root, DetailData())
 
     def test_location_details_parse_combined_address_and_parked_duration(self):
         root = ET.fromstring(
