@@ -705,6 +705,19 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.targetSoc, 80)
         self.assertEqual(result.chargingMode, "Sofortladen")
 
+    def test_charging_details_preserves_decimal_power_with_german_separator(self):
+        result = VehicleData()
+        VolkswagenReader.parse_charging_details(
+            "Ladedetails. 2 Stunden und. 10 Minuten Ladezeit verbleibend. "
+            "Ladegeschwindigkeit: 11 Kilometer pro Stunde. "
+            "Ladeleistung: 2,30 kW. Zielladestand: 80 Prozent",
+            result,
+        )
+        self.assertEqual(result.remainingChargeMinutes, 130)
+        self.assertEqual(result.chargeRateKmH, 11)
+        self.assertEqual(result.chargePowerKw, 2.3)
+        self.assertEqual(result.targetSoc, 80)
+
     def test_target_soc_without_active_charging(self):
         result = VehicleData()
         VolkswagenReader.parse_charging_details(
@@ -725,6 +738,21 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.remainingChargeMinutes, 1640)
         self.assertEqual(result.chargeRateKmH, 6)
         self.assertEqual(result.chargePowerKw, 1)
+        self.assertEqual(result.targetSoc, 80)
+        self.assertEqual(result.chargingMode, "Immediate charging")
+
+    def test_english_charging_details_preserves_decimal_power(self):
+        result = VehicleData()
+        VolkswagenReader.parse_charging_details(
+            "Charging details. 2 hours and. 10 minutes of charging time left. "
+            "Charging speed: 11 kilometres per hour. "
+            "Charging power: 2.30 kW. Target charge level: 80 per cent. "
+            "Charging method. Immediate charging. Change charging method",
+            result,
+        )
+        self.assertEqual(result.remainingChargeMinutes, 130)
+        self.assertEqual(result.chargeRateKmH, 11)
+        self.assertEqual(result.chargePowerKw, 2.3)
         self.assertEqual(result.targetSoc, 80)
         self.assertEqual(result.chargingMode, "Immediate charging")
 
