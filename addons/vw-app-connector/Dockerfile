@@ -13,8 +13,8 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 
-ARG ADDON_RAW_URL=https://raw.githubusercontent.com/ckomma/charge-app-connector-vw/9454854/addons/vw-app-connector
-ARG ADDON_VERSION=0.1.8
+ARG ADDON_RAW_URL=https://raw.githubusercontent.com/ckomma/charge-app-connector-vw/25c5df5/addons/vw-app-connector
+ARG ADDON_VERSION=0.1.9
 
 RUN curl -fsSL "$ADDON_RAW_URL/requirements.txt?v=$ADDON_VERSION" -o requirements.txt \
     && pip3 install --break-system-packages --no-cache-dir -r requirements.txt
