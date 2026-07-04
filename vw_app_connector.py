@@ -605,6 +605,7 @@ class VolkswagenReader:
                     or "zu viele anfragen" in overview_text
                 ):
                     raise UsageLimit("Volkswagen app reports too many requests")
+                self.raise_for_lockout_state(overview)
                 try:
                     self.range_tile_center(overview)
                     saw_overview = True
@@ -653,6 +654,18 @@ class VolkswagenReader:
                 if value and value not in values:
                     values.append(value)
         return values
+
+    @classmethod
+    def raise_for_lockout_state(cls, root: ET.Element) -> None:
+        text = "\n".join(cls.strings(root)).casefold()
+        if "data no longer up-to-date" in text:
+            raise UsageLimit(
+                "Volkswagen app reports data no longer up-to-date"
+            )
+        if "currently unavailable. please try again later." in text:
+            raise UsageLimit(
+                "Volkswagen app reports data currently unavailable"
+            )
 
     @staticmethod
     def node_bounds(node: ET.Element) -> tuple[int, int, int, int] | None:
@@ -1755,6 +1768,7 @@ class VolkswagenReader:
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
         report = self.dump_ui("vw-report.xml")
+        self.raise_for_lockout_state(report)
         if not self.is_vehicle_report_page(report):
             raise RuntimeError("Volkswagen vehicle health report did not open")
         self.parse_vehicle_report(report, result)
@@ -2728,7 +2742,7 @@ class AppState:
                     try:
                         return loader()
                     except UsageLimit as exc:
-                        if "reports too many requests" in str(exc):
+                        if "reports " in str(exc):
                             self.usage.record_rate_limit()
                         raise
                     finally:
@@ -3075,7 +3089,7 @@ class AppState:
             self.usage.acquire_action()
             return self._action(name, query)
         except UsageLimit as exc:
-            if "reports too many requests" in str(exc):
+            if "reports " in str(exc):
                 self.usage.record_rate_limit()
             raise
         finally:

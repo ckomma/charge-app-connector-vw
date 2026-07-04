@@ -1326,6 +1326,27 @@ class ParserTests(unittest.TestCase):
                 )
                 self.assertEqual(VolkswagenReader.parse_vehicle_name(root), expected)
 
+    def test_lockout_overview_state_is_rate_limited(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Your vehicle: Golf GTE OPF 8.5. Synchronised: Data no longer up-to-date"/>
+            <node content-desc="Air conditioning. Off. Open details"/>
+            <node content-desc="Vehicle. Locked. Open details"/>
+            </hierarchy>"""
+        )
+        with self.assertRaisesRegex(UsageLimit, "no longer up-to-date"):
+            VolkswagenReader.raise_for_lockout_state(root)
+
+    def test_unavailable_health_report_is_rate_limited(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node text="Vehicle Health Report"/>
+            <node text="Currently unavailable. Please try again later."/>
+            </hierarchy>"""
+        )
+        with self.assertRaisesRegex(UsageLimit, "currently unavailable"):
+            VolkswagenReader.raise_for_lockout_state(root)
+
     def test_gte_overview_parses_electric_and_fuel_range(self):
         text = (
             "Range overview. Battery range: 84 kilometres. "
