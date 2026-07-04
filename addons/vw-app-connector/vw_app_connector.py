@@ -194,7 +194,7 @@ class VehicleData:
     fuelRange: int | None = None
     remainingChargeMinutes: int | None = None
     chargeRateKmH: int | None = None
-    chargePowerKw: int | None = None
+    chargePowerKw: float | None = None
     targetSoc: int | None = None
     chargingMode: str = ""
     climater: bool | None = None
@@ -605,6 +605,7 @@ class VolkswagenReader:
                     or "zu viele anfragen" in overview_text
                 ):
                     raise UsageLimit("Volkswagen app reports too many requests")
+                self.raise_for_lockout_state(overview)
                 try:
                     self.range_tile_center(overview)
                     saw_overview = True
@@ -653,6 +654,18 @@ class VolkswagenReader:
                 if value and value not in values:
                     values.append(value)
         return values
+
+    @classmethod
+    def raise_for_lockout_state(cls, root: ET.Element) -> None:
+        text = "\n".join(cls.strings(root)).casefold()
+        if "data no longer up-to-date" in text:
+            raise UsageLimit(
+                "Volkswagen app reports data no longer up-to-date"
+            )
+        if "currently unavailable. please try again later." in text:
+            raise UsageLimit(
+                "Volkswagen app reports data currently unavailable"
+            )
 
     @staticmethod
     def node_bounds(node: ET.Element) -> tuple[int, int, int, int] | None:
@@ -1100,7 +1113,8 @@ class VolkswagenReader:
             r"(\d+)\s*(?:Minuten?|minutes?)"
             r".*?(?:Ladegeschwindigkeit|Charging speed):\s*(\d+)\s*"
             r"(?:Kilometer pro Stunde|kilometres? per hour|km/h)"
-            r".*?(?:Ladeleistung|Charging power|Charging capacity):\s*(\d+)\s*"
+            r".*?(?:Ladeleistung|Charging power|Charging capacity):\s*"
+            r"(\d+(?:[,.]\d+)?)\s*"
             r"(?:Kilowatt|kW)"
             r".*?(?:Zielladestand|Target charge level|Target charge):\s*(\d+)\s*"
             r"(?:Prozent|per cent|percent|%)",
@@ -1108,11 +1122,15 @@ class VolkswagenReader:
             re.DOTALL | re.IGNORECASE,
         )
         if details_match:
-            hours, minutes, rate, power, target = map(int, details_match.groups())
+            hours_text, minutes_text, rate_text, power_text, target_text = (
+                details_match.groups()
+            )
+            hours = int(hours_text)
+            minutes = int(minutes_text)
             result.remainingChargeMinutes = hours * 60 + minutes
-            result.chargeRateKmH = rate
-            result.chargePowerKw = power
-            result.targetSoc = target
+            result.chargeRateKmH = int(rate_text)
+            result.chargePowerKw = float(power_text.replace(",", "."))
+            result.targetSoc = int(target_text)
 
         target_match = re.search(
             r"(?:Zielladestand|Target charge level|Target charge):?\s*(\d+)\s*"
@@ -1750,6 +1768,7 @@ class VolkswagenReader:
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
         report = self.dump_ui("vw-report.xml")
+        self.raise_for_lockout_state(report)
         if not self.is_vehicle_report_page(report):
             raise RuntimeError("Volkswagen vehicle health report did not open")
         self.parse_vehicle_report(report, result)
@@ -2723,7 +2742,7 @@ class AppState:
                     try:
                         return loader()
                     except UsageLimit as exc:
-                        if "reports too many requests" in str(exc):
+                        if "reports " in str(exc):
                             self.usage.record_rate_limit()
                         raise
                     finally:
@@ -3070,7 +3089,7 @@ class AppState:
             self.usage.acquire_action()
             return self._action(name, query)
         except UsageLimit as exc:
-            if "reports too many requests" in str(exc):
+            if "reports " in str(exc):
                 self.usage.record_rate_limit()
             raise
         finally:
