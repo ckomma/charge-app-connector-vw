@@ -1070,7 +1070,14 @@ class VolkswagenReader:
             text,
             re.IGNORECASE,
         )
-        return int(match.group(1)) if match else None
+        if match:
+            return int(match.group(1))
+        compact_match = re.search(
+            r"\b(\d+)\s*%\s*[•·]\s*(?:Charging|Wird geladen|Lädt|LÃ¤dt)\b",
+            text,
+            re.IGNORECASE,
+        )
+        return int(compact_match.group(1)) if compact_match else None
 
     @staticmethod
     def parse_range_value(text: str, labels: tuple[str, ...]) -> int | None:
@@ -1175,9 +1182,16 @@ class VolkswagenReader:
                 time.sleep(0.5)
 
     @staticmethod
+    def duration_part_minutes(value: str, unit_minutes: int) -> int:
+        lowered = value.casefold()
+        if lowered in ("null", "zero"):
+            return 0
+        return int(value) * unit_minutes
+
+    @staticmethod
     def parse_charging_details(text: str, result: VehicleData) -> None:
         details_match = re.search(
-            r"(\d+)\s*(?:Stunden?|hours?)\s+(?:und\.?|and\.?)\s*"
+            r"(\d+|Null|Zero)\s*(?:Stunden?|hours?)\s+(?:und\.?|and\.?)\s*"
             r"(\d+)\s*(?:Minuten?|minutes?)"
             r".*?(?:Ladegeschwindigkeit|Charging speed):\s*(\d+)\s*"
             r"(?:Kilometer pro Stunde|kilometres? per hour|km/h)"
@@ -1193,15 +1207,38 @@ class VolkswagenReader:
             hours_text, minutes_text, rate_text, power_text, target_text = (
                 details_match.groups()
             )
-            hours = int(hours_text)
-            minutes = int(minutes_text)
-            result.remainingChargeMinutes = hours * 60 + minutes
+            result.remainingChargeMinutes = (
+                VolkswagenReader.duration_part_minutes(hours_text, 60)
+                + int(minutes_text)
+            )
             result.chargeRateKmH = int(rate_text)
             result.chargePowerKw = float(power_text.replace(",", "."))
             result.targetSoc = int(target_text)
 
+        compact_time = re.search(r"\b(\d{1,2}):(\d{2})\s*h\b", text)
+        if compact_time:
+            hours_text, minutes_text = compact_time.groups()
+            result.remainingChargeMinutes = int(hours_text) * 60 + int(minutes_text)
+
+        compact_rate = re.search(
+            r"\b(\d+)\s*(?:km\s*per\s*h|km/h|Kilometer pro Stunde)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if compact_rate:
+            result.chargeRateKmH = int(compact_rate.group(1))
+
+        compact_power = re.search(
+            r"\b(\d+(?:[,.]\d+)?)\s*(?:kW|Kilowatt)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if compact_power:
+            result.chargePowerKw = float(compact_power.group(1).replace(",", "."))
+
         target_match = re.search(
-            r"(?:Zielladestand|Target charge level|Target charge):?\s*(\d+)\s*"
+            r"(?:Zielladestand|Target charge level|Target charge|"
+            r"Upper charge limit|Ladeobergrenze|Obere Ladegrenze):?\s*(\d+)\s*"
             r"(?:Prozent|per cent|percent|%)",
             text,
             re.IGNORECASE,
@@ -1218,6 +1255,12 @@ class VolkswagenReader:
             re.IGNORECASE,
         )
         if mode_match:
+            result.chargingMode = mode_match.group(1).strip()
+        elif mode_match := re.search(
+            r"\b(Sofortladen|Immediate charging)\b",
+            text,
+            re.IGNORECASE,
+        ):
             result.chargingMode = mode_match.group(1).strip()
 
     @classmethod
@@ -1538,6 +1581,10 @@ class VolkswagenReader:
                 "is charging",
                 "charging in progress",
             )
+        ) or re.search(
+            r"(?:^|\n)\s*(?:Stop|Stopp)\s*(?:\n|$)|%\s*[•·]\s*Charging\b",
+            detail_text,
+            re.IGNORECASE,
         ):
             result.status = "C"
         elif any(
@@ -1680,7 +1727,9 @@ class VolkswagenReader:
             text = "\n".join(self.strings(detail))
             current = bool(
                 re.search(
-                    r"Laden stoppen|Wird geladen|Stop charging|Is charging",
+                    r"Laden stoppen|Wird geladen|Stop charging|Is charging|"
+                    r"(?:^|\n)\s*(?:Stop|Stopp)\s*(?:\n|$)|"
+                    r"%\s*[•·]\s*Charging\b",
                     text,
                     re.IGNORECASE,
                 )

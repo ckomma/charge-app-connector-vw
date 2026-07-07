@@ -876,6 +876,74 @@ class VolkswagenReader:
             return self.dump_ui_with_overlay_recovery(remote_name)
         return root
 
+    def dismiss_charge_notice(self, root: ET.Element, remote_name: str) -> ET.Element:
+        text = "\n".join(self.strings(root)).casefold()
+        english_notice = any(
+            phrase in text
+            for phrase in (
+                "vehicle health",
+                "commands may be executed",
+                "executed with a delay",
+                "may be delayed",
+            )
+        )
+        german_notice = "fahrzeuggesundheit" in text or (
+            ("befehl" in text or "kommando" in text) and "verz" in text
+        )
+        if not english_notice and not german_notice:
+            return root
+        for labels in (
+            ("Verstanden", "Alles klar", "Got it", "OK", "Okay"),
+            ("Close", "SchlieÃŸen", "Schliessen"),
+        ):
+            try:
+                x, y = self.described_node_center_any(root, labels)
+                break
+            except RuntimeError:
+                continue
+        else:
+            try:
+                x, y = self.described_node_center_any(
+                    root,
+                    (
+                        "Warning",
+                        "Warnung",
+                        "vehicle health",
+                        "commands may be executed",
+                        "Fahrzeuggesundheit",
+                    ),
+                )
+            except RuntimeError:
+                return root
+        self.shell("input", "tap", str(x), str(y))
+        time.sleep(1)
+        return self.dump_ui_with_overlay_recovery(remote_name)
+
+    @classmethod
+    def is_charge_detail_page(cls, root: ET.Element) -> bool:
+        text = "\n".join(cls.strings(root))
+        if cls.parse_soc(text) is not None:
+            return True
+        return bool(
+            re.search(
+                r"Laden starten|Laden stoppen|Wird geladen|Start charging|"
+                r"Stop charging|Is charging|Zielladestand|Target charge",
+                text,
+                re.IGNORECASE,
+            )
+        )
+
+    def wait_for_charge_detail(self, remote_name: str) -> ET.Element:
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            root = self.dump_ui_with_overlay_recovery(remote_name)
+            root = self.dismiss_charge_notice(root, remote_name)
+            if self.is_charge_detail_page(root):
+                return root
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Volkswagen charge details did not open")
+            time.sleep(0.5)
+
     def wait_for_car_locate_button(self, remote_name: str) -> ET.Element:
         deadline = time.monotonic() + self.ui_update_timeout
         while True:
@@ -1002,7 +1070,14 @@ class VolkswagenReader:
             text,
             re.IGNORECASE,
         )
-        return int(match.group(1)) if match else None
+        if match:
+            return int(match.group(1))
+        compact_match = re.search(
+            r"\b(\d+)\s*%\s*[•·]\s*(?:Charging|Wird geladen|Lädt|LÃ¤dt)\b",
+            text,
+            re.IGNORECASE,
+        )
+        return int(compact_match.group(1)) if compact_match else None
 
     @staticmethod
     def parse_range_value(text: str, labels: tuple[str, ...]) -> int | None:
@@ -1107,9 +1182,16 @@ class VolkswagenReader:
                 time.sleep(0.5)
 
     @staticmethod
+    def duration_part_minutes(value: str, unit_minutes: int) -> int:
+        lowered = value.casefold()
+        if lowered in ("null", "zero"):
+            return 0
+        return int(value) * unit_minutes
+
+    @staticmethod
     def parse_charging_details(text: str, result: VehicleData) -> None:
         details_match = re.search(
-            r"(\d+)\s*(?:Stunden?|hours?)\s+(?:und\.?|and\.?)\s*"
+            r"(\d+|Null|Zero)\s*(?:Stunden?|hours?)\s+(?:und\.?|and\.?)\s*"
             r"(\d+)\s*(?:Minuten?|minutes?)"
             r".*?(?:Ladegeschwindigkeit|Charging speed):\s*(\d+)\s*"
             r"(?:Kilometer pro Stunde|kilometres? per hour|km/h)"
@@ -1125,15 +1207,38 @@ class VolkswagenReader:
             hours_text, minutes_text, rate_text, power_text, target_text = (
                 details_match.groups()
             )
-            hours = int(hours_text)
-            minutes = int(minutes_text)
-            result.remainingChargeMinutes = hours * 60 + minutes
+            result.remainingChargeMinutes = (
+                VolkswagenReader.duration_part_minutes(hours_text, 60)
+                + int(minutes_text)
+            )
             result.chargeRateKmH = int(rate_text)
             result.chargePowerKw = float(power_text.replace(",", "."))
             result.targetSoc = int(target_text)
 
+        compact_time = re.search(r"\b(\d{1,2}):(\d{2})\s*h\b", text)
+        if compact_time:
+            hours_text, minutes_text = compact_time.groups()
+            result.remainingChargeMinutes = int(hours_text) * 60 + int(minutes_text)
+
+        compact_rate = re.search(
+            r"\b(\d+)\s*(?:km\s*per\s*h|km/h|Kilometer pro Stunde)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if compact_rate:
+            result.chargeRateKmH = int(compact_rate.group(1))
+
+        compact_power = re.search(
+            r"\b(\d+(?:[,.]\d+)?)\s*(?:kW|Kilowatt)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if compact_power:
+            result.chargePowerKw = float(compact_power.group(1).replace(",", "."))
+
         target_match = re.search(
-            r"(?:Zielladestand|Target charge level|Target charge):?\s*(\d+)\s*"
+            r"(?:Zielladestand|Target charge level|Target charge|"
+            r"Upper charge limit|Ladeobergrenze|Obere Ladegrenze):?\s*(\d+)\s*"
             r"(?:Prozent|per cent|percent|%)",
             text,
             re.IGNORECASE,
@@ -1150,6 +1255,12 @@ class VolkswagenReader:
             re.IGNORECASE,
         )
         if mode_match:
+            result.chargingMode = mode_match.group(1).strip()
+        elif mode_match := re.search(
+            r"\b(Sofortladen|Immediate charging)\b",
+            text,
+            re.IGNORECASE,
+        ):
             result.chargingMode = mode_match.group(1).strip()
 
     @classmethod
@@ -1451,7 +1562,9 @@ class VolkswagenReader:
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
 
-        detail_text = "\n".join(self.strings(self.dump_ui("vw-detail.xml")))
+        detail_text = "\n".join(
+            self.strings(self.wait_for_charge_detail("vw-detail.xml"))
+        )
         result.soc = self.parse_soc(detail_text)
         if result.soc is None:
             raise RuntimeError("Volkswagen state of charge not found")
@@ -1468,6 +1581,10 @@ class VolkswagenReader:
                 "is charging",
                 "charging in progress",
             )
+        ) or re.search(
+            r"(?:^|\n)\s*(?:Stop|Stopp)\s*(?:\n|$)|%\s*[•·]\s*Charging\b",
+            detail_text,
+            re.IGNORECASE,
         ):
             result.status = "C"
         elif any(
@@ -1606,11 +1723,13 @@ class VolkswagenReader:
             x, y = self.range_tile_center(overview)
             self.shell("input", "tap", str(x), str(y))
             time.sleep(self.detail_wait)
-            detail = self.dump_ui("vw-charge-action.xml")
+            detail = self.wait_for_charge_detail("vw-charge-action.xml")
             text = "\n".join(self.strings(detail))
             current = bool(
                 re.search(
-                    r"Laden stoppen|Wird geladen|Stop charging|Is charging",
+                    r"Laden stoppen|Wird geladen|Stop charging|Is charging|"
+                    r"(?:^|\n)\s*(?:Stop|Stopp)\s*(?:\n|$)|"
+                    r"%\s*[•·]\s*Charging\b",
                     text,
                     re.IGNORECASE,
                 )
@@ -1624,7 +1743,21 @@ class VolkswagenReader:
                 x, y = self.described_node_center_any(detail, labels)
                 self.shell("input", "tap", str(x), str(y))
                 time.sleep(8)
-            return self.with_retries(self._read, "ACTION_VERIFY")
+            result = self.with_retries(self._read, "ACTION_VERIFY")
+            if desired and result.status != "C":
+                if (
+                    result.soc is not None
+                    and result.targetSoc is not None
+                    and result.soc >= result.targetSoc
+                ):
+                    raise RuntimeError(
+                        "Volkswagen did not start charging; current SoC is at "
+                        "or above the target charge level"
+                    )
+                raise RuntimeError("Volkswagen did not start charging")
+            if not desired and result.status == "C":
+                raise RuntimeError("Volkswagen did not stop charging")
+            return result
 
     def set_climater(self, desired: bool) -> VehicleData:
         with self.screen_session():

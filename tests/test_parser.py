@@ -690,6 +690,12 @@ class ParserTests(unittest.TestCase):
             45,
         )
 
+    def test_compact_charging_state_of_charge(self):
+        self.assertEqual(
+            VolkswagenReader.parse_soc("89 km\n70% · Charging\nImmediate charging"),
+            70,
+        )
+
     def test_charging_details(self):
         result = VehicleData()
         VolkswagenReader.parse_charging_details(
@@ -718,6 +724,21 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.chargePowerKw, 2.3)
         self.assertEqual(result.targetSoc, 80)
 
+    def test_charging_details_accepts_zero_hour_word(self):
+        result = VehicleData()
+        VolkswagenReader.parse_charging_details(
+            "Ladedetails. Null Stunden und. 50 Minuten Ladezeit verbleibend. "
+            "Ladegeschwindigkeit: 71 Kilometer pro Stunde. "
+            "Ladeleistung: 10 Kilowatt. Zielladestand: 100 Prozent\n"
+            "Ladeverfahren. Sofortladen. Ladeverfahren ändern",
+            result,
+        )
+        self.assertEqual(result.remainingChargeMinutes, 50)
+        self.assertEqual(result.chargeRateKmH, 71)
+        self.assertEqual(result.chargePowerKw, 10)
+        self.assertEqual(result.targetSoc, 100)
+        self.assertEqual(result.chargingMode, "Sofortladen")
+
     def test_target_soc_without_active_charging(self):
         result = VehicleData()
         VolkswagenReader.parse_charging_details(
@@ -725,6 +746,63 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(result.targetSoc, 80)
         self.assertIsNone(result.remainingChargeMinutes)
+
+    def test_compact_gte_charging_details(self):
+        result = VehicleData()
+        VolkswagenReader.parse_charging_details(
+            "89 km\n70% · Charging\n1:10 h\n12 km per h\n2 kW\n"
+            "Upper charge limit\n100%\nImmediate charging\nStop",
+            result,
+        )
+        self.assertEqual(result.remainingChargeMinutes, 70)
+        self.assertEqual(result.chargeRateKmH, 12)
+        self.assertEqual(result.chargePowerKw, 2)
+        self.assertEqual(result.targetSoc, 100)
+        self.assertEqual(result.chargingMode, "Immediate charging")
+
+    def test_compact_gte_charge_read_sets_charging_status(self):
+        overview = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Battery range: 89 km" bounds="[100,500][900,760]"/>
+            <node content-desc="Fuel range: 560 km"/>
+            <node content-desc="Vehicle. Locked."/>
+            </hierarchy>"""
+        )
+        detail = ET.fromstring(
+            """<hierarchy>
+            <node text="89 km"/>
+            <node text="70% · Charging"/>
+            <node text="1:10 h"/>
+            <node text="12 km per h"/>
+            <node text="2 kW"/>
+            <node text="Upper charge limit"/>
+            <node text="100%"/>
+            <node text="Immediate charging"/>
+            <node text="Stop"/>
+            </hierarchy>"""
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "launch"),
+                    patch.object(reader, "open_overview", return_value=overview),
+                    patch.object(reader, "wait_for_charge_detail", return_value=detail),
+                    patch.object(reader, "shell"),
+                    patch("time.sleep"),
+                ):
+                    result = reader._read()
+        self.assertEqual(result.status, "C")
+        self.assertEqual(result.soc, 70)
+        self.assertEqual(result.remainingChargeMinutes, 70)
+        self.assertEqual(result.chargeRateKmH, 12)
+        self.assertEqual(result.chargePowerKw, 2)
+        self.assertEqual(result.targetSoc, 100)
+        self.assertEqual(result.chargingMode, "Immediate charging")
 
     def test_charge_health_warning_is_dismissed_before_detail_parse(self):
         notice = ET.fromstring(
