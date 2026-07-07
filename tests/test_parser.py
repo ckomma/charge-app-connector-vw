@@ -726,6 +726,75 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.targetSoc, 80)
         self.assertIsNone(result.remainingChargeMinutes)
 
+    def test_charge_health_warning_is_dismissed_before_detail_parse(self):
+        notice = ET.fromstring(
+            """<hierarchy>
+            <node text="Warning"/>
+            <node text="To protect vehicle health, commands may be executed with a delay"/>
+            <node text="OK" bounds="[420,1780][660,1880]"/>
+            </hierarchy>"""
+        )
+        ready = ET.fromstring(
+            """<hierarchy>
+            <node text="Charging status. Battery charge level: 80 per cent."/>
+            <node text="Start charging" bounds="[100,1700][800,1850]"/>
+            </hierarchy>"""
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "shell") as shell,
+                    patch.object(
+                        reader,
+                        "dump_ui_with_overlay_recovery",
+                        side_effect=(notice, ready),
+                    ),
+                    patch("time.sleep"),
+                ):
+                    self.assertIs(reader.wait_for_charge_detail("vw-detail.xml"), ready)
+                shell.assert_called_once_with("input", "tap", "540", "1830")
+
+    def test_start_charging_fails_clearly_when_target_soc_already_reached(self):
+        overview = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Battery range: 120 km" bounds="[100,500][900,760]"/>
+            </hierarchy>"""
+        )
+        detail = ET.fromstring(
+            """<hierarchy>
+            <node text="Charging status. Battery charge level: 80 per cent."/>
+            <node text="Target charge level: 80 per cent"/>
+            <node text="Start charging" bounds="[100,1700][800,1850]"/>
+            </hierarchy>"""
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "screen_session", return_value=nullcontext()),
+                    patch.object(reader, "launch"),
+                    patch.object(reader, "open_overview", return_value=overview),
+                    patch.object(reader, "wait_for_charge_detail", return_value=detail),
+                    patch.object(
+                        reader,
+                        "with_retries",
+                        return_value=VehicleData(status="B", soc=80, targetSoc=80),
+                    ),
+                    patch.object(reader, "shell"),
+                    patch("time.sleep"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "at or above"):
+                        reader.set_charging(True)
+
     def test_english_charging_details(self):
         result = VehicleData()
         VolkswagenReader.parse_charging_details(

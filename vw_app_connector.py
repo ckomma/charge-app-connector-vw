@@ -876,6 +876,74 @@ class VolkswagenReader:
             return self.dump_ui_with_overlay_recovery(remote_name)
         return root
 
+    def dismiss_charge_notice(self, root: ET.Element, remote_name: str) -> ET.Element:
+        text = "\n".join(self.strings(root)).casefold()
+        english_notice = any(
+            phrase in text
+            for phrase in (
+                "vehicle health",
+                "commands may be executed",
+                "executed with a delay",
+                "may be delayed",
+            )
+        )
+        german_notice = "fahrzeuggesundheit" in text or (
+            ("befehl" in text or "kommando" in text) and "verz" in text
+        )
+        if not english_notice and not german_notice:
+            return root
+        for labels in (
+            ("Verstanden", "Alles klar", "Got it", "OK", "Okay"),
+            ("Close", "SchlieÃŸen", "Schliessen"),
+        ):
+            try:
+                x, y = self.described_node_center_any(root, labels)
+                break
+            except RuntimeError:
+                continue
+        else:
+            try:
+                x, y = self.described_node_center_any(
+                    root,
+                    (
+                        "Warning",
+                        "Warnung",
+                        "vehicle health",
+                        "commands may be executed",
+                        "Fahrzeuggesundheit",
+                    ),
+                )
+            except RuntimeError:
+                return root
+        self.shell("input", "tap", str(x), str(y))
+        time.sleep(1)
+        return self.dump_ui_with_overlay_recovery(remote_name)
+
+    @classmethod
+    def is_charge_detail_page(cls, root: ET.Element) -> bool:
+        text = "\n".join(cls.strings(root))
+        if cls.parse_soc(text) is not None:
+            return True
+        return bool(
+            re.search(
+                r"Laden starten|Laden stoppen|Wird geladen|Start charging|"
+                r"Stop charging|Is charging|Zielladestand|Target charge",
+                text,
+                re.IGNORECASE,
+            )
+        )
+
+    def wait_for_charge_detail(self, remote_name: str) -> ET.Element:
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            root = self.dump_ui_with_overlay_recovery(remote_name)
+            root = self.dismiss_charge_notice(root, remote_name)
+            if self.is_charge_detail_page(root):
+                return root
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Volkswagen charge details did not open")
+            time.sleep(0.5)
+
     def wait_for_car_locate_button(self, remote_name: str) -> ET.Element:
         deadline = time.monotonic() + self.ui_update_timeout
         while True:
@@ -1451,7 +1519,9 @@ class VolkswagenReader:
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
 
-        detail_text = "\n".join(self.strings(self.dump_ui("vw-detail.xml")))
+        detail_text = "\n".join(
+            self.strings(self.wait_for_charge_detail("vw-detail.xml"))
+        )
         result.soc = self.parse_soc(detail_text)
         if result.soc is None:
             raise RuntimeError("Volkswagen state of charge not found")
@@ -1606,7 +1676,7 @@ class VolkswagenReader:
             x, y = self.range_tile_center(overview)
             self.shell("input", "tap", str(x), str(y))
             time.sleep(self.detail_wait)
-            detail = self.dump_ui("vw-charge-action.xml")
+            detail = self.wait_for_charge_detail("vw-charge-action.xml")
             text = "\n".join(self.strings(detail))
             current = bool(
                 re.search(
@@ -1624,7 +1694,21 @@ class VolkswagenReader:
                 x, y = self.described_node_center_any(detail, labels)
                 self.shell("input", "tap", str(x), str(y))
                 time.sleep(8)
-            return self.with_retries(self._read, "ACTION_VERIFY")
+            result = self.with_retries(self._read, "ACTION_VERIFY")
+            if desired and result.status != "C":
+                if (
+                    result.soc is not None
+                    and result.targetSoc is not None
+                    and result.soc >= result.targetSoc
+                ):
+                    raise RuntimeError(
+                        "Volkswagen did not start charging; current SoC is at "
+                        "or above the target charge level"
+                    )
+                raise RuntimeError("Volkswagen did not start charging")
+            if not desired and result.status == "C":
+                raise RuntimeError("Volkswagen did not stop charging")
+            return result
 
     def set_climater(self, desired: bool) -> VehicleData:
         with self.screen_session():
