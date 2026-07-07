@@ -2609,7 +2609,10 @@ class BackgroundCache(Generic[T]):
                 return self.value or self.empty_factory()
         except Exception as exc:
             category = VolkswagenReader.error_category(exc)
-            LOG.exception("%s refresh failed", self.name)
+            if isinstance(exc, UsageLimit):
+                LOG.warning("%s refresh skipped: %s", self.name, exc)
+            else:
+                LOG.exception("%s refresh failed", self.name)
             with self.lock:
                 self.last_error = str(exc)
                 self.last_error_category = category

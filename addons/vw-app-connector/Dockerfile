@@ -13,16 +13,14 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 
-ARG ADDON_RAW_URL=https://raw.githubusercontent.com/ckomma/charge-app-connector-vw/25c5df5/addons/vw-app-connector
-ARG ADDON_VERSION=0.1.9
+COPY requirements.txt /app/requirements.txt
 
-RUN curl -fsSL "$ADDON_RAW_URL/requirements.txt?v=$ADDON_VERSION" -o requirements.txt \
-    && pip3 install --break-system-packages --no-cache-dir -r requirements.txt
+RUN pip3 install --break-system-packages --no-cache-dir -r requirements.txt
 
-RUN curl -fsSL "$ADDON_RAW_URL/vw_app_connector.py?v=$ADDON_VERSION" -o vw_app_connector.py \
-    && curl -fsSL "$ADDON_RAW_URL/mqtt_publisher.py?v=$ADDON_VERSION" -o mqtt_publisher.py \
-    && curl -fsSL "$ADDON_RAW_URL/run.sh?v=$ADDON_VERSION" -o /run.sh \
-    && chmod a+x /run.sh
+COPY vw_app_connector.py mqtt_publisher.py /app/
+COPY run.sh /run.sh
+
+RUN chmod a+x /run.sh
 
 HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
     CMD python3 -c "import json, os, urllib.request; port=os.getenv('PORT', '9920'); json.load(urllib.request.urlopen(f'http://127.0.0.1:{port}/capabilities', timeout=3))"

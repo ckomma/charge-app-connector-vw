@@ -1671,6 +1671,27 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.error, "failed")
         self.assertGreaterEqual(cache.next_attempt_monotonic, before + 899)
 
+    def test_usage_limit_cache_refresh_logs_without_traceback(self):
+        with patch("threading.Thread.start"):
+            cache = BackgroundCache(
+                "charge",
+                lambda: (_ for _ in ()).throw(
+                    UsageLimit("Volkswagen rate-limit cooldown active for 43197 seconds")
+                ),
+                lambda _: 60,
+                VehicleData,
+                error_retry_interval=900,
+            )
+        with self.assertLogs("vw-app-connector", level="WARNING") as logs:
+            result = cache.refresh()
+        output = "\n".join(logs.output)
+        self.assertEqual(
+            result.error,
+            "Volkswagen rate-limit cooldown active for 43197 seconds",
+        )
+        self.assertIn("charge refresh skipped", output)
+        self.assertNotIn("Traceback", output)
+
     def test_background_cache_restores_last_success_after_restart(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "charge.json"
