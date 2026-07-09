@@ -599,6 +599,14 @@ class VolkswagenReader:
             nudged_overview = False
             while True:
                 overview = self.dump_ui_with_compose_fallback("vw-overview.xml")
+                if not self.app_in_foreground():
+                    if time.monotonic() >= deadline:
+                        break
+                    self.close_system_overlays()
+                    if not self.app_in_foreground():
+                        self.launch()
+                    time.sleep(1)
+                    continue
                 overview_text = "\n".join(self.strings(overview)).casefold()
                 if (
                     "too many requests" in overview_text
@@ -696,8 +704,8 @@ class VolkswagenReader:
             description = node.attrib.get("content-desc", "")
             text = node.attrib.get("text", "")
             if not any(
-                prefix.casefold() in description.casefold()
-                or prefix.casefold() in text.casefold()
+                cls.text_matches_label(description, prefix)
+                or cls.text_matches_label(text, prefix)
                 for prefix in prefixes
             ):
                 continue
@@ -707,6 +715,14 @@ class VolkswagenReader:
         raise RuntimeError(
             f"Volkswagen UI element not found: {' / '.join(prefixes)}"
         )
+
+    @staticmethod
+    def text_matches_label(value: str, label: str) -> bool:
+        lowered = value.casefold()
+        wanted = label.casefold()
+        if wanted in lowered:
+            return True
+        return wanted.rstrip(".:") in lowered
 
     @classmethod
     def resource_nodes(cls, root: ET.Element, suffix: str) -> list[ET.Element]:
@@ -728,8 +744,36 @@ class VolkswagenReader:
 
     @classmethod
     def range_tile_center(cls, root: ET.Element) -> tuple[int, int]:
-        return cls.described_node_center_any(
-            root, ("Batteriereichweite:", "Battery range:", "Electric range:")
+        candidates: list[tuple[int, int, int]] = []
+        for node in root.iter():
+            text = " ".join(
+                value
+                for key in ("text", "content-desc")
+                if (value := node.attrib.get(key, "").strip())
+            )
+            if not re.search(
+                r"Batteriereichweite|Battery range|Electric range",
+                text,
+                re.IGNORECASE,
+            ):
+                continue
+            if not re.search(
+                r"\b\d+\s*(?:Kilometer|kilometres?|km)\b",
+                text,
+                re.IGNORECASE,
+            ):
+                continue
+            center = cls.node_center(node)
+            bounds = cls.node_bounds(node)
+            if center and bounds:
+                left, top, right, bottom = bounds
+                candidates.append(((right - left) * (bottom - top), *center))
+        if candidates:
+            _area, x, y = max(candidates)
+            return (x, y)
+        raise RuntimeError(
+            "Volkswagen UI element not found: "
+            "Batteriereichweite / Battery range / Electric range"
         )
 
     @classmethod
@@ -1080,6 +1124,19 @@ class VolkswagenReader:
         return int(compact_match.group(1)) if compact_match else None
 
     @staticmethod
+    def text_reports_active_charging(text: str) -> bool:
+        return bool(
+            re.search(
+                r"Laden stoppen|Wird geladen|Lädt|Stop charging|"
+                r"Is charging|charging in progress|"
+                r"(?:^|\n)\s*(?:Stop|Stopp)\s*(?:\n|$)|"
+                r"%\s*[•·]\s*Charging\b(?!\s+station)",
+                text,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
     def parse_range_value(text: str, labels: tuple[str, ...]) -> int | None:
         label_pattern = "|".join(re.escape(label) for label in labels)
         match = re.search(
@@ -1351,6 +1408,7 @@ class VolkswagenReader:
         return (float(latitude), float(longitude))
 
     def launch(self) -> None:
+        self.close_system_overlays()
         self.shell("am", "force-stop", self.package)
         self.shell(
             "am",
@@ -1360,7 +1418,9 @@ class VolkswagenReader:
             timeout=15,
         )
         time.sleep(self.start_wait)
+        self.close_system_overlays()
         if not self.app_in_foreground():
+            self.close_system_overlays()
             self.shell(
                 "monkey",
                 "-p",
@@ -1371,6 +1431,7 @@ class VolkswagenReader:
                 timeout=15,
             )
             time.sleep(self.start_wait)
+            self.close_system_overlays()
         if not self.app_in_foreground():
             raise RuntimeError("Volkswagen app did not reach the foreground")
         if (
@@ -1378,6 +1439,12 @@ class VolkswagenReader:
             and self.action_pending.is_set()
         ):
             raise ActionPriority("Background refresh preempted by action")
+
+    def close_system_overlays(self) -> None:
+        try:
+            self.shell("cmd", "statusbar", "collapse", timeout=5)
+        except RuntimeError:
+            LOG.debug("Android status bar collapse failed", exc_info=True)
 
     def app_in_foreground(self) -> bool:
         windows = self.shell("dumpsys", "window", timeout=20)
@@ -1571,21 +1638,7 @@ class VolkswagenReader:
         self.parse_charging_details(detail_text, result)
 
         lowered = detail_text.casefold()
-        if any(
-            value in lowered
-            for value in (
-                "laden stoppen",
-                "wird geladen",
-                "lädt",
-                "stop charging",
-                "is charging",
-                "charging in progress",
-            )
-        ) or re.search(
-            r"(?:^|\n)\s*(?:Stop|Stopp)\s*(?:\n|$)|%\s*[•·]\s*Charging\b",
-            detail_text,
-            re.IGNORECASE,
-        ):
+        if self.text_reports_active_charging(detail_text):
             result.status = "C"
         elif any(
             value in lowered
@@ -1725,15 +1778,7 @@ class VolkswagenReader:
             time.sleep(self.detail_wait)
             detail = self.wait_for_charge_detail("vw-charge-action.xml")
             text = "\n".join(self.strings(detail))
-            current = bool(
-                re.search(
-                    r"Laden stoppen|Wird geladen|Stop charging|Is charging|"
-                    r"(?:^|\n)\s*(?:Stop|Stopp)\s*(?:\n|$)|"
-                    r"%\s*[•·]\s*Charging\b",
-                    text,
-                    re.IGNORECASE,
-                )
-            )
+            current = self.text_reports_active_charging(text)
             if current != desired:
                 labels = (
                     ("Laden starten", "Start charging")
@@ -2837,7 +2882,7 @@ class AppState:
         self.reader = VolkswagenReader()
         self.usage = UsageLimiter()
         self.verified_app_version = os.getenv(
-            "VERIFIED_APP_VERSION", "3.63.2"
+            "VERIFIED_APP_VERSION", "4.0.3"
         ).strip()
         self.priority_lock = threading.Lock()
         self.priority_waiters = 0

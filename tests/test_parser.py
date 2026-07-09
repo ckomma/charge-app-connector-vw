@@ -654,6 +654,22 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(VolkswagenReader.range_tile_center(root), (281, 1270))
 
+    def test_english_range_tile_without_colon(self):
+        root = ET.fromstring(
+            """<hierarchy><node content-desc="Battery range 126 km. Open details" bounds="[55,1044][507,1496]"/></hierarchy>"""
+        )
+        self.assertEqual(VolkswagenReader.range_tile_center(root), (281, 1270))
+
+    def test_selector_matches_label_without_trailing_punctuation(self):
+        root = ET.fromstring(
+            '<hierarchy><node content-desc="Climate control" '
+            'bounds="[55,1044][507,1496]"/></hierarchy>'
+        )
+        self.assertEqual(
+            VolkswagenReader.described_node_center(root, "Climate control."),
+            (281, 1270),
+        )
+
     def test_lock_state_parsing_is_case_insensitive(self):
         self.assertFalse(VolkswagenReader.parse_locked("Fahrzeug. Wird entriegelt."))
         self.assertTrue(VolkswagenReader.parse_locked("Fahrzeug. Wird verriegelt."))
@@ -671,6 +687,18 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(VolkswagenReader.parse_climater("Air conditioning. Off."))
         self.assertFalse(VolkswagenReader.parse_climater("Climate control. Off."))
         self.assertTrue(VolkswagenReader.parse_climater("Air conditioning. On."))
+
+    def test_english_charging_station_status_is_not_active_charging(self):
+        self.assertFalse(
+            VolkswagenReader.text_reports_active_charging(
+                "Battery 91 % • Charging station shows current status"
+            )
+        )
+        self.assertTrue(
+            VolkswagenReader.text_reports_active_charging(
+                "Battery 91 % • Charging"
+            )
+        )
 
     def test_current_german_sync_text(self):
         self.assertEqual(
@@ -1111,16 +1139,48 @@ class ParserTests(unittest.TestCase):
                 with (
                     patch.object(
                         reader,
-                        "dump_ui_with_overlay_recovery",
+                        "dump_ui_with_compose_fallback",
                         side_effect=(loading, ready),
                     ),
-                    patch.object(reader, "app_in_foreground", return_value=False),
+                    patch.object(reader, "app_in_foreground", return_value=True),
                     patch.object(reader, "shell") as shell,
                     patch("time.sleep") as sleep,
                 ):
                     self.assertIs(reader.open_overview(), ready)
                 shell.assert_not_called()
                 sleep.assert_called_once_with(0.5)
+
+    def test_open_overview_recovers_when_system_overlay_takes_focus(self):
+        launcher = ET.fromstring('<hierarchy><node text="Launcher"/></hierarchy>')
+        ready = ET.fromstring(
+            '<hierarchy><node content-desc="Battery range 100 km" '
+            'bounds="[10,20][110,120]"/></hierarchy>'
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(
+                        reader,
+                        "dump_ui_with_compose_fallback",
+                        side_effect=(launcher, ready),
+                    ),
+                    patch.object(
+                        reader,
+                        "app_in_foreground",
+                        side_effect=(False, False, True),
+                    ),
+                    patch.object(reader, "close_system_overlays") as close,
+                    patch.object(reader, "launch") as launch,
+                    patch("time.sleep"),
+                ):
+                    self.assertIs(reader.open_overview(), ready)
+                close.assert_called_once()
+                launch.assert_called_once()
 
     def test_open_overview_waits_for_required_overview_tile(self):
         banner = ET.fromstring(
@@ -1152,6 +1212,7 @@ class ParserTests(unittest.TestCase):
                         "dump_ui_with_compose_fallback",
                         side_effect=(banner, ready),
                     ),
+                    patch.object(reader, "app_in_foreground", return_value=True),
                     patch.object(reader, "shell") as shell,
                     patch("time.sleep") as sleep,
                 ):
@@ -2045,6 +2106,7 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(
                 calls,
                 [
+                    ("cmd", "statusbar", "collapse"),
                     ("am", "force-stop", "com.volkswagen.weconnect"),
                     (
                         "am",
@@ -2052,6 +2114,7 @@ class ParserTests(unittest.TestCase):
                         "-n",
                         "com.volkswagen.weconnect/.SingleActivity",
                     ),
+                    ("cmd", "statusbar", "collapse"),
                 ],
             )
 
@@ -2078,9 +2141,10 @@ class ParserTests(unittest.TestCase):
                     patch("time.sleep"),
                 ):
                     reader.launch()
-            self.assertEqual(calls[0], ("am", "force-stop", "com.volkswagen.weconnect"))
+            self.assertEqual(calls[0], ("cmd", "statusbar", "collapse"))
+            self.assertEqual(calls[1], ("am", "force-stop", "com.volkswagen.weconnect"))
             self.assertEqual(
-                calls[1],
+                calls[2],
                 (
                     "am",
                     "start",
@@ -2089,7 +2153,7 @@ class ParserTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(
-                calls[2],
+                calls[5],
                 (
                     "monkey",
                     "-p",
