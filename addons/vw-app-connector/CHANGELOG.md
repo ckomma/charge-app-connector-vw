@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.12
+
+- Dismiss the localized intelligent power-saving notice before navigating the
+  Volkswagen overview.
+- Report an explicitly disconnected charging cable as vehicle status `A`.
+- Improve vehicle-marker selection on Volkswagen location maps and accept
+  odometer values containing localized spacing separators.
+- Let Home Assistant derive tracker state from GPS zones and rename the MQTT
+  connector status entity to connector health.
+
 ## 0.1.11
 
 - Verify Volkswagen app `4.0.3` in German and English on the production Redmi.

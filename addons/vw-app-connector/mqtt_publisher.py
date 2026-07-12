@@ -121,7 +121,7 @@ class MqttPublisher:
             ("sensor", "warning_status", "Warning status", "details", "warningStatus", None, None, None, "mdi:alert-circle-outline"),
             ("sensor", "address", "Vehicle address", "location", "address", None, None, None, "mdi:map-marker"),
             ("sensor", "parked_duration", "Parked duration", "location", "parkedDuration", None, None, None, "mdi:timer-outline"),
-            ("sensor", "connector_status", "Connector status", "health", "status", None, None, None, "mdi:connection"),
+            ("sensor", "connector_status", "Connector health", "health", "status", None, None, None, "mdi:connection"),
             ("sensor", "phone_battery", "Phone battery", "health", "phoneBatteryLevel", "%", "battery", "measurement", None),
             ("sensor", "phone_battery_temperature", "Phone battery temperature", "health", "phoneBatteryTemperatureC", "°C", "temperature", "measurement", None),
             ("sensor", "background_usage", "Background usage", "health", "usageBackgroundUsed", None, None, "total_increasing", "mdi:counter"),
@@ -155,8 +155,6 @@ class MqttPublisher:
         tracker = {
             "name": "Vehicle location",
             "unique_id": f"{self.client_id}_location",
-            "state_topic": f"{self.topic_prefix}/location",
-            "value_template": "{{ 'not_home' if value_json.latitude is not none else 'unknown' }}",
             "json_attributes_topic": f"{self.topic_prefix}/location",
             "availability_topic": self.availability_topic,
             "source_type": "gps",
