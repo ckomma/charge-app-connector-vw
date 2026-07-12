@@ -347,6 +347,10 @@ required. MQTT publishes retained copies of existing cache updates and never
 causes an additional Volkswagen app operation. REST remains enabled for evcc
 and existing clients.
 
+The MQTT location tracker publishes GPS attributes only. Home Assistant uses
+its configured zones to derive `home`, `not_home` or a zone name; the
+connector does not assume that a charging location is named `Home`.
+
 The MQTT integration is intentionally read-only and does not accept vehicle
 write commands. Vehicle actions continue to use the authenticated REST
 `/action/*` endpoints. Location includes address and coordinates; do not enable

@@ -599,6 +599,9 @@ class VolkswagenReader:
             nudged_overview = False
             while True:
                 overview = self.dump_ui_with_compose_fallback("vw-overview.xml")
+                overview = self.dismiss_overview_notice(
+                    overview, "vw-overview-notice-dismissed.xml"
+                )
                 if not self.app_in_foreground():
                     if time.monotonic() >= deadline:
                         break
@@ -652,6 +655,28 @@ class VolkswagenReader:
                 self.shell("input", "keyevent", "KEYCODE_BACK")
                 time.sleep(2)
         raise RuntimeError("Volkswagen overview not found")
+
+    def dismiss_overview_notice(
+        self, root: ET.Element, remote_name: str
+    ) -> ET.Element:
+        text = "\n".join(self.strings(root)).casefold()
+        german_notice = "intelligentes stromsparen" in text or (
+            "stromsparen" in text and "batterie" in text and "schon" in text
+        )
+        english_notice = "intelligent power saving" in text or (
+            "power saving" in text and "battery" in text and "protect" in text
+        )
+        if not german_notice and not english_notice:
+            return root
+        try:
+            x, y = self.described_node_center_any(
+                root, ("Alles klar", "Got it", "Understood", "OK", "Okay")
+            )
+        except RuntimeError:
+            return root
+        self.shell("input", "tap", str(x), str(y))
+        time.sleep(1)
+        return self.dump_ui_with_compose_fallback(remote_name)
 
     @staticmethod
     def strings(root: ET.Element) -> list[str]:
@@ -798,6 +823,23 @@ class VolkswagenReader:
         # exposes neither semantic text nor bounds for it. Car Locate centers
         # the marker pin; its tappable label sits just above that pin.
         return (x, y - max(40, round(height * 0.075)))
+
+    @classmethod
+    def vehicle_marker_tap_centers(
+        cls, root: ET.Element
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        # App and Maps versions differ: some expose a tappable label above the
+        # centered pin, while others expose only the pin itself in the canvas.
+        # Keep the live-verified label position first, then use the pin center
+        # as one bounded fallback after re-centering the map.
+        return (cls.vehicle_marker_label_center(root), cls.map_view_center(root))
+
+    @classmethod
+    def vehicle_marker_is_selected(cls, root: ET.Element, vehicle_name: str) -> bool:
+        return not vehicle_name or any(
+            vehicle_name.casefold() in value.casefold()
+            for value in cls.strings(root)
+        )
 
     @classmethod
     def parse_vehicle_name(cls, root: ET.Element) -> str:
@@ -1137,6 +1179,19 @@ class VolkswagenReader:
         )
 
     @staticmethod
+    def text_reports_disconnected(text: str) -> bool:
+        """Return whether the charge view explicitly says that no cable is connected."""
+        return bool(
+            re.search(
+                r"Ladekabel\s+(?:anschließen|verbinden)|"
+                r"(?:Please\s+)?Connect\s+(?:the\s+)?charging\s+cable|"
+                r"Charging\s+cable\s+disconnected",
+                text,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
     def parse_range_value(text: str, labels: tuple[str, ...]) -> int | None:
         label_pattern = "|".join(re.escape(label) for label in labels)
         match = re.search(
@@ -1326,7 +1381,8 @@ class VolkswagenReader:
         report_text = "\n".join(values)
 
         odometer = re.search(
-            r"(?:Gesamtstrecke|Total distance|Odometer)\s*([\d.,]+)\s*km",
+            r"(?:Gesamtstrecke|Total distance|Odometer)\s*"
+            r"([\d.,\s\u00a0\u202f]+)\s*km",
             report_text,
             re.IGNORECASE,
         )
@@ -1339,7 +1395,11 @@ class VolkswagenReader:
                 ):
                     continue
                 for candidate in values[index + 1:index + 4]:
-                    odometer = re.search(r"([\d.,]+)\s*km", candidate, re.IGNORECASE)
+                    odometer = re.search(
+                        r"([\d.,\s\u00a0\u202f]+)\s*km",
+                        candidate,
+                        re.IGNORECASE,
+                    )
                     if odometer:
                         break
                 if odometer:
@@ -1380,7 +1440,7 @@ class VolkswagenReader:
             raise RuntimeError("Volkswagen vehicle health report did not open")
 
         result.odometerKm = (
-            int(re.sub(r"[.,]", "", odometer.group(1))) if odometer else None
+            int(re.sub(r"[\s.,]", "", odometer.group(1))) if odometer else None
         )
         result.serviceDays = int(service.group(1)) if service else None
         result.warningStatus = (
@@ -1638,7 +1698,9 @@ class VolkswagenReader:
         self.parse_charging_details(detail_text, result)
 
         lowered = detail_text.casefold()
-        if self.text_reports_active_charging(detail_text):
+        if self.text_reports_disconnected(detail_text):
+            result.status = "A"
+        elif self.text_reports_active_charging(detail_text):
             result.status = "C"
         elif any(
             value in lowered
@@ -1728,14 +1790,32 @@ class VolkswagenReader:
         time.sleep(self.detail_wait)
 
         centered_map = self.dump_ui("vw-location-centered-map.xml")
-        x, y = self.vehicle_marker_label_center(centered_map)
-        self.shell("input", "tap", str(x), str(y))
-        time.sleep(self.detail_wait)
-        details = self.dump_ui("vw-location-details.xml")
-        if vehicle_name and not any(
-            vehicle_name.casefold() in value.casefold()
-            for value in self.strings(details)
-        ):
+        details = centered_map
+        for marker_attempt in range(2):
+            x, y = self.vehicle_marker_tap_centers(centered_map)[marker_attempt]
+            self.shell("input", "tap", str(x), str(y))
+            time.sleep(self.detail_wait)
+            details = self.dump_ui("vw-location-details.xml")
+            if self.vehicle_marker_is_selected(details, vehicle_name):
+                break
+            if marker_attempt == 0:
+                # A missed label tap leaves the map open; a nearby charging POI
+                # opens a details card. Close only the latter before centering
+                # the vehicle again for the pin-center fallback.
+                try:
+                    self.described_node_center(details, "Route")
+                except RuntimeError:
+                    pass
+                else:
+                    self.shell("input", "keyevent", "KEYCODE_BACK")
+                    time.sleep(1)
+                map_root = self.wait_for_car_locate_button("vw-location-map.xml")
+                x, y = self.described_node_center(map_root, "Car Locate Button")
+                self.shell("input", "tap", str(x), str(y))
+                time.sleep(self.detail_wait)
+                centered_map = self.dump_ui("vw-location-centered-map.xml")
+
+        if not self.vehicle_marker_is_selected(details, vehicle_name):
             raise RuntimeError("Volkswagen vehicle marker was not selected")
         result = LocationData(
             observedAt=datetime.now().astimezone().isoformat(timespec="seconds")

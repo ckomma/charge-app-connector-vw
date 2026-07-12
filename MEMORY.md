@@ -194,6 +194,17 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## Verification
 
+- On 2026-07-12, the overview handler for the localized `Intelligentes
+  Stromsparen` / `Intelligent power saving` notice was deployed to the
+  production Redmi runtime and live-verified through a fresh charge refresh.
+  The refresh completed without an overview or charge-detail error, returned a
+  fresh charge result with state of charge present, and incremented the
+  persisted background usage counter. During the final checks the runtime host
+  rebooted externally; the connector and USB ADB transport recovered cleanly.
+  The exact production limits were restored to 180 background operations and
+  20 actions, the persisted counters were not reset, no cooldown was active,
+  and the temporary root-only restore file was removed.
+
 - openHAB 5.1.4 end-to-end verification on 2026-06-20/21 used the separate
   Home Assistant binding with the existing MQTT broker. The discovered
   `Volkswagen App Connector` Thing was online and read-only. After adding

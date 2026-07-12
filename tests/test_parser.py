@@ -442,6 +442,25 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(mqtt.client.username, "connector")
         self.assertEqual(mqtt.client.password, "secret")
 
+        health_config_call = next(
+            call for call in mqtt.client.published
+            if call[0][0] == "homeassistant/sensor/vw-app-connector/connector_status/config"
+        )
+        health_config = json.loads(health_config_call[0][1])
+        self.assertEqual(health_config["name"], "Connector health")
+        self.assertEqual(health_config["state_topic"], "vw_app_connector/health")
+
+        location_config_call = next(
+            call for call in mqtt.client.published
+            if call[0][0] == "homeassistant/device_tracker/vw-app-connector/location/config"
+        )
+        location_config = json.loads(location_config_call[0][1])
+        self.assertNotIn("state_topic", location_config)
+        self.assertNotIn("value_template", location_config)
+        self.assertEqual(
+            location_config["json_attributes_topic"], "vw_app_connector/location"
+        )
+
     def test_mqtt_is_disabled_without_host(self):
         with patch.dict("os.environ", {}, clear=True):
             self.assertIsNone(MqttPublisher.from_environment(lambda: {}))
@@ -697,6 +716,18 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(
             VolkswagenReader.text_reports_active_charging(
                 "Battery 91 % • Charging"
+            )
+        )
+
+    def test_explicitly_disconnected_cable_text_is_recognized(self):
+        self.assertTrue(
+            VolkswagenReader.text_reports_disconnected(
+                "Battery 81 % - Connect charging cable"
+            )
+        )
+        self.assertTrue(
+            VolkswagenReader.text_reports_disconnected(
+                "Batterie 81 % - Ladekabel anschließen"
             )
         )
 
@@ -1517,6 +1548,18 @@ class ParserTests(unittest.TestCase):
             (540, 812),
         )
 
+    def test_vehicle_marker_tap_centers_fall_back_to_centered_pin(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node class="android.view.TextureView" bounds="[0,0][1080,1984]"/>
+            <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(
+            VolkswagenReader.vehicle_marker_tap_centers(root),
+            ((540, 812), (540, 992)),
+        )
+
     def test_vehicle_name_is_read_from_german_and_english_overview(self):
         for description in (
             "Ihr Fahrzeug: ID.7 Tourer Pro. Gerade synchronisiert.",
@@ -1592,6 +1635,20 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.serviceDays, 151)
         self.assertEqual(result.warningStatus, "Keine Meldungen")
         self.assertEqual(result.reportSyncAge, "3 h 42 min ago")
+
+    def test_vehicle_report_parses_space_grouped_odometer_values(self):
+        for distance in ("27 886 km", "27\u00a0886 km", "27\u202f886 km"):
+            with self.subTest(distance=distance):
+                root = ET.fromstring(
+                    f"""<hierarchy>
+                    <node text="Vehicle Health Report"/>
+                    <node text="Total distance"/>
+                    <node text="{distance}"/>
+                    </hierarchy>"""
+                )
+                result = DetailData()
+                VolkswagenReader.parse_vehicle_report(root, result)
+                self.assertEqual(result.odometerKm, 27886)
 
     def test_gte_vehicle_report_tile_matches_vehicle_health_label(self):
         root = ET.fromstring(
@@ -1858,6 +1915,76 @@ class ParserTests(unittest.TestCase):
         self.assertIn(route_tap, calls)
         self.assertLess(calls.index(maps_stop), calls.index(route_tap))
 
+    def test_location_retries_vehicle_marker_at_centered_pin(self):
+        start = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Your vehicle: Example Vehicle. Just synced."/>
+            <node content-desc="Navigation Tab" bounds="[10,10][110,110]"/>
+            </hierarchy>"""
+        )
+        map_root = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Car Locate Button" bounds="[20,20][120,120]"/>
+            </hierarchy>"""
+        )
+        centered = ET.fromstring(
+            """<hierarchy>
+            <node class="android.view.TextureView" bounds="[0,0][1080,2148]"/>
+            </hierarchy>"""
+        )
+        other_marker = ET.fromstring(
+            """<hierarchy>
+            <node text="Public charger"/>
+            <node text="Route" bounds="[502,1987][622,2042]"/>
+            </hierarchy>"""
+        )
+        details = ET.fromstring(
+            """<hierarchy>
+            <node text="Example Vehicle"/>
+            <node text="Example Street 1&#10;Parked since 2 hours"
+                bounds="[55,1565][1025,1631]"/>
+            <node text="Route" bounds="[502,1987][622,2042]"/>
+            </hierarchy>"""
+        )
+        calls: list[tuple[str, ...]] = []
+
+        def shell(*args: str, **_kwargs: object) -> str:
+            calls.append(args)
+            if args[:3] == ("dumpsys", "activity", "activities"):
+                return "dat=google.navigation:q=48.114598%2C11.480513&mode=w"
+            if args[:3] == ("dumpsys", "window", "windows"):
+                return "mCurrentFocus=com.volkswagen.weconnect/.SingleActivity"
+            return ""
+
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb-serial", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "launch"),
+                    patch.object(
+                        reader,
+                        "dump_ui_with_overlay_recovery",
+                        side_effect=(start, map_root, map_root),
+                    ),
+                    patch.object(
+                        reader,
+                        "dump_ui",
+                        side_effect=(centered, other_marker, centered, details),
+                    ),
+                    patch.object(reader, "shell", side_effect=shell),
+                    patch("time.sleep"),
+                ):
+                    result = reader._read_location()
+
+        self.assertEqual((result.latitude, result.longitude), (48.114598, 11.480513))
+        self.assertIn(("input", "tap", "540", "913"), calls)
+        self.assertIn(("input", "tap", "540", "1074"), calls)
+        self.assertIn(("input", "keyevent", "KEYCODE_BACK"), calls)
+
     def test_location_map_notice_is_dismissed(self):
         notice = ET.fromstring(
             """<hierarchy>
@@ -1927,6 +2054,100 @@ class ParserTests(unittest.TestCase):
                     )
                 shell.assert_called_once_with("input", "tap", "540", "1850")
                 sleep.assert_called_once_with(1)
+
+    def test_german_intelligent_power_saving_notice_is_dismissed(self):
+        notice = ET.fromstring(
+            """<hierarchy>
+            <node text="Intelligentes Stromsparen"/>
+            <node text="Ihr Fahrzeug nutzt Intelligentes Stromsparen, um die Batterie zu schonen."/>
+            <node text="Alles klar" bounds="[75,1820][1175,1910]"/>
+            </hierarchy>"""
+        )
+        ready = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Batteriereichweite: 108 km" bounds="[40,330][600,650]"/>
+            </hierarchy>"""
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "shell") as shell,
+                    patch.object(
+                        reader,
+                        "dump_ui_with_compose_fallback",
+                        return_value=ready,
+                    ),
+                    patch("time.sleep") as sleep,
+                ):
+                    self.assertIs(
+                        reader.dismiss_overview_notice(
+                            notice, "vw-overview-notice-dismissed.xml"
+                        ),
+                        ready,
+                    )
+                shell.assert_called_once_with("input", "tap", "625", "1865")
+                sleep.assert_called_once_with(1)
+
+    def test_english_intelligent_power_saving_notice_is_dismissed(self):
+        notice = ET.fromstring(
+            """<hierarchy>
+            <node text="Intelligent power saving"/>
+            <node text="Your vehicle uses intelligent power saving to protect the battery."/>
+            <node text="Got it" bounds="[100,1700][980,1820]"/>
+            </hierarchy>"""
+        )
+        ready = ET.fromstring("<hierarchy/>")
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "shell") as shell,
+                    patch.object(
+                        reader,
+                        "dump_ui_with_compose_fallback",
+                        return_value=ready,
+                    ),
+                    patch("time.sleep"),
+                ):
+                    self.assertIs(
+                        reader.dismiss_overview_notice(
+                            notice, "vw-overview-notice-dismissed.xml"
+                        ),
+                        ready,
+                    )
+                shell.assert_called_once_with("input", "tap", "540", "1760")
+
+    def test_unrelated_overview_confirmation_is_not_dismissed(self):
+        notice = ET.fromstring(
+            """<hierarchy>
+            <node text="A different notice"/>
+            <node text="Alles klar" bounds="[100,1700][980,1820]"/>
+            </hierarchy>"""
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with patch.object(reader, "shell") as shell:
+                    self.assertIs(
+                        reader.dismiss_overview_notice(
+                            notice, "vw-overview-notice-dismissed.xml"
+                        ),
+                        notice,
+                    )
+                shell.assert_not_called()
 
     def test_location_limited_services_fails_with_app_state_error(self):
         limited = ET.fromstring(
