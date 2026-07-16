@@ -119,6 +119,8 @@ Environment variables:
 - `ACTION_MIN_INTERVAL_SECONDS`: default `60`
 - `ACTION_DAILY_LIMIT`: default `20`
 - `RATE_LIMIT_COOLDOWN_SECONDS`: default `43200`
+- `COOLDOWN_PROBE_MIN_INTERVAL_SECONDS`: default `900`; minimum interval
+  between explicit authenticated cooldown probes
 - `USAGE_STATE_FILE`: default `/var/lib/vw-app-connector/usage.json`
 - `CACHE_STATE_DIR`: default `/var/lib/vw-app-connector/cache`; stores the last
   successful endpoint values so restarts can serve data during cache refresh
@@ -135,7 +137,7 @@ Environment variables:
   value or semantic element after navigation or a setting change
 - `SLEEP_AFTER_OPERATION`: default `true`; wake and unlock before UI automation,
   then switch the display off again
-- `API_KEY`: required for `POST /action/*`
+- `API_KEY`: required for `POST /action/*` and administrative cooldown probes
 - `VW_SPIN`: required for lock and unlock actions
 - `MQTT_HOST`: optional broker host; enables read-only MQTT publishing and
   Home Assistant discovery
@@ -214,6 +216,29 @@ from authenticated `GET /actions/JOB_ID`.
 
 Send the API key in the `X-API-Key` header. Keep the environment file readable
 only by root because it contains the Volkswagen S-PIN.
+
+### Cooldown recovery probe
+
+An explicit Volkswagen `too many requests` response starts the configured
+global rate-limit cooldown. Transient app states such as `data no longer
+up-to-date` use the normal background error retry interval instead and do not
+start the 12-hour cooldown. `/health` exposes `usageCooldownReason`,
+`usageCooldownUntil` and the remaining probe wait.
+
+After correcting a local phone or ADB problem, an administrator can request one
+budgeted charge-data probe:
+
+```http
+POST /admin/cooldown/probe
+X-API-Key: replace-with-the-connector-api-key
+```
+
+The probe requires an authorized ADB device and the verified Volkswagen app
+version. It preserves the background daily budget and minimum interval. The
+existing cooldown is cleared only after a successful read; any Volkswagen
+rate-limit, stale-app state or local failure leaves its original expiry
+unchanged. Repeated probes are limited by
+`COOLDOWN_PROBE_MIN_INTERVAL_SECONDS`. Usage counters are never reset.
 
 Install the files from `deploy/` and adjust `/etc/default/vw-app-connector`.
 

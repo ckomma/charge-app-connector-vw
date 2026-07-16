@@ -22,6 +22,7 @@ export BACKGROUND_DAILY_LIMIT="$(opt background_daily_limit "180")"
 export ACTION_MIN_INTERVAL_SECONDS="$(opt action_min_interval_seconds "60")"
 export ACTION_DAILY_LIMIT="$(opt action_daily_limit "20")"
 export RATE_LIMIT_COOLDOWN_SECONDS="$(opt rate_limit_cooldown_seconds "43200")"
+export COOLDOWN_PROBE_MIN_INTERVAL_SECONDS="$(opt cooldown_probe_min_interval_seconds "900")"
 export USAGE_STATE_FILE=/data/usage.json
 export CACHE_STATE_DIR=/data/cache
 export DIAGNOSTICS_DIR=/data/diagnostics

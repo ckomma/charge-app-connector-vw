@@ -18,14 +18,17 @@ from vw_app_connector import (
     ChargingLocationSettingsData,
     ChargingLocationsData,
     ChargingSettingsData,
+    CooldownProbeRejected,
     DetailData,
     HealthData,
     IdempotencyConflict,
     LocationData,
     RequestHandler,
+    TransientVolkswagenState,
     UsageLimit,
     UsageLimiter,
     VehicleData,
+    VolkswagenRateLimit,
     VolkswagenReader,
 )
 from http.server import ThreadingHTTPServer
@@ -245,6 +248,38 @@ class ParserTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_http_cooldown_probe_requires_authentication(self):
+        state = Mock()
+        state.probe_cooldown.return_value = {
+            "status": "succeeded",
+            "cooldownCleared": True,
+        }
+        RequestHandler.state = state
+        RequestHandler.api_key = "test-key"
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RequestHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(*server.server_address)
+            connection.request("POST", "/admin/cooldown/probe")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 401)
+            response.read()
+            state.probe_cooldown.assert_not_called()
+
+            connection.request(
+                "POST",
+                "/admin/cooldown/probe",
+                headers={"X-API-Key": "test-key"},
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertTrue(json.loads(response.read())["cooldownCleared"])
+            state.probe_cooldown.assert_called_once_with()
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_capabilities_describe_actions_and_caches_without_refresh(self):
         state = object.__new__(AppState)
         state.verified_app_version = "3.63.2"
@@ -282,6 +317,10 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(result["features"]["mqtt"])
         self.assertIn("charging/target-soc", result["actions"]["write"])
         self.assertIn("charging/settings", result["actions"]["readOnly"])
+        self.assertEqual(
+            result["administrativeEndpoints"]["cooldownProbe"],
+            "/admin/cooldown/probe",
+        )
         self.assertTrue(result["caches"]["charge"]["available"])
         self.assertFalse(result["caches"]["details"]["available"])
 
@@ -1577,26 +1616,68 @@ class ParserTests(unittest.TestCase):
                 )
                 self.assertEqual(VolkswagenReader.parse_vehicle_name(root), expected)
 
-    def test_lockout_overview_state_is_rate_limited(self):
-        root = ET.fromstring(
-            """<hierarchy>
-            <node content-desc="Your vehicle: Golf GTE OPF 8.5. Synchronised: Data no longer up-to-date"/>
-            <node content-desc="Air conditioning. Off. Open details"/>
-            <node content-desc="Vehicle. Locked. Open details"/>
-            </hierarchy>"""
-        )
-        with self.assertRaisesRegex(UsageLimit, "no longer up-to-date"):
-            VolkswagenReader.raise_for_lockout_state(root)
+    def test_stale_overview_state_uses_transient_retry_in_both_languages(self):
+        for description in (
+            "Your vehicle: Example. Synchronised: Data no longer up-to-date",
+            "Ihr Fahrzeug: Beispiel. Synchronisiert: Daten nicht mehr aktuell",
+        ):
+            with self.subTest(description=description):
+                root = ET.fromstring(
+                    f'<hierarchy><node content-desc="{description}"/></hierarchy>'
+                )
+                with self.assertRaises(TransientVolkswagenState) as raised:
+                    VolkswagenReader.raise_for_lockout_state(root)
+                self.assertEqual(raised.exception.reason, "APP_DATA_STALE")
+                self.assertEqual(
+                    VolkswagenReader.error_category(raised.exception),
+                    "APP_DATA_STALE",
+                )
 
-    def test_unavailable_health_report_is_rate_limited(self):
-        root = ET.fromstring(
-            """<hierarchy>
-            <node text="Vehicle Health Report"/>
-            <node text="Currently unavailable. Please try again later."/>
-            </hierarchy>"""
+    def test_explicit_too_many_requests_state_is_rate_limited(self):
+        reader = object.__new__(VolkswagenReader)
+        reader.ui_update_timeout = 0
+        reader.dump_ui_with_compose_fallback = Mock(
+            return_value=ET.fromstring(
+                '<hierarchy><node text="Too many requests"/></hierarchy>'
+            )
         )
-        with self.assertRaisesRegex(UsageLimit, "currently unavailable"):
-            VolkswagenReader.raise_for_lockout_state(root)
+        reader.dismiss_overview_notice = Mock(side_effect=lambda root, _: root)
+        reader.app_in_foreground = Mock(return_value=True)
+
+        with self.assertRaises(VolkswagenRateLimit) as raised:
+            reader.open_overview()
+
+        self.assertEqual(raised.exception.reason, "TOO_MANY_REQUESTS")
+        self.assertEqual(
+            VolkswagenReader.error_category(raised.exception), "RATE_LIMIT"
+        )
+
+    def test_charge_retry_log_identifies_read_operation(self):
+        reader = object.__new__(VolkswagenReader)
+        reader.save_diagnostics = Mock()
+        reader.launch = Mock()
+        operation = Mock(side_effect=RuntimeError("example failure"))
+
+        with (
+            self.assertLogs("vw-app-connector", level="WARNING") as logs,
+            self.assertRaises(RuntimeError),
+        ):
+            reader.with_retries(operation, "CHARGE")
+
+        self.assertIn("CHARGE read attempt 1 failed", "\n".join(logs.output))
+
+    def test_unavailable_report_uses_transient_retry_in_both_languages(self):
+        for message in (
+            "Currently unavailable. Please try again later.",
+            "Derzeit nicht verfügbar. Bitte versuche es später erneut.",
+        ):
+            with self.subTest(message=message):
+                root = ET.fromstring(
+                    f'<hierarchy><node text="{message}"/></hierarchy>'
+                )
+                with self.assertRaises(TransientVolkswagenState) as raised:
+                    VolkswagenReader.raise_for_lockout_state(root)
+                self.assertEqual(raised.exception.reason, "APP_UNAVAILABLE")
 
     def test_gte_overview_parses_electric_and_fuel_range(self):
         text = (
@@ -1757,6 +1838,107 @@ class ParserTests(unittest.TestCase):
                     limiter.acquire_background(1)
                 with self.assertRaises(UsageLimit):
                     limiter.acquire_action()
+
+    def test_rate_limit_reason_and_successful_probe_are_persisted(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "USAGE_STATE_FILE": f"{directory}/usage.json",
+                "BACKGROUND_DAILY_LIMIT": "3",
+                "BACKGROUND_MIN_INTERVAL_SECONDS": "0",
+                "RATE_LIMIT_COOLDOWN_SECONDS": "43200",
+                "COOLDOWN_PROBE_MIN_INTERVAL_SECONDS": "900",
+            }
+            with patch.dict("os.environ", environment):
+                limiter = UsageLimiter()
+                limiter.record_rate_limit("TOO_MANY_REQUESTS")
+                snapshot = UsageLimiter().snapshot()
+                self.assertGreater(snapshot["cooldownSeconds"], 43190)
+                self.assertEqual(
+                    snapshot["cooldownReason"], "TOO_MANY_REQUESTS"
+                )
+                self.assertTrue(snapshot["cooldownUntil"])
+                expected_until = limiter.begin_cooldown_probe()
+                limiter.acquire_background(1, bypass_cooldown=True)
+                with self.assertRaises(CooldownProbeRejected) as raised:
+                    limiter.begin_cooldown_probe()
+                self.assertEqual(raised.exception.reason, "PROBE_MIN_INTERVAL")
+                self.assertTrue(limiter.clear_rate_limit(expected_until))
+                cleared = UsageLimiter().snapshot()
+                self.assertEqual(cleared["cooldownSeconds"], 0)
+                self.assertEqual(cleared["cooldownReason"], "")
+                self.assertEqual(cleared["backgroundUsed"], 1)
+
+    def test_active_cooldown_survives_daily_counter_rollover(self):
+        with TemporaryDirectory() as directory:
+            state_path = Path(directory) / "usage.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "day": "1900-01-01",
+                        "backgroundUsed": 99,
+                        "actionsUsed": 9,
+                        "lastBackgroundAt": 0,
+                        "lastActionAt": 0,
+                        "cooldownUntil": time.time() + 3600,
+                        "cooldownReason": "TOO_MANY_REQUESTS",
+                        "lastCooldownProbeAt": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {"USAGE_STATE_FILE": str(state_path)}):
+                snapshot = UsageLimiter().snapshot()
+            self.assertEqual(snapshot["backgroundUsed"], 0)
+            self.assertEqual(snapshot["actionsUsed"], 0)
+            self.assertEqual(snapshot["cooldownReason"], "TOO_MANY_REQUESTS")
+            self.assertGreater(snapshot["cooldownSeconds"], 3590)
+
+    def test_cooldown_probe_clears_only_after_successful_read(self):
+        state = object.__new__(AppState)
+        state.verified_app_version = "4.0.3"
+        state.reader = Mock()
+        state.reader.context = SimpleNamespace(background=False)
+        state.reader.phone_health.return_value = HealthData(
+            adbState="device", appVersion="4.0.3"
+        )
+        state.reader.read.return_value = VehicleData(status="B", soc=55)
+        state.usage = Mock()
+        state.usage.begin_cooldown_probe.return_value = 123.0
+        state.usage.clear_rate_limit.return_value = True
+        state.usage.snapshot.return_value = {"cooldownSeconds": 0}
+        state.charge = Mock()
+
+        result = state.probe_cooldown()
+
+        state.usage.acquire_background.assert_called_once_with(
+            1, bypass_cooldown=True
+        )
+        state.usage.clear_rate_limit.assert_called_once_with(123.0)
+        state.charge.set_value.assert_called_once()
+        self.assertTrue(result["cooldownCleared"])
+        self.assertFalse(state.reader.context.background)
+
+    def test_failed_cooldown_probe_preserves_original_expiry(self):
+        state = object.__new__(AppState)
+        state.verified_app_version = "4.0.3"
+        state.reader = Mock()
+        state.reader.context = SimpleNamespace(background=False)
+        state.reader.phone_health.return_value = HealthData(
+            adbState="device", appVersion="4.0.3"
+        )
+        state.reader.read.side_effect = VolkswagenRateLimit(
+            "TOO_MANY_REQUESTS", "Volkswagen app reports too many requests"
+        )
+        state.usage = Mock()
+        state.usage.begin_cooldown_probe.return_value = 123.0
+        state.charge = Mock()
+
+        with self.assertRaises(VolkswagenRateLimit):
+            state.probe_cooldown()
+
+        state.usage.clear_rate_limit.assert_not_called()
+        state.charge.set_value.assert_not_called()
+        self.assertFalse(state.reader.context.background)
 
     def test_background_refresh_yields_to_priority_work(self):
         with TemporaryDirectory() as directory:

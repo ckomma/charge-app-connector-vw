@@ -6,7 +6,8 @@ Required options:
   USB ADB device. Keep an explicit serial when multiple Android devices can be
   visible. Required even when `adb_mode` is `wifi` or `auto`.
 - `adb_mode`: `usb`, `wifi`, or `auto`.
-- `api_key`: random secret required for authenticated write-action endpoints.
+- `api_key`: random secret required for authenticated write-action and
+  administrative cooldown-probe endpoints.
 
 Optional but common:
 
@@ -34,6 +35,12 @@ response.
 
 `/details` and `/location` perform slower multi-page reads and spend background
 budget. Use them only when you intentionally want to refresh those caches.
+
+An explicit Volkswagen rate limit is preserved across restarts. After fixing a
+local phone or ADB problem, use the authenticated `POST /admin/cooldown/probe`
+endpoint for one budgeted read. It clears the cooldown only on success and does
+not reset usage counters or minimum intervals. Repeated probes are limited by
+`cooldown_probe_min_interval_seconds`.
 
 ## MQTT
 

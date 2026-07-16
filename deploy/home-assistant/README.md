@@ -101,7 +101,8 @@ Open the app's Configuration tab in Home Assistant and set at least:
 - `adb_mode`: `usb`, `wifi` or `auto`.
 - `adb_wifi_address`: Android wireless-debugging connection address as
   `IP:Port` when using Wi-Fi.
-- `api_key`: random secret required for `POST /action/*`.
+- `api_key`: random secret required for `POST /action/*` and
+  `POST /admin/cooldown/probe`.
 - `vw_spin`: Volkswagen S-PIN, required only for lock/unlock actions.
 - `verified_app_version`: Volkswagen app version tested for write actions.
 

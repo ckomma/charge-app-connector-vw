@@ -40,6 +40,24 @@ class UsageLimit(RuntimeError):
     pass
 
 
+class VolkswagenRateLimit(UsageLimit):
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class TransientVolkswagenState(UsageLimit):
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class CooldownProbeRejected(RuntimeError):
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class ActionQuarantined(RuntimeError):
     def __init__(self, reason: str, app_version: str, verified_version: str) -> None:
         super().__init__(reason)
@@ -72,6 +90,9 @@ class UsageLimiter:
         self.rate_limit_cooldown = float(
             os.getenv("RATE_LIMIT_COOLDOWN_SECONDS", "43200")
         )
+        self.cooldown_probe_min_interval = float(
+            os.getenv("COOLDOWN_PROBE_MIN_INTERVAL_SECONDS", "900")
+        )
         self.lock = threading.Lock()
         self.state = self._load()
 
@@ -87,14 +108,30 @@ class UsageLimiter:
             "lastBackgroundAt": 0.0,
             "lastActionAt": 0.0,
             "cooldownUntil": 0.0,
+            "cooldownReason": "",
+            "lastCooldownProbeAt": 0.0,
         }
 
     def _load(self) -> dict[str, object]:
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
+            for key, default in self._empty().items():
+                value.setdefault(key, default)
             if value.get("day") == self.today():
                 return value
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            fresh = self._empty()
+            if float(value["cooldownUntil"]) > time.time():
+                fresh["cooldownUntil"] = value["cooldownUntil"]
+                fresh["cooldownReason"] = value["cooldownReason"]
+                fresh["lastCooldownProbeAt"] = value["lastCooldownProbeAt"]
+            return fresh
+        except (
+            FileNotFoundError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+            OSError,
+        ):
             pass
         return self._empty()
 
@@ -106,12 +143,22 @@ class UsageLimiter:
 
     def _rollover(self) -> None:
         if self.state.get("day") != self.today():
+            previous = self.state
             self.state = self._empty()
+            if float(previous.get("cooldownUntil", 0.0)) > time.time():
+                self.state["cooldownUntil"] = previous["cooldownUntil"]
+                self.state["cooldownReason"] = previous.get(
+                    "cooldownReason", ""
+                )
+                self.state["lastCooldownProbeAt"] = previous.get(
+                    "lastCooldownProbeAt", 0.0
+                )
 
     def acquire_background(
         self,
         cost: int,
         yield_to: Callable[[], bool] | None = None,
+        bypass_cooldown: bool = False,
     ) -> None:
         while True:
             with self.lock:
@@ -119,7 +166,7 @@ class UsageLimiter:
                 now = time.time()
                 cooldown = float(self.state["cooldownUntil"])
                 used = int(self.state["backgroundUsed"])
-                if now < cooldown:
+                if now < cooldown and not bypass_cooldown:
                     raise UsageLimit(
                         f"Volkswagen rate-limit cooldown active for "
                         f"{round(cooldown - now)} seconds"
@@ -165,23 +212,78 @@ class UsageLimiter:
                     return
             time.sleep(min(wait, 2))
 
-    def record_rate_limit(self) -> None:
+    def record_rate_limit(self, reason: str) -> None:
         with self.lock:
             self._rollover()
             self.state["cooldownUntil"] = time.time() + self.rate_limit_cooldown
+            self.state["cooldownReason"] = reason
             self._save()
+
+    def begin_cooldown_probe(self) -> float:
+        with self.lock:
+            self._rollover()
+            now = time.time()
+            cooldown = float(self.state["cooldownUntil"])
+            if now >= cooldown:
+                raise CooldownProbeRejected(
+                    "NO_ACTIVE_COOLDOWN",
+                    "No active Volkswagen rate-limit cooldown",
+                )
+            wait = self.cooldown_probe_min_interval - (
+                now - float(self.state.get("lastCooldownProbeAt", 0.0))
+            )
+            if wait > 0:
+                raise CooldownProbeRejected(
+                    "PROBE_MIN_INTERVAL",
+                    f"Cooldown probe available in {round(wait)} seconds",
+                )
+            self.state["lastCooldownProbeAt"] = now
+            self._save()
+            return cooldown
+
+    def clear_rate_limit(self, expected_until: float) -> bool:
+        with self.lock:
+            self._rollover()
+            if float(self.state["cooldownUntil"]) != expected_until:
+                return False
+            self.state["cooldownUntil"] = 0.0
+            self.state["cooldownReason"] = ""
+            self._save()
+            return True
 
     def snapshot(self) -> dict[str, object]:
         with self.lock:
             self._rollover()
             now = time.time()
+            cooldown_until = float(self.state["cooldownUntil"])
+            cooldown_seconds = max(0, round(cooldown_until - now))
+            probe_wait = max(
+                0,
+                round(
+                    self.cooldown_probe_min_interval
+                    - (now - float(self.state.get("lastCooldownProbeAt", 0.0)))
+                ),
+            )
             return {
                 "backgroundUsed": int(self.state["backgroundUsed"]),
                 "backgroundLimit": self.background_daily_limit,
                 "actionsUsed": int(self.state["actionsUsed"]),
                 "actionsLimit": self.action_daily_limit,
-                "cooldownSeconds": max(
-                    0, round(float(self.state["cooldownUntil"]) - now)
+                "cooldownSeconds": cooldown_seconds,
+                "cooldownReason": (
+                    str(self.state.get("cooldownReason", ""))
+                    if cooldown_seconds
+                    else ""
+                ),
+                "cooldownUntil": (
+                    datetime.fromtimestamp(cooldown_until)
+                    .astimezone()
+                    .isoformat(timespec="seconds")
+                    if cooldown_seconds
+                    else ""
+                ),
+                "cooldownProbeAvailableInSeconds": (
+                    probe_wait if cooldown_seconds else 0
                 ),
             }
 
@@ -296,6 +398,9 @@ class HealthData:
     usageActionsUsed: int = 0
     usageActionsLimit: int = 0
     usageCooldownSeconds: int = 0
+    usageCooldownReason: str = ""
+    usageCooldownUntil: str = ""
+    usageCooldownProbeAvailableInSeconds: int = 0
 
 
 class VolkswagenReader:
@@ -615,7 +720,10 @@ class VolkswagenReader:
                     "too many requests" in overview_text
                     or "zu viele anfragen" in overview_text
                 ):
-                    raise UsageLimit("Volkswagen app reports too many requests")
+                    raise VolkswagenRateLimit(
+                        "TOO_MANY_REQUESTS",
+                        "Volkswagen app reports too many requests",
+                    )
                 self.raise_for_lockout_state(overview)
                 try:
                     self.range_tile_center(overview)
@@ -691,13 +799,29 @@ class VolkswagenReader:
     @classmethod
     def raise_for_lockout_state(cls, root: ET.Element) -> None:
         text = "\n".join(cls.strings(root)).casefold()
-        if "data no longer up-to-date" in text:
-            raise UsageLimit(
-                "Volkswagen app reports data no longer up-to-date"
+        if any(
+            value in text
+            for value in (
+                "data no longer up-to-date",
+                "daten nicht mehr aktuell",
+                "daten sind nicht mehr aktuell",
             )
-        if "currently unavailable. please try again later." in text:
-            raise UsageLimit(
-                "Volkswagen app reports data currently unavailable"
+        ):
+            raise TransientVolkswagenState(
+                "APP_DATA_STALE",
+                "Volkswagen app reports data no longer up-to-date",
+            )
+        if any(
+            value in text
+            for value in (
+                "currently unavailable. please try again later.",
+                "derzeit nicht verfügbar. bitte versuche es später erneut.",
+                "derzeit nicht verfügbar. bitte versuchen sie es später erneut.",
+            )
+        ):
+            raise TransientVolkswagenState(
+                "APP_UNAVAILABLE",
+                "Volkswagen app reports data currently unavailable",
             )
 
     @staticmethod
@@ -1593,7 +1717,8 @@ class VolkswagenReader:
                     raise
                 last_error = exc
                 self.save_diagnostics(category, exc)
-                LOG.warning("%s attempt %d failed: %s", category, attempt + 1, exc)
+                label = "CHARGE read" if category == "CHARGE" else category
+                LOG.warning("%s attempt %d failed: %s", label, attempt + 1, exc)
                 if attempt == 0:
                     try:
                         self.launch()
@@ -1604,6 +1729,8 @@ class VolkswagenReader:
 
     @staticmethod
     def error_category(exc: Exception) -> str:
+        if isinstance(exc, TransientVolkswagenState):
+            return exc.reason
         if isinstance(exc, UsageLimit):
             return "RATE_LIMIT"
         message = str(exc).casefold()
@@ -3002,9 +3129,8 @@ class AppState:
                     self.reader.context.background = True
                     try:
                         return loader()
-                    except UsageLimit as exc:
-                        if "reports " in str(exc):
-                            self.usage.record_rate_limit()
+                    except VolkswagenRateLimit as exc:
+                        self.usage.record_rate_limit(exc.reason)
                         raise
                     finally:
                         self.reader.context.background = False
@@ -3110,6 +3236,9 @@ class AppState:
                 "metrics": True,
                 "diagnostics": True,
             },
+            "administrativeEndpoints": {
+                "cooldownProbe": "/admin/cooldown/probe",
+            },
             "features": {
                 "adbMode": health.adbMode,
                 "adbTransport": health.adbTransport,
@@ -3120,6 +3249,7 @@ class AppState:
                 "mqtt": self.mqtt is not None,
                 "cachePersistence": True,
                 "asyncActions": True,
+                "cooldownProbe": True,
                 "diagnosticsIndex": True,
                 "germanLocalization": True,
                 "englishLocalization": True,
@@ -3349,9 +3479,8 @@ class AppState:
         try:
             self.usage.acquire_action()
             return self._action(name, query)
-        except UsageLimit as exc:
-            if "reports " in str(exc):
-                self.usage.record_rate_limit()
+        except VolkswagenRateLimit as exc:
+            self.usage.record_rate_limit(exc.reason)
             raise
         finally:
             self.reader.action_pending.clear()
@@ -3435,6 +3564,42 @@ class AppState:
             return self.reader.list_charging_locations()
         raise KeyError(name)
 
+    def probe_cooldown(self) -> dict[str, object]:
+        health = self.reader.phone_health()
+        if health.adbState != "device":
+            raise CooldownProbeRejected(
+                "ADB_UNAVAILABLE",
+                "Cooldown probe requires an authorized ADB device",
+            )
+        verified, reason = self.version_policy(
+            health.appVersion, self.verified_app_version
+        )
+        if not verified:
+            raise CooldownProbeRejected(
+                reason,
+                "Cooldown probe requires the verified Volkswagen app version",
+            )
+        expected_until = self.usage.begin_cooldown_probe()
+        self.usage.acquire_background(1, bypass_cooldown=True)
+        self.reader.context.background = True
+        try:
+            value = self.reader.read()
+        finally:
+            self.reader.context.background = False
+        if not self.usage.clear_rate_limit(expected_until):
+            raise CooldownProbeRejected(
+                "COOLDOWN_CHANGED",
+                "Cooldown changed while the probe was running",
+            )
+        self.charge.set_value(value)
+        LOG.info("Volkswagen rate-limit cooldown cleared after successful probe")
+        return {
+            "status": "succeeded",
+            "cooldownCleared": True,
+            "usage": self.usage.snapshot(),
+            "charge": asdict(value),
+        }
+
     def health(self) -> HealthData:
         value = self.reader.phone_health()
         value.verifiedAppVersion = self.verified_app_version
@@ -3461,6 +3626,11 @@ class AppState:
         value.usageActionsUsed = int(usage["actionsUsed"])
         value.usageActionsLimit = int(usage["actionsLimit"])
         value.usageCooldownSeconds = int(usage["cooldownSeconds"])
+        value.usageCooldownReason = str(usage.get("cooldownReason", ""))
+        value.usageCooldownUntil = str(usage.get("cooldownUntil", ""))
+        value.usageCooldownProbeAvailableInSeconds = int(
+            usage.get("cooldownProbeAvailableInSeconds", 0)
+        )
         if self.charge.value is None or value.adbState != "device":
             value.status = "error"
         elif (
@@ -3530,11 +3700,37 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         prefix = "/action/"
+        if parsed.path == "/admin/cooldown/probe":
+            if not self.authenticated():
+                self.send_error(401)
+                return
+            LOG.info("Cooldown probe requested")
+            try:
+                self.send_json(self.state.probe_cooldown(), 200)
+            except CooldownProbeRejected as exc:
+                self.send_json(
+                    {
+                        "error": str(exc),
+                        "errorCategory": "COOLDOWN_PROBE",
+                        "reason": exc.reason,
+                    },
+                    409,
+                )
+            except TransientVolkswagenState as exc:
+                self.send_json(
+                    {"error": str(exc), "errorCategory": exc.reason}, 503
+                )
+            except UsageLimit as exc:
+                self.send_json(
+                    {"error": str(exc), "errorCategory": "RATE_LIMIT"}, 429
+                )
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 503)
+            return
         if not parsed.path.startswith(prefix):
             self.send_error(404)
             return
-        supplied_key = self.headers.get("X-API-Key", "")
-        if not self.api_key or not hmac.compare_digest(supplied_key, self.api_key):
+        if not self.authenticated():
             self.send_error(401)
             return
         try:
@@ -3589,6 +3785,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 409,
             )
             return
+        except TransientVolkswagenState as exc:
+            self.send_json(
+                {"error": str(exc), "errorCategory": exc.reason}, 503
+            )
+            return
         except UsageLimit as exc:
             self.send_json({"error": str(exc), "errorCategory": "RATE_LIMIT"}, 429)
             return
@@ -3596,6 +3797,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json({"error": str(exc)}, 503)
             return
         self.send_json(asdict(value), 200)
+
+    def authenticated(self) -> bool:
+        supplied_key = self.headers.get("X-API-Key", "")
+        return bool(self.api_key) and hmac.compare_digest(supplied_key, self.api_key)
 
     def send_json(
         self,

@@ -27,6 +27,15 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## Screen And Refresh Behavior
 
+- Only an explicit localized Volkswagen `too many requests` state starts the
+  persisted global rate-limit cooldown. `Data no longer up-to-date` and the
+  localized `currently unavailable` report state use the normal background
+  error retry interval instead.
+- The authenticated `POST /admin/cooldown/probe` recovery operation performs
+  one background-budgeted charge read while preserving minimum intervals and
+  persisted counters. It clears only the unchanged original cooldown after a
+  successful read; failures preserve the original expiry. Probe attempts have
+  their own configurable minimum interval.
 - Keep the display awake during a multi-step UI read with
   `svc power stayon true`; the connector's existing sleep cleanup turns the
   display off after the operation.
@@ -193,6 +202,17 @@ coordinates, screenshots, raw UI dumps, and private network details.
   restored the original temperature.
 
 ## Verification
+
+- On 2026-07-16, the cooldown classification and authenticated recovery probe
+  were deployed to the production USB runtime with Volkswagen app `4.0.3` and
+  live-verified using a synthetic persisted cooldown. An unauthenticated probe
+  returned HTTP 401; the authenticated probe performed a real read, cleared
+  only the synthetic cooldown, incremented the persisted background counter by
+  one and left the action counter unchanged. The exact production limits were
+  restored to 180 background operations and 20 actions, no cooldown remained,
+  `/health` and the fresh `/charge` cache were healthy, the display returned to
+  sleep, recent service logs contained no warnings or errors, and all temporary
+  root-only test artifacts were removed.
 
 - On 2026-07-12, the overview handler for the localized `Intelligentes
   Stromsparen` / `Intelligent power saving` notice was deployed to the

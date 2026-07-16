@@ -4,6 +4,11 @@ Do not commit Volkswagen credentials, S-PINs, API keys, ADB private keys,
 device serial numbers, vehicle identifiers, location data, UI dumps or
 screenshots.
 
+Protect both `/action/*` and `/admin/*` with a non-empty `API_KEY`. The cooldown
+probe is an administrative recovery operation even though it performs only a
+read: it can deliberately bypass one active rate-limit cooldown and must not be
+exposed to an untrusted network.
+
 Keep `/etc/default/vw-app-connector` readable only by root. Use the committed
 deployment file only as a template and replace all placeholder values locally.
 

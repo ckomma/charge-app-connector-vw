@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.13
+
+- Distinguish transient stale app data from explicit Volkswagen rate limits,
+  expose cooldown reason and expiry, and add an authenticated one-shot recovery
+  probe that preserves usage safeguards.
+
 ## 0.1.12
 
 - Dismiss the localized intelligent power-saving notice before navigating the
