@@ -203,6 +203,18 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## Verification
 
+- On 2026-07-18, the bounded connected-state charge follow-up was deployed to
+  the production USB runtime with Volkswagen app `4.0.3`. A natural live
+  transition produced a successful connected-idle `B` read without
+  `targetSoc`; the connector then performed exactly one background-budgeted
+  follow-up at the five-minute charging interval. That read observed active
+  charging `C`, a populated target SoC and fresh charge telemetry, incrementing
+  the persisted background counter by one. The exact production limits were
+  restored to 180 background operations and 20 actions without resetting
+  counters, no cooldown was active, the display returned to sleep, the tested
+  runtime file remained deployed and all temporary root-only test and rollback
+  files were removed. No vehicle or wallbox action was required.
+
 - On 2026-07-16, the cooldown classification and authenticated recovery probe
   were deployed to the production USB runtime with Volkswagen app `4.0.3` and
   live-verified using a synthetic persisted cooldown. An unauthenticated probe

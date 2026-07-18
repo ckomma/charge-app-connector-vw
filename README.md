@@ -64,6 +64,10 @@ error summary in the diagnostics directory.
 Usage protection is enforced inside the connector and persisted across service
 restarts. Defaults are deliberately conservative: 15 minutes while parked,
 5 minutes while charging, details every 12 hours and location every 4 hours.
+After a newly connected `B` state, or the first connected read without a target
+state of charge, the connector performs one bounded follow-up at the charging
+interval. A continued connected-idle state then returns to the 15-minute
+interval so a missing app value cannot cause continuous five-minute polling.
 Background work has a weighted daily budget, actions have a separate daily
 budget and 60-second minimum interval, and Volkswagen rate-limit responses
 pause app operations for 12 hours. Current usage and cooldown are exposed by

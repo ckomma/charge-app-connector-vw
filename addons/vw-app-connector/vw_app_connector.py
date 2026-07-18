@@ -2734,6 +2734,61 @@ class VolkswagenReader:
             return result
 
 
+class ChargeRefreshInterval:
+    """Choose the charge-cache interval and bound connected-state follow-ups."""
+
+    def __init__(self, charging_interval: float, idle_interval: float) -> None:
+        self.charging_interval = charging_interval
+        self.idle_interval = idle_interval
+        self.lock = threading.Lock()
+        self.initialized = False
+        self.last_status: str | None = None
+        self.connected_follow_up = False
+        self.connected_follow_up_used = False
+
+    @staticmethod
+    def status(value: VehicleData | None) -> str | None:
+        return value.status if isinstance(value, VehicleData) else None
+
+    def observe(self, value: VehicleData) -> None:
+        status = self.status(value)
+        with self.lock:
+            previous = self.last_status if self.initialized else None
+            entering_connected = status == "B" and previous != "B"
+            if entering_connected:
+                self.connected_follow_up_used = False
+            elif status != "B":
+                self.connected_follow_up_used = False
+
+            transition_follow_up = status == "B" and previous in (None, "A")
+            missing_target_follow_up = (
+                status == "B"
+                and value.targetSoc is None
+                and not self.connected_follow_up_used
+            )
+            self.connected_follow_up = (
+                transition_follow_up or missing_target_follow_up
+            )
+            if self.connected_follow_up:
+                self.connected_follow_up_used = True
+            self.last_status = status
+            self.initialized = True
+
+    def __call__(self, value: VehicleData | None) -> float:
+        status = self.status(value)
+        with self.lock:
+            if not self.initialized and status is not None:
+                # A restored cache value predates this process. Prime the policy
+                # without treating it as a newly observed connection transition.
+                self.last_status = status
+                self.connected_follow_up_used = status == "B"
+                self.initialized = True
+            connected_follow_up = self.connected_follow_up
+        if status == "C" or (status == "B" and connected_follow_up):
+            return self.charging_interval
+        return self.idle_interval
+
+
 class BackgroundCache(Generic[T]):
     def __init__(
         self,
@@ -3141,17 +3196,19 @@ class AppState:
 
             return run
 
+        charge_interval = ChargeRefreshInterval(charging_interval, idle_interval)
+
+        def charge_updated(name: str, value: VehicleData) -> None:
+            charge_interval.observe(value)
+            self._cache_updated(name, value)
+
         self.charge = BackgroundCache(
             "charge",
             background(self.reader.read, 1),
-            lambda value: (
-                charging_interval
-                if isinstance(value, VehicleData) and value.status == "C"
-                else idle_interval
-            ),
+            charge_interval,
             VehicleData,
             state_path=cache_dir / "charge.json",
-            on_update=self._cache_updated,
+            on_update=charge_updated,
         )
         self.details = BackgroundCache(
             "details",

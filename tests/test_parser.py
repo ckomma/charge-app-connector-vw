@@ -15,6 +15,7 @@ from vw_app_connector import (
     ActionQuarantined,
     AppState,
     BackgroundCache,
+    ChargeRefreshInterval,
     ChargingLocationSettingsData,
     ChargingLocationsData,
     ChargingSettingsData,
@@ -516,6 +517,45 @@ class ParserTests(unittest.TestCase):
             )
         cache.refresh()
         self.assertEqual(updates, [("charge", 60)])
+
+    def test_charge_refresh_interval_schedules_one_connected_follow_up(self):
+        interval = ChargeRefreshInterval(300, 900)
+
+        interval.observe(VehicleData(status="A", targetSoc=None))
+        self.assertEqual(interval(VehicleData(status="A")), 900)
+
+        connected = VehicleData(status="B", targetSoc=80)
+        interval.observe(connected)
+        self.assertEqual(interval(connected), 300)
+        self.assertEqual(interval(connected), 300)
+
+        interval.observe(connected)
+        self.assertEqual(interval(connected), 900)
+
+    def test_charge_refresh_interval_bounds_missing_target_retry(self):
+        interval = ChargeRefreshInterval(300, 900)
+        connected = VehicleData(status="B", targetSoc=None)
+
+        interval.observe(connected)
+        self.assertEqual(interval(connected), 300)
+
+        interval.observe(connected)
+        self.assertEqual(interval(connected), 900)
+
+    def test_charge_refresh_interval_does_not_rearm_restored_connected_cache(self):
+        interval = ChargeRefreshInterval(300, 900)
+        restored = VehicleData(status="B", targetSoc=None)
+
+        self.assertEqual(interval(restored), 900)
+        interval.observe(restored)
+        self.assertEqual(interval(restored), 900)
+
+    def test_charge_refresh_interval_keeps_charging_poll_rate(self):
+        interval = ChargeRefreshInterval(300, 900)
+        charging = VehicleData(status="C", targetSoc=100)
+
+        interval.observe(charging)
+        self.assertEqual(interval(charging), 300)
 
     def test_mqtt_failure_does_not_escape_cache_update(self):
         state = object.__new__(AppState)

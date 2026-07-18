@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.14
+
+- Perform one bounded five-minute charge follow-up after a newly connected
+  vehicle or the first connected read without a target state of charge, then
+  return to the idle interval to preserve Volkswagen app usage safeguards.
+
 ## 0.1.13
 
 - Distinguish transient stale app data from explicit Volkswagen rate limits,
