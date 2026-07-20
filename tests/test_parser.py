@@ -1,5 +1,6 @@
 import http.client
 import json
+import subprocess
 import threading
 import time
 import unittest
@@ -190,6 +191,59 @@ class ParserTests(unittest.TestCase):
         with self.assertRaises(IdempotencyConflict):
             jobs.submit("charging/target-soc", {"value": ["90"]}, "request-1")
         release.set()
+
+    def test_concurrent_action_jobs_are_atomically_idempotent(self):
+        release_executor = threading.Event()
+        release_uuid = threading.Event()
+        first_uuid_call = threading.Event()
+        both_uuid_calls = threading.Event()
+        uuid_calls = []
+        uuid_lock = threading.Lock()
+        results = []
+        errors = []
+
+        def execute(_action, _query):
+            release_executor.wait(1)
+            return ChargingSettingsData(targetSoc=80)
+
+        def slow_uuid():
+            with uuid_lock:
+                uuid_calls.append(len(uuid_calls) + 1)
+                index = uuid_calls[-1]
+                first_uuid_call.set()
+                if len(uuid_calls) == 2:
+                    both_uuid_calls.set()
+            release_uuid.wait(1)
+            return SimpleNamespace(hex=f"{index:032x}")
+
+        def submit():
+            try:
+                results.append(
+                    jobs.submit(
+                        "charging/target-soc", {"value": ["80"]}, "request-1"
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - assertion aid
+                errors.append(exc)
+
+        jobs = ActionJobManager(execute)
+        with patch("vw_app_connector.uuid.uuid4", side_effect=slow_uuid):
+            first = threading.Thread(target=submit)
+            second = threading.Thread(target=submit)
+            first.start()
+            self.assertTrue(first_uuid_call.wait(1))
+            second.start()
+            both_uuid_calls.wait(0.1)
+            release_uuid.set()
+            first.join(1)
+            second.join(1)
+
+        release_executor.set()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(uuid_calls), 1)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["jobId"], results[1]["jobId"])
+        self.assertEqual(len(jobs.jobs), 1)
 
     def test_http_action_contracts_remain_backward_compatible(self):
         state = Mock()
@@ -581,6 +635,83 @@ class ParserTests(unittest.TestCase):
         with self.assertLogs("vw-app-connector", level="ERROR"):
             state._cache_updated("charge", VehicleData(status="B"))
 
+    def test_every_mqtt_cache_update_also_publishes_health(self):
+        state = object.__new__(AppState)
+        state.mqtt = Mock()
+        state.health = Mock(return_value=HealthData(status="ok"))
+        details = DetailData()
+
+        state._cache_updated("details", details)
+
+        self.assertEqual(state.mqtt.publish_state.call_count, 2)
+        state.mqtt.publish_state.assert_any_call("details", details)
+        state.mqtt.publish_state.assert_any_call("health", state.health.return_value)
+
+    def test_phone_health_redacts_adb_identifiers(self):
+        reader = object.__new__(VolkswagenReader)
+        reader.adb_mode = "auto"
+        reader.adb_transport = "usb"
+        reader.serial = "USB-SERIAL-SECRET"
+        reader.usb_serial = "USB-SERIAL-SECRET"
+        reader.wifi_address = "192.0.2.44:5555"
+        reader.adb_last_connect_error = "cannot connect to 192.0.2.44:5555"
+        reader.adb = Mock(
+            side_effect=RuntimeError(
+                "ADB failed (1): device 'USB-SERIAL-SECRET' not found"
+            )
+        )
+
+        health = reader.phone_health()
+
+        public_error = f"{health.adbState} {health.adbLastConnectError}"
+        self.assertNotIn("USB-SERIAL-SECRET", public_error)
+        self.assertNotIn("192.0.2.44:5555", public_error)
+        self.assertIn("<redacted>", public_error)
+
+    def test_phone_health_redacts_previous_adb_error_after_recovery(self):
+        reader = object.__new__(VolkswagenReader)
+        reader.adb_mode = "auto"
+        reader.adb_transport = "usb"
+        reader.serial = "USB-SERIAL-SECRET"
+        reader.usb_serial = "USB-SERIAL-SECRET"
+        reader.wifi_address = ""
+        reader.adb_last_connect_error = "device USB-SERIAL-SECRET not found"
+        reader.package = "com.volkswagen.weconnect"
+        reader.adb = Mock(return_value="device\n")
+        reader.shell = Mock(
+            side_effect=(
+                "level: 50\ntemperature: 250\nUSB powered: true\nstatus: 2\n",
+                "versionName=4.1.1\n",
+            )
+        )
+
+        health = reader.phone_health()
+
+        self.assertEqual(health.status, "ok")
+        self.assertNotIn("USB-SERIAL-SECRET", health.adbLastConnectError)
+        self.assertIn("<redacted>", health.adbLastConnectError)
+
+    def test_adb_timeout_redacts_command_device_identifier(self):
+        reader = object.__new__(VolkswagenReader)
+        reader.serial = "USB-SERIAL-SECRET"
+        reader.usb_serial = "USB-SERIAL-SECRET"
+        reader.wifi_address = ""
+        reader.select_serial = Mock(return_value=reader.serial)
+
+        with (
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.TimeoutExpired(
+                    ["adb", "-s", reader.serial, "get-state"], 5
+                ),
+            ),
+            self.assertRaises(TimeoutError) as caught,
+        ):
+            reader.adb("get-state", timeout=5)
+
+        self.assertNotIn(reader.serial, str(caught.exception))
+        self.assertIn("<redacted>", str(caught.exception))
+
     def test_charging_setting_values_are_sorted_and_localization_independent(self):
         root = ET.fromstring(
             """<hierarchy>
@@ -692,6 +823,22 @@ class ParserTests(unittest.TestCase):
         patched = state.charge.patch_value.call_args.args[0]
         self.assertEqual(patched.status, "C")
         self.assertEqual(patched.targetSoc, 90)
+
+    def test_action_pending_stays_set_until_all_actions_finish(self):
+        state = object.__new__(AppState)
+        state.reader = SimpleNamespace(action_pending=threading.Event())
+        state.action_pending_lock = threading.Lock()
+        state.action_pending_count = 0
+
+        state._begin_action()
+        state._begin_action()
+        state._end_action()
+
+        self.assertTrue(state.reader.action_pending.is_set())
+        self.assertEqual(state.action_pending_count, 1)
+        state._end_action()
+        self.assertFalse(state.reader.action_pending.is_set())
+        self.assertEqual(state.action_pending_count, 0)
 
     def test_german_charging_location_settings(self):
         root = ET.fromstring(
@@ -2066,6 +2213,22 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(restored.snapshot()["seconds"], 0)
             self.assertEqual(restored.snapshot()["failureCount"], 0)
 
+    def test_transient_background_backoff_jitter_respects_maximum(self):
+        with TemporaryDirectory() as directory:
+            with patch("random.uniform", return_value=1.1):
+                backoff = BackgroundTransientBackoff(
+                    Path(directory) / "backoff.json",
+                    base_seconds=60,
+                    max_seconds=60,
+                )
+                before = time.time()
+                backoff.record_failure("APP_UNAVAILABLE")
+
+            self.assertLessEqual(
+                float(backoff.state["nextAttemptAt"]) - before,
+                60.1,
+            )
+
     def test_shared_backoff_defers_other_background_caches(self):
         with TemporaryDirectory() as directory:
             backoff = BackgroundTransientBackoff(
@@ -2108,6 +2271,90 @@ class ParserTests(unittest.TestCase):
             snapshot = backoff.snapshot()
             self.assertEqual(snapshot["reason"], "SOURCE_DATA_STALE")
             self.assertGreaterEqual(snapshot["seconds"], 899)
+
+    def test_cache_update_observes_new_shared_backoff_state(self):
+        with TemporaryDirectory() as directory:
+            backoff = BackgroundTransientBackoff(
+                Path(directory) / "backoff.json", 900, 7200, jitter_ratio=0
+            )
+            observed = []
+            with patch("threading.Thread.start"):
+                cache = BackgroundCache(
+                    "charge",
+                    lambda: VehicleData(sourceStale=True),
+                    lambda _: 60,
+                    VehicleData,
+                    shared_backoff=backoff,
+                    shared_backoff_reason=lambda value: (
+                        "SOURCE_DATA_STALE" if value.sourceStale else ""
+                    ),
+                    on_update=lambda _name, _value: observed.append(
+                        backoff.snapshot()["reason"]
+                    ),
+                )
+
+            cache.refresh()
+
+            self.assertEqual(observed, ["SOURCE_DATA_STALE"])
+
+    def test_failed_transient_cache_refresh_is_published(self):
+        with TemporaryDirectory() as directory:
+            backoff = BackgroundTransientBackoff(
+                Path(directory) / "backoff.json", 900, 7200, jitter_ratio=0
+            )
+            updates = []
+            with patch("threading.Thread.start"):
+                cache = BackgroundCache(
+                    "charge",
+                    lambda: (_ for _ in ()).throw(
+                        TransientVolkswagenState(
+                            "APP_UNAVAILABLE", "Volkswagen app unavailable"
+                        )
+                    ),
+                    lambda _: 60,
+                    VehicleData,
+                    shared_backoff=backoff,
+                    on_update=lambda name, value: updates.append(
+                        (name, value.errorCategory, backoff.snapshot()["reason"])
+                    ),
+                )
+
+            cache.refresh()
+
+            self.assertEqual(
+                updates,
+                [("charge", "APP_UNAVAILABLE", "APP_UNAVAILABLE")],
+            )
+
+    def test_cache_patch_preserves_success_timestamp_and_shared_backoff(self):
+        with TemporaryDirectory() as directory:
+            backoff = BackgroundTransientBackoff(
+                Path(directory) / "backoff.json", 900, 7200, jitter_ratio=0
+            )
+            updates = []
+            with patch("threading.Thread.start"):
+                cache = BackgroundCache(
+                    "charge",
+                    VehicleData,
+                    lambda _: 60,
+                    VehicleData,
+                    shared_backoff=backoff,
+                    clears_shared_backoff=lambda _value: True,
+                    on_update=lambda _name, value: updates.append(value.targetSoc),
+                )
+            cache.set_value(VehicleData(status="B", targetSoc=80))
+            previous_timestamp = cache.last_success_at
+            previous_monotonic = cache.last_success_monotonic
+            backoff.record_failure("APP_DATA_STALE")
+
+            cache.patch_value(VehicleData(status="B", targetSoc=90))
+
+            self.assertEqual(cache.value.targetSoc, 90)
+            self.assertEqual(cache.last_success_at, previous_timestamp)
+            self.assertEqual(cache.last_success_monotonic, previous_monotonic)
+            self.assertEqual(cache.value.lastSuccessfulAt, previous_timestamp)
+            self.assertEqual(backoff.snapshot()["reason"], "APP_DATA_STALE")
+            self.assertEqual(updates, [80, 90])
 
     def test_vehicle_source_freshness_is_additive_and_stateful(self):
         previous = VehicleData(

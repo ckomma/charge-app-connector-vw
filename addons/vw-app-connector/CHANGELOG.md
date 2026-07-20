@@ -1,7 +1,16 @@
 # Changelog
 
-## Next
+## 0.1.15
 
+- Verify Volkswagen app `4.1.1` in German and English on Redmi and Pixel
+  phones and make it the guarded write-action baseline.
+- Make concurrent action idempotency atomic and keep background work paused
+  until every overlapping action has completed.
+- Preserve real cache-success timestamps and shared transient backoff across
+  action-result patches; publish cache errors and current backoff through MQTT.
+- Redact device identifiers from API-visible ADB errors, cap jittered backoff
+  at its configured maximum and bound priority yielding so charge telemetry
+  cannot starve indefinitely.
 - Avoid immediate retries for semantic Volkswagen stale, unavailable and rate
   limit states; coordinate transient failures through a persisted adaptive
   background backoff.

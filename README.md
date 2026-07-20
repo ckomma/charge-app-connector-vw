@@ -112,10 +112,11 @@ against a live Volkswagen app installation, including read operations and
 vehicle actions. Volkswagen may still vary UI wording between app versions and
 vehicle capabilities. Other app languages are not supported.
 
-The latest real-device verification used Volkswagen app `4.0.3`
-on the production Redmi. This is a tested baseline, not
-an exact version pin; newer app versions must be reverified because UI labels
-and accessibility metadata can change independently of the connector.
+The latest real-device verification used Volkswagen app `4.1.1` in German and
+English on Redmi and Pixel phones. It covered reads and vehicle actions. This
+is a tested baseline, not an exact version pin; newer app versions must be
+reverified because UI labels and accessibility metadata can change
+independently of the connector.
 
 ## Configuration
 
@@ -153,7 +154,7 @@ Environment variables:
 - `MAPS_PACKAGE`: default `com.google.android.apps.maps`; package stopped before
   opening the location Route intent so Google Maps does not reuse stale
   navigation state
-- `VERIFIED_APP_VERSION`: default `4.0.3`; write actions are quarantined when
+- `VERIFIED_APP_VERSION`: default `4.1.1`; write actions are quarantined when
   the installed Volkswagen app version differs
 - `APP_START_WAIT_SECONDS`: default `8`
 - `DETAIL_WAIT_SECONDS`: default `3`
@@ -174,8 +175,10 @@ Environment variables:
 
 Due detail and location refreshes take priority over routine charge refreshes.
 This prevents the five-minute charge polling interval from repeatedly delaying
-the less frequent multi-page reads. The background minimum interval and daily
-budget still apply unchanged.
+the less frequent multi-page reads. Routine charge refreshes yield for at most
+one background minimum interval, so a queued or stalled multi-page read cannot
+starve charge telemetry indefinitely. The background minimum interval and
+daily budget still apply unchanged.
 
 Authenticated action endpoints:
 

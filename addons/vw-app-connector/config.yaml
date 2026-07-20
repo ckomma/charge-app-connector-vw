@@ -1,5 +1,5 @@
 name: Volkswagen App Connector
-version: 0.1.14
+version: 0.1.15
 slug: vw_app_connector
 description: ADB-based connector for the Volkswagen Android app.
 url: https://github.com/ckomma/charge-app-connector-vw
@@ -41,7 +41,7 @@ options:
   cooldown_probe_min_interval_seconds: 900
   app_package: com.volkswagen.weconnect
   maps_package: com.google.android.apps.maps
-  verified_app_version: 4.0.3
+  verified_app_version: 4.1.1
   app_start_wait_seconds: 8
   detail_wait_seconds: 3
   ui_update_timeout_seconds: 8

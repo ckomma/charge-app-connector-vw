@@ -122,49 +122,49 @@ rest_command:
   volkswagen_app_lock:
     url: "http://CONNECTOR_HOST:9920/action/lock"
     method: post
-    timeout: 90
+    timeout: 180
     headers:
       X-API-Key: !secret vw_app_connector_api_key
 
   volkswagen_app_unlock:
     url: "http://CONNECTOR_HOST:9920/action/unlock"
     method: post
-    timeout: 90
+    timeout: 180
     headers:
       X-API-Key: !secret vw_app_connector_api_key
 
   volkswagen_app_charging_start:
     url: "http://CONNECTOR_HOST:9920/action/charging/start"
     method: post
-    timeout: 90
+    timeout: 180
     headers:
       X-API-Key: !secret vw_app_connector_api_key
 
   volkswagen_app_charging_stop:
     url: "http://CONNECTOR_HOST:9920/action/charging/stop"
     method: post
-    timeout: 90
+    timeout: 180
     headers:
       X-API-Key: !secret vw_app_connector_api_key
 
   volkswagen_app_climate_start:
     url: "http://CONNECTOR_HOST:9920/action/climate/start"
     method: post
-    timeout: 90
+    timeout: 180
     headers:
       X-API-Key: !secret vw_app_connector_api_key
 
   volkswagen_app_climate_stop:
     url: "http://CONNECTOR_HOST:9920/action/climate/stop"
     method: post
-    timeout: 90
+    timeout: 180
     headers:
       X-API-Key: !secret vw_app_connector_api_key
 
   volkswagen_app_climate_temperature:
     url: "http://CONNECTOR_HOST:9920/action/climate/temperature?value={{ value }}"
     method: post
-    timeout: 120
+    timeout: 180
     headers:
       X-API-Key: !secret vw_app_connector_api_key
 

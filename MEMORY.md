@@ -62,6 +62,11 @@ coordinates, screenshots, raw UI dumps, and private network details.
   the configured threshold also advances that backoff. It clears only when the
   app-reported source age is below `SOURCE_STALE_AFTER_MINUTES`; explicit
   actions remain available.
+- Action-result cache patches preserve the timestamp of the last complete UI
+  read and never clear the shared transient backoff. Cache callbacks observe
+  the updated backoff state, including transient refresh failures.
+- Due detail/location work retains priority, but routine charge work yields for
+  no longer than one configured background minimum interval.
 - Charge responses expose additive source-age/freshness fields. The localized
   intelligent power-saving overview notice is still dismissed, but its last
   observation is retained as telemetry and is not classified as a server rate
@@ -214,6 +219,14 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## Verification
 
+- On 2026-07-20, Volkswagen app `4.1.1` was live-verified on Redmi and Pixel
+  phones in German and English. Charge, details, location and localized
+  settings reads succeeded, as did the exercised vehicle actions. The original
+  locked, connected-idle, climate-off vehicle state and evcc state were
+  restored. This makes `4.1.1` the guarded write-action baseline; no Home
+  Assistant App release was created during the E2E itself. The result was later
+  published with Home Assistant App `0.1.15`.
+
 - On 2026-07-18, the bounded connected-state charge follow-up was deployed to
   the production USB runtime with Volkswagen app `4.0.3`. A natural live
   transition produced a successful connected-idle `B` read without
@@ -292,9 +305,9 @@ coordinates, screenshots, raw UI dumps, and private network details.
   using the same `Idempotency-Key` returned the same job. The job completed as
   `succeeded` and consumed one action-budget unit. The legacy synchronous
   settings call still returned HTTP 200 after the configured minimum interval.
-- `VERIFIED_APP_VERSION=3.63.2` is active on the verified runtime. Quarantine
-  applies only to writes; cached REST reads, MQTT and read-only settings actions
-  remain available.
+- `VERIFIED_APP_VERSION=3.63.2` was active during the 2026-06-20 verification.
+  Quarantine applies only to writes; cached REST reads, MQTT and read-only
+  settings actions remain available.
 
 - Live deployment verification on 2026-06-19 with Volkswagen app `3.63.2`:
   global target SoC changed 100 -> 90 -> 100 successfully. Battery Care changed

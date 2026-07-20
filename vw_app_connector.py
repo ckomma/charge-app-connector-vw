@@ -525,14 +525,33 @@ class VolkswagenReader:
                 serials.append(parts[0])
         return serials
 
+    @staticmethod
+    def redact_adb_error(message: str, *identifiers: str) -> str:
+        """Remove device-specific identifiers from API-visible ADB errors."""
+        redacted = message
+        for identifier in identifiers:
+            if identifier:
+                redacted = redacted.replace(identifier, "<redacted>")
+        redacted = re.sub(
+            r"\bdevice\s+(['\"]?)[^\s'\"]+\1\s+not found\b",
+            "device <redacted> not found",
+            redacted,
+            flags=re.IGNORECASE,
+        )
+        redacted = re.sub(
+            r"\b(?:\d{1,3}\.){3}\d{1,3}:\d+\b",
+            "<redacted>",
+            redacted,
+        )
+        return redacted
+
     def resolve_usb_serial(self) -> str:
         if self.usb_serial.casefold() != "auto":
             return self.usb_serial
 
         result = self.run_adb("devices", "-l", timeout=5)
-        message = (result.stdout or result.stderr).strip()
         if result.returncode:
-            self.adb_last_connect_error = message or "ADB device discovery failed"
+            self.adb_last_connect_error = "ADB device discovery failed"
             raise RuntimeError(self.adb_last_connect_error)
 
         serials = [
@@ -562,7 +581,10 @@ class VolkswagenReader:
         if result.returncode == 0 and self.adb_state(self.wifi_address) == "device":
             self.adb_last_connect_error = ""
             return True
-        self.adb_last_connect_error = message or "ADB Wi-Fi connection failed"
+        self.adb_last_connect_error = self.redact_adb_error(
+            message or "ADB Wi-Fi connection failed",
+            self.wifi_address,
+        )
         return False
 
     def select_serial(self) -> str:
@@ -606,16 +628,30 @@ class VolkswagenReader:
             )
 
     def adb(self, *args: str, timeout: float = 20) -> str:
-        serial = self.select_serial()
-        result = subprocess.run(
-            ["adb", "-s", serial, *args],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        try:
+            serial = self.select_serial()
+            result = subprocess.run(
+                ["adb", "-s", serial, *args],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            message = self.redact_adb_error(
+                str(exc),
+                self.serial,
+                self.usb_serial,
+                self.wifi_address,
+            )
+            raise TimeoutError(message) from None
         if result.returncode:
-            message = (result.stderr or result.stdout).strip()
+            message = self.redact_adb_error(
+                (result.stderr or result.stdout).strip(),
+                serial,
+                self.usb_serial,
+                self.wifi_address,
+            )
             raise RuntimeError(f"ADB failed ({result.returncode}): {message}")
         return result.stdout
 
@@ -623,17 +659,29 @@ class VolkswagenReader:
         return self.adb("shell", *args, timeout=timeout)
 
     def adb_bytes(self, *args: str, timeout: float = 20) -> bytes:
-        serial = self.select_serial()
-        result = subprocess.run(
-            ["adb", "-s", serial, *args],
-            check=False,
-            capture_output=True,
-            timeout=timeout,
-        )
+        try:
+            serial = self.select_serial()
+            result = subprocess.run(
+                ["adb", "-s", serial, *args],
+                check=False,
+                capture_output=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            message = self.redact_adb_error(
+                str(exc),
+                self.serial,
+                self.usb_serial,
+                self.wifi_address,
+            )
+            raise TimeoutError(message) from None
         if result.returncode:
-            message = (result.stderr or result.stdout).decode(
-                errors="replace"
-            ).strip()
+            message = self.redact_adb_error(
+                (result.stderr or result.stdout).decode(errors="replace").strip(),
+                serial,
+                self.usb_serial,
+                self.wifi_address,
+            )
             raise RuntimeError(f"ADB failed ({result.returncode}): {message}")
         return result.stdout
 
@@ -1793,7 +1841,12 @@ class VolkswagenReader:
         try:
             health.adbState = self.adb("get-state", timeout=5).strip()
             health.adbTransport = self.adb_transport
-            health.adbLastConnectError = self.adb_last_connect_error
+            health.adbLastConnectError = self.redact_adb_error(
+                self.adb_last_connect_error,
+                self.serial,
+                self.usb_serial,
+                self.wifi_address,
+            )
             battery = self.shell("dumpsys", "battery", timeout=8)
             values: dict[str, str] = {}
             for line in battery.splitlines():
@@ -1826,9 +1879,19 @@ class VolkswagenReader:
             health.appVersion = match.group(1) if match else ""
         except Exception as exc:
             health.status = "error"
-            health.adbState = str(exc)
+            health.adbState = self.redact_adb_error(
+                str(exc),
+                self.serial,
+                self.usb_serial,
+                self.wifi_address,
+            )
             health.adbTransport = self.adb_transport
-            health.adbLastConnectError = self.adb_last_connect_error
+            health.adbLastConnectError = self.redact_adb_error(
+                self.adb_last_connect_error,
+                self.serial,
+                self.usb_serial,
+                self.wifi_address,
+            )
         return health
 
     def _read(self) -> VehicleData:
@@ -2889,6 +2952,7 @@ class BackgroundTransientBackoff:
             )
             if self.jitter_ratio:
                 delay *= random.uniform(1 - self.jitter_ratio, 1 + self.jitter_ratio)
+                delay = min(self.max_seconds, delay)
             self.state.update(
                 {
                     "failureCount": count,
@@ -3103,9 +3167,9 @@ class BackgroundCache(Generic[T]):
                 self.last_error_category = ""
                 self.next_attempt_monotonic = 0.0
             self._save_persisted(value)
+            self.update_shared_backoff(value)
             if self.on_update is not None:
                 self.on_update(self.name, value)
-            self.update_shared_backoff(value)
             return value
         except ActionPriority:
             LOG.info("%s refresh yielded to a pending action", self.name)
@@ -3136,7 +3200,9 @@ class BackgroundCache(Generic[T]):
                 setattr(value, "lastSuccessfulAt", self.last_success_at)
                 setattr(value, "refreshDurationSeconds", round(time.monotonic() - started, 2))
                 self.value = value
-                return value
+            if self.on_update is not None:
+                self.on_update(self.name, value)
+            return value
         finally:
             with self.lock:
                 self.refreshing = False
@@ -3174,16 +3240,23 @@ class BackgroundCache(Generic[T]):
             self.last_error = ""
             self.last_error_category = ""
         self._save_persisted(value)
+        self.update_shared_backoff(value)
         if self.on_update is not None:
             self.on_update(self.name, value)
-        self.update_shared_backoff(value)
         return value
 
     def patch_value(self, value: T) -> T:
         with self.lock:
             has_complete_value = bool(self.last_success_monotonic)
+            last_success_at = self.last_success_at
         if has_complete_value:
-            return self.set_value(value)
+            setattr(value, "lastSuccessfulAt", last_success_at)
+            with self.lock:
+                self.value = value
+            self._save_persisted(value)
+            if self.on_update is not None:
+                self.on_update(self.name, value)
+            return value
         setattr(value, "lastSuccessfulAt", "")
         with self.lock:
             self.value = value
@@ -3236,19 +3309,18 @@ class ActionJobManager:
                 job = self.jobs.get(job_id)
                 if job is not None:
                     return json.loads(json.dumps(job, ensure_ascii=False))
-        job_id = uuid.uuid4().hex
-        job: dict[str, object] = {
-            "jobId": job_id,
-            "action": action,
-            "state": "queued",
-            "createdAt": self.now(),
-            "startedAt": "",
-            "completedAt": "",
-            "result": None,
-            "error": "",
-            "errorCategory": "",
-        }
-        with self.lock:
+            job_id = uuid.uuid4().hex
+            job: dict[str, object] = {
+                "jobId": job_id,
+                "action": action,
+                "state": "queued",
+                "createdAt": self.now(),
+                "startedAt": "",
+                "completedAt": "",
+                "result": None,
+                "error": "",
+                "errorCategory": "",
+            }
             self.jobs[job_id] = job
             self.order.append(job_id)
             if idempotency_key:
@@ -3406,10 +3478,12 @@ class AppState:
         self.reader = VolkswagenReader()
         self.usage = UsageLimiter()
         self.verified_app_version = os.getenv(
-            "VERIFIED_APP_VERSION", "4.0.3"
+            "VERIFIED_APP_VERSION", "4.1.1"
         ).strip()
         self.priority_lock = threading.Lock()
         self.priority_waiters = 0
+        self.action_pending_lock = threading.Lock()
+        self.action_pending_count = 0
         charging_interval = float(os.getenv("CHARGING_INTERVAL_SECONDS", "300"))
         idle_interval = float(os.getenv("IDLE_INTERVAL_SECONDS", "900"))
         detail_interval = float(os.getenv("DETAIL_INTERVAL_SECONDS", "43200"))
@@ -3440,6 +3514,10 @@ class AppState:
             loader: Callable[[], T], cost: int, priority: bool = False
         ) -> Callable[[], T]:
             def run() -> T:
+                priority_yield_until = (
+                    time.monotonic()
+                    + max(self.usage.background_min_interval, 0.25)
+                )
                 if priority:
                     with self.priority_lock:
                         self.priority_waiters += 1
@@ -3451,7 +3529,10 @@ class AppState:
                         yield_to=(
                             None
                             if priority
-                            else priority_pending
+                            else lambda: (
+                                priority_pending()
+                                and time.monotonic() < priority_yield_until
+                            )
                         ),
                     )
                     self.reader.context.background = True
@@ -3536,8 +3617,7 @@ class AppState:
             return
         try:
             self.mqtt.publish_state(name, value)
-            if name == "charge":
-                self.mqtt.publish_state("health", self.health())
+            self.mqtt.publish_state("health", self.health())
         except Exception:
             LOG.exception("MQTT update failed for %s", name)
 
@@ -3852,11 +3932,22 @@ class AppState:
     def action_job(self, job_id: str) -> dict[str, object] | None:
         return self.action_jobs.snapshot(job_id)
 
+    def _begin_action(self) -> None:
+        with self.action_pending_lock:
+            self.action_pending_count += 1
+            self.reader.action_pending.set()
+
+    def _end_action(self) -> None:
+        with self.action_pending_lock:
+            self.action_pending_count = max(0, self.action_pending_count - 1)
+            if not self.action_pending_count:
+                self.reader.action_pending.clear()
+
     def action(self, name: str, query: dict[str, list[str]]) -> object:
         if not self.supports_action(name):
             raise KeyError(name)
         self.ensure_action_allowed(name)
-        self.reader.action_pending.set()
+        self._begin_action()
         try:
             self.usage.acquire_action()
             return self._action(name, query)
@@ -3867,7 +3958,7 @@ class AppState:
             self.background_backoff.record_failure(exc.reason)
             raise
         finally:
-            self.reader.action_pending.clear()
+            self._end_action()
 
     def _action(self, name: str, query: dict[str, list[str]]) -> object:
         actions: dict[str, Callable[[], object]] = {
