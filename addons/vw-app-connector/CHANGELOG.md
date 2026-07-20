@@ -1,5 +1,13 @@
 # Changelog
 
+## Next
+
+- Avoid immediate retries for semantic Volkswagen stale, unavailable and rate
+  limit states; coordinate transient failures through a persisted adaptive
+  background backoff.
+- Expose vehicle source freshness and intelligent power-saving notice telemetry
+  through cached charge data, health and Prometheus metrics.
+
 ## 0.1.14
 
 - Perform one bounded five-minute charge follow-up after a newly connected

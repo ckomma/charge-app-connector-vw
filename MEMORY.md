@@ -55,6 +55,17 @@ coordinates, screenshots, raw UI dumps, and private network details.
   `BACKGROUND_ERROR_RETRY_SECONDS`, default 900 seconds, before another
   attempt. This prevents a persistent UI obstruction from consuming the daily
   background budget every five minutes.
+- Semantic Volkswagen stale, unavailable and explicit rate-limit states bypass
+  the immediate UI/ADB recovery retry. `APP_DATA_STALE` and `APP_UNAVAILABLE`
+  share a persisted exponential background backoff across charge, details and
+  location. A successfully parsed charge read whose source age remains above
+  the configured threshold also advances that backoff. It clears only when the
+  app-reported source age is below `SOURCE_STALE_AFTER_MINUTES`; explicit
+  actions remain available.
+- Charge responses expose additive source-age/freshness fields. The localized
+  intelligent power-saving overview notice is still dismissed, but its last
+  observation is retained as telemetry and is not classified as a server rate
+  limit or proof of a 12-volt battery problem.
 - USB remains the preferred transport in `ADB_MODE=auto`; configured ADB Wi-Fi
   is only the fallback while USB is unavailable.
 

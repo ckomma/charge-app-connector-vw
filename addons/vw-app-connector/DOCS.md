@@ -19,6 +19,10 @@ Optional but common:
 - `vw_spin`: Volkswagen S-PIN, required only for lock and unlock actions.
 - `mqtt_host`, `mqtt_username`, `mqtt_password`: enable MQTT state publishing
   and Home Assistant discovery.
+- `background_transient_backoff_max_seconds`: caps the shared exponential pause
+  after repeated stale/unavailable Volkswagen app states.
+- `source_stale_after_minutes`: controls when the app-reported vehicle-data age
+  is exposed as stale and no longer clears that pause.
 
 ## Smoke Test
 
@@ -32,6 +36,11 @@ curl -sS http://127.0.0.1:9920/charge
 A healthy read-only smoke test has `adbState: device`, the expected
 `adbTransport`, a verified app version, no cooldown, and a fresh `/charge`
 response.
+
+`/health` separates the Volkswagen rate-limit cooldown from the transient
+background backoff and exposes vehicle source age, consecutive stale reads and
+the last observed intelligent power-saving notice. Cached API responses remain
+available during either pause.
 
 `/details` and `/location` perform slower multi-page reads and spend background
 budget. Use them only when you intentionally want to refresh those caches.

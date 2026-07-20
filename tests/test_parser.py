@@ -15,6 +15,7 @@ from vw_app_connector import (
     ActionQuarantined,
     AppState,
     BackgroundCache,
+    BackgroundTransientBackoff,
     ChargeRefreshInterval,
     ChargingLocationSettingsData,
     ChargingLocationsData,
@@ -152,6 +153,22 @@ class ParserTests(unittest.TestCase):
         assert result is not None
         self.assertEqual(result["state"], "succeeded")
         self.assertEqual(result["result"]["targetSoc"], 80)
+
+    def test_action_job_preserves_transient_volkswagen_category(self):
+        jobs = ActionJobManager(
+            lambda _action, _query: (_ for _ in ()).throw(
+                TransientVolkswagenState("APP_UNAVAILABLE", "unavailable")
+            )
+        )
+        submitted = jobs.submit("charging/settings", {})
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            result = jobs.snapshot(str(submitted["jobId"]))
+            if result and result["state"] == "failed":
+                break
+            time.sleep(0.01)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["errorCategory"], "APP_UNAVAILABLE")
 
     def test_action_jobs_are_idempotent(self):
         release = threading.Event()
@@ -1706,6 +1723,22 @@ class ParserTests(unittest.TestCase):
 
         self.assertIn("CHARGE read attempt 1 failed", "\n".join(logs.output))
 
+    def test_semantic_volkswagen_states_are_not_retried_immediately(self):
+        reader = object.__new__(VolkswagenReader)
+        reader.save_diagnostics = Mock()
+        reader.launch = Mock()
+        for error in (
+            TransientVolkswagenState("APP_DATA_STALE", "stale"),
+            VolkswagenRateLimit("TOO_MANY_REQUESTS", "limited"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                operation = Mock(side_effect=error)
+                with self.assertRaises(type(error)):
+                    reader.with_retries(operation, "CHARGE")
+                operation.assert_called_once_with()
+        reader.save_diagnostics.assert_not_called()
+        reader.launch.assert_not_called()
+
     def test_unavailable_report_uses_transient_retry_in_both_languages(self):
         for message in (
             "Currently unavailable. Please try again later.",
@@ -2011,6 +2044,126 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.error, "failed")
         self.assertGreaterEqual(cache.next_attempt_monotonic, before + 899)
 
+    def test_transient_background_backoff_escalates_and_persists(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "background-backoff.json"
+            with patch("random.uniform", return_value=1.0):
+                backoff = BackgroundTransientBackoff(
+                    path, base_seconds=900, max_seconds=7200
+                )
+                backoff.record_failure("APP_DATA_STALE")
+                first = backoff.snapshot()
+                backoff.record_failure("APP_UNAVAILABLE")
+                second = backoff.snapshot()
+            self.assertGreaterEqual(first["seconds"], 899)
+            self.assertGreaterEqual(second["seconds"], 1799)
+            self.assertEqual(second["failureCount"], 2)
+            self.assertEqual(second["reason"], "APP_UNAVAILABLE")
+
+            restored = BackgroundTransientBackoff(path, 900, 7200, jitter_ratio=0)
+            self.assertEqual(restored.snapshot()["failureCount"], 2)
+            restored.clear()
+            self.assertEqual(restored.snapshot()["seconds"], 0)
+            self.assertEqual(restored.snapshot()["failureCount"], 0)
+
+    def test_shared_backoff_defers_other_background_caches(self):
+        with TemporaryDirectory() as directory:
+            backoff = BackgroundTransientBackoff(
+                Path(directory) / "backoff.json", 900, 7200, jitter_ratio=0
+            )
+            loader = Mock(return_value=VehicleData(soc=50))
+            with patch("threading.Thread.start"):
+                cache = BackgroundCache(
+                    "charge",
+                    loader,
+                    lambda _: 60,
+                    VehicleData,
+                    shared_backoff=backoff,
+                )
+            cache.set_value(VehicleData(soc=40))
+            backoff.record_failure("APP_DATA_STALE")
+            result = cache.refresh()
+            loader.assert_not_called()
+            self.assertEqual(result.soc, 40)
+            self.assertTrue(result.stale)
+            self.assertEqual(result.errorCategory, "APP_DATA_STALE")
+
+    def test_successful_but_source_stale_read_starts_shared_backoff(self):
+        with TemporaryDirectory() as directory:
+            backoff = BackgroundTransientBackoff(
+                Path(directory) / "backoff.json", 900, 7200, jitter_ratio=0
+            )
+            with patch("threading.Thread.start"):
+                cache = BackgroundCache(
+                    "charge",
+                    lambda: VehicleData(sourceStale=True),
+                    lambda _: 60,
+                    VehicleData,
+                    shared_backoff=backoff,
+                    shared_backoff_reason=lambda value: (
+                        "SOURCE_DATA_STALE" if value.sourceStale else ""
+                    ),
+                )
+            cache.refresh()
+            snapshot = backoff.snapshot()
+            self.assertEqual(snapshot["reason"], "SOURCE_DATA_STALE")
+            self.assertGreaterEqual(snapshot["seconds"], 899)
+
+    def test_vehicle_source_freshness_is_additive_and_stateful(self):
+        previous = VehicleData(
+            sourceStale=True,
+            consecutiveSourceStaleReads=2,
+            lastFreshVehicleDataAt="2026-07-20T09:00:00+02:00",
+            vehicleEnergyProtectionLastSeenAt="2026-07-20T08:00:00+02:00",
+        )
+        stale = AppState.annotate_vehicle_source(
+            VehicleData(
+                syncAgeMinutes=75,
+                observedAt="2026-07-20T12:00:00+02:00",
+            ),
+            previous,
+            60,
+        )
+        self.assertTrue(stale.sourceStale)
+        self.assertEqual(stale.sourceAgeMinutes, 75)
+        self.assertEqual(stale.sourceObservedAt, "2026-07-20T10:45:00+02:00")
+        self.assertEqual(stale.consecutiveSourceStaleReads, 3)
+        self.assertEqual(
+            stale.lastFreshVehicleDataAt, "2026-07-20T09:00:00+02:00"
+        )
+        self.assertEqual(
+            stale.vehicleEnergyProtectionLastSeenAt,
+            "2026-07-20T08:00:00+02:00",
+        )
+
+        fresh = AppState.annotate_vehicle_source(
+            VehicleData(
+                syncAgeMinutes=5,
+                observedAt="2026-07-20T12:10:00+02:00",
+            ),
+            stale,
+            60,
+            "2026-07-20T12:05:00+02:00",
+        )
+        self.assertFalse(fresh.sourceStale)
+        self.assertEqual(fresh.consecutiveSourceStaleReads, 0)
+        self.assertEqual(fresh.lastFreshVehicleDataAt, "2026-07-20T12:05:00+02:00")
+        self.assertEqual(
+            fresh.vehicleEnergyProtectionLastSeenAt,
+            "2026-07-20T12:05:00+02:00",
+        )
+
+        unknown = AppState.annotate_vehicle_source(
+            VehicleData(observedAt="2026-07-20T12:20:00+02:00"),
+            fresh,
+            60,
+        )
+        self.assertFalse(unknown.sourceFreshnessKnown)
+        self.assertFalse(unknown.sourceStale)
+        self.assertEqual(
+            unknown.lastFreshVehicleDataAt, fresh.lastFreshVehicleDataAt
+        )
+
     def test_usage_limit_cache_refresh_logs_without_traceback(self):
         with patch("threading.Thread.start"):
             cache = BackgroundCache(
@@ -2314,6 +2467,9 @@ class ParserTests(unittest.TestCase):
                     )
                 shell.assert_called_once_with("input", "tap", "625", "1865")
                 sleep.assert_called_once_with(1)
+                notice_at, notice_count = reader.energy_protection_telemetry()
+                self.assertTrue(notice_at)
+                self.assertEqual(notice_count, 1)
 
     def test_english_intelligent_power_saving_notice_is_dismissed(self):
         notice = ET.fromstring(
@@ -2347,6 +2503,9 @@ class ParserTests(unittest.TestCase):
                         ready,
                     )
                 shell.assert_called_once_with("input", "tap", "540", "1760")
+                notice_at, notice_count = reader.energy_protection_telemetry()
+                self.assertTrue(notice_at)
+                self.assertEqual(notice_count, 1)
 
     def test_unrelated_overview_confirmation_is_not_dismissed(self):
         notice = ET.fromstring(

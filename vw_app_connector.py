@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import queue
+import random
 import re
 import subprocess
 import threading
@@ -19,7 +20,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Generic, TypeVar
@@ -302,6 +303,13 @@ class VehicleData:
     climater: bool | None = None
     locked: bool | None = None
     syncAgeMinutes: int | None = None
+    sourceAgeMinutes: int | None = None
+    sourceObservedAt: str = ""
+    sourceFreshnessKnown: bool = False
+    sourceStale: bool = False
+    consecutiveSourceStaleReads: int = 0
+    lastFreshVehicleDataAt: str = ""
+    vehicleEnergyProtectionLastSeenAt: str = ""
     observedAt: str = ""
     error: str = ""
     errorCategory: str = ""
@@ -393,6 +401,17 @@ class HealthData:
     detailAgeSeconds: int | None = None
     locationLastSuccessfulAt: str = ""
     locationAgeSeconds: int | None = None
+    vehicleSourceAgeMinutes: int | None = None
+    vehicleSourceFreshnessKnown: bool = False
+    vehicleSourceStale: bool = False
+    vehicleConsecutiveSourceStaleReads: int = 0
+    vehicleLastFreshDataAt: str = ""
+    vehicleEnergyProtectionLastSeenAt: str = ""
+    vehicleEnergyProtectionNoticeCount: int = 0
+    backgroundBackoffSeconds: int = 0
+    backgroundBackoffReason: str = ""
+    backgroundBackoffUntil: str = ""
+    backgroundBackoffFailureCount: int = 0
     usageBackgroundUsed: int = 0
     usageBackgroundLimit: int = 0
     usageActionsUsed: int = 0
@@ -404,6 +423,8 @@ class HealthData:
 
 
 class VolkswagenReader:
+    # This is the high-voltage charging preference. Keep it separate from the
+    # overview's intelligent power-saving/energy-protection notice telemetry.
     BATTERY_CARE_LABELS = ("Batterieschutz", "Battery Care", "Battery care")
     REDUCED_AC_LABELS = (
         "Reduzierter AC-Ladestrom",
@@ -478,6 +499,9 @@ class VolkswagenReader:
         self.operation_lock = threading.RLock()
         self.action_pending = threading.Event()
         self.context = threading.local()
+        self.telemetry_lock = threading.Lock()
+        self.energy_protection_last_seen_at = ""
+        self.energy_protection_notice_count = 0
 
     @staticmethod
     def run_adb(*args: str, timeout: float = 20) -> subprocess.CompletedProcess[str]:
@@ -776,6 +800,10 @@ class VolkswagenReader:
         )
         if not german_notice and not english_notice:
             return root
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        with self.telemetry_lock:
+            self.energy_protection_last_seen_at = now
+            self.energy_protection_notice_count += 1
         try:
             x, y = self.described_node_center_any(
                 root, ("Alles klar", "Got it", "Understood", "OK", "Okay")
@@ -785,6 +813,13 @@ class VolkswagenReader:
         self.shell("input", "tap", str(x), str(y))
         time.sleep(1)
         return self.dump_ui_with_compose_fallback(remote_name)
+
+    def energy_protection_telemetry(self) -> tuple[str, int]:
+        with self.telemetry_lock:
+            return (
+                self.energy_protection_last_seen_at,
+                self.energy_protection_notice_count,
+            )
 
     @staticmethod
     def strings(root: ET.Element) -> list[str]:
@@ -1712,6 +1747,11 @@ class VolkswagenReader:
         for attempt in range(2):
             try:
                 return operation()
+            except (VolkswagenRateLimit, TransientVolkswagenState):
+                # These are already meaningful Volkswagen responses. Reopening
+                # the app immediately cannot repair them and can create another
+                # avoidable backend/vehicle request.
+                raise
             except Exception as exc:
                 if isinstance(exc, ActionPriority):
                     raise
@@ -2789,6 +2829,111 @@ class ChargeRefreshInterval:
         return self.idle_interval
 
 
+class BackgroundTransientBackoff:
+    """Persist a shared exponential pause for transient Volkswagen states."""
+
+    def __init__(
+        self,
+        path: Path,
+        base_seconds: float = 900,
+        max_seconds: float = 7200,
+        jitter_ratio: float = 0.1,
+    ) -> None:
+        self.path = path
+        self.base_seconds = max(1.0, base_seconds)
+        self.max_seconds = max(self.base_seconds, max_seconds)
+        self.jitter_ratio = max(0.0, min(jitter_ratio, 0.5))
+        self.lock = threading.Lock()
+        self.state: dict[str, object] = {
+            "failureCount": 0,
+            "reason": "",
+            "nextAttemptAt": 0.0,
+            "lastFailureAt": "",
+        }
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+            self.state["failureCount"] = max(0, int(value["failureCount"]))
+            self.state["reason"] = str(value.get("reason", ""))
+            self.state["nextAttemptAt"] = float(value.get("nextAttemptAt", 0.0))
+            self.state["lastFailureAt"] = str(value.get("lastFailureAt", ""))
+        except (
+            FileNotFoundError,
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+            OSError,
+        ):
+            return
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self.state), encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(self.path)
+
+    def retry_in_seconds(self) -> float:
+        with self.lock:
+            return max(0.0, float(self.state["nextAttemptAt"]) - time.time())
+
+    def record_failure(self, reason: str) -> None:
+        with self.lock:
+            count = int(self.state["failureCount"]) + 1
+            delay = min(
+                self.max_seconds,
+                self.base_seconds * (2 ** min(count - 1, 30)),
+            )
+            if self.jitter_ratio:
+                delay *= random.uniform(1 - self.jitter_ratio, 1 + self.jitter_ratio)
+            self.state.update(
+                {
+                    "failureCount": count,
+                    "reason": reason,
+                    "nextAttemptAt": time.time() + delay,
+                    "lastFailureAt": datetime.now()
+                    .astimezone()
+                    .isoformat(timespec="seconds"),
+                }
+            )
+            self._save()
+
+    def clear(self) -> None:
+        with self.lock:
+            if not int(self.state["failureCount"]):
+                return
+            self.state.update(
+                {
+                    "failureCount": 0,
+                    "reason": "",
+                    "nextAttemptAt": 0.0,
+                    "lastFailureAt": "",
+                }
+            )
+            self._save()
+
+    def snapshot(self) -> dict[str, object]:
+        with self.lock:
+            next_attempt = float(self.state["nextAttemptAt"])
+            retry = max(0, round(next_attempt - time.time()))
+            return {
+                "seconds": retry,
+                "reason": str(self.state["reason"]) if retry else "",
+                "until": (
+                    datetime.fromtimestamp(next_attempt)
+                    .astimezone()
+                    .isoformat(timespec="seconds")
+                    if retry
+                    else ""
+                ),
+                "failureCount": int(self.state["failureCount"]),
+                "lastFailureAt": str(self.state["lastFailureAt"]),
+            }
+
+
 class BackgroundCache(Generic[T]):
     def __init__(
         self,
@@ -2800,6 +2945,10 @@ class BackgroundCache(Generic[T]):
         error_retry_interval: float = 900,
         state_path: Path | None = None,
         on_update: Callable[[str, T], None] | None = None,
+        prepare_value: Callable[[T, T | None], T] | None = None,
+        shared_backoff: BackgroundTransientBackoff | None = None,
+        shared_backoff_reason: Callable[[T], str] | None = None,
+        clears_shared_backoff: Callable[[T], bool] | None = None,
     ) -> None:
         self.name = name
         self.loader = loader
@@ -2818,6 +2967,10 @@ class BackgroundCache(Generic[T]):
         self.error_retry_interval = error_retry_interval
         self.state_path = state_path
         self.on_update = on_update
+        self.prepare_value = prepare_value
+        self.shared_backoff = shared_backoff
+        self.shared_backoff_reason = shared_backoff_reason
+        self.clears_shared_backoff = clears_shared_backoff
         self._load_persisted()
         threading.Thread(target=self._worker, name=f"{name}-refresh", daemon=True).start()
 
@@ -2866,6 +3019,8 @@ class BackgroundCache(Generic[T]):
             now = time.monotonic()
             with self.lock:
                 retry_wait = max(0.0, self.next_attempt_monotonic - now)
+            if self.shared_backoff is not None:
+                retry_wait = max(retry_wait, self.shared_backoff.retry_in_seconds())
             due = self.value is None or self.age() >= self.interval(self.value)
             if due and retry_wait <= 0:
                 self.refresh()
@@ -2884,7 +3039,45 @@ class BackgroundCache(Generic[T]):
     def trigger(self) -> None:
         self.wakeup.set()
 
+    def shared_backoff_value(self) -> T | None:
+        if self.shared_backoff is None:
+            return None
+        backoff = self.shared_backoff.snapshot()
+        if not int(backoff["seconds"]):
+            return None
+        with self.lock:
+            value = self.value or self.empty_factory()
+            message = (
+                "Background refresh deferred after transient Volkswagen state "
+                f'{backoff["reason"]}'
+            )
+            setattr(value, "error", message)
+            setattr(value, "errorCategory", str(backoff["reason"]))
+            setattr(value, "stale", self.value is not None)
+            setattr(value, "lastSuccessfulAt", self.last_success_at)
+            self.value = value
+            return value
+
+    def update_shared_backoff(self, value: T) -> None:
+        if self.shared_backoff is None:
+            return
+        reason = (
+            self.shared_backoff_reason(value)
+            if self.shared_backoff_reason is not None
+            else ""
+        )
+        if reason:
+            self.shared_backoff.record_failure(reason)
+        elif (
+            self.clears_shared_backoff is not None
+            and self.clears_shared_backoff(value)
+        ):
+            self.shared_backoff.clear()
+
     def refresh(self) -> T:
+        deferred = self.shared_backoff_value()
+        if deferred is not None:
+            return deferred
         with self.lock:
             if self.refreshing:
                 return self.value or self.empty_factory()
@@ -2892,6 +3085,10 @@ class BackgroundCache(Generic[T]):
         started = time.monotonic()
         try:
             value = self.loader()
+            with self.lock:
+                previous = self.value
+            if self.prepare_value is not None:
+                value = self.prepare_value(value, previous)
             now = datetime.now().astimezone().isoformat(timespec="seconds")
             setattr(value, "error", "")
             setattr(value, "errorCategory", "")
@@ -2908,6 +3105,7 @@ class BackgroundCache(Generic[T]):
             self._save_persisted(value)
             if self.on_update is not None:
                 self.on_update(self.name, value)
+            self.update_shared_backoff(value)
             return value
         except ActionPriority:
             LOG.info("%s refresh yielded to a pending action", self.name)
@@ -2916,6 +3114,11 @@ class BackgroundCache(Generic[T]):
                 return self.value or self.empty_factory()
         except Exception as exc:
             category = VolkswagenReader.error_category(exc)
+            if (
+                self.shared_backoff is not None
+                and isinstance(exc, TransientVolkswagenState)
+            ):
+                self.shared_backoff.record_failure(exc.reason)
             if isinstance(exc, UsageLimit):
                 LOG.warning("%s refresh skipped: %s", self.name, exc)
             else:
@@ -2949,9 +3152,16 @@ class BackgroundCache(Generic[T]):
             return value
         if self.age() >= self.interval(value):
             self.trigger()
+            deferred = self.shared_backoff_value()
+            if deferred is not None:
+                return deferred
         return value
 
     def set_value(self, value: T) -> T:
+        with self.lock:
+            previous = self.value
+        if self.prepare_value is not None:
+            value = self.prepare_value(value, previous)
         now = datetime.now().astimezone().isoformat(timespec="seconds")
         setattr(value, "error", "")
         setattr(value, "errorCategory", "")
@@ -2966,6 +3176,7 @@ class BackgroundCache(Generic[T]):
         self._save_persisted(value)
         if self.on_update is not None:
             self.on_update(self.name, value)
+        self.update_shared_backoff(value)
         return value
 
     def patch_value(self, value: T) -> T:
@@ -3093,8 +3304,6 @@ class ActionJobManager:
                 category = (
                     "APP_VERSION"
                     if isinstance(exc, ActionQuarantined)
-                    else "RATE_LIMIT"
-                    if isinstance(exc, UsageLimit)
                     else VolkswagenReader.error_category(exc)
                 )
                 self._update(
@@ -3139,6 +3348,59 @@ class AppState:
         "climate/option/zone-front-right",
     )
 
+    @staticmethod
+    def annotate_vehicle_source(
+        value: VehicleData,
+        previous: VehicleData | None,
+        stale_after_minutes: int,
+        energy_protection_last_seen_at: str = "",
+    ) -> VehicleData:
+        value.sourceAgeMinutes = value.syncAgeMinutes
+        value.sourceFreshnessKnown = value.sourceAgeMinutes is not None
+        value.sourceStale = (
+            value.sourceFreshnessKnown
+            and value.sourceAgeMinutes >= stale_after_minutes
+        )
+        if value.observedAt and value.sourceAgeMinutes is not None:
+            try:
+                source_time = datetime.fromisoformat(value.observedAt) - timedelta(
+                    minutes=value.sourceAgeMinutes
+                )
+                value.sourceObservedAt = source_time.isoformat(timespec="seconds")
+            except ValueError:
+                value.sourceObservedAt = ""
+        previous_stale_count = (
+            previous.consecutiveSourceStaleReads
+            if isinstance(previous, VehicleData) and previous.sourceStale
+            else 0
+        )
+        value.consecutiveSourceStaleReads = (
+            previous_stale_count + 1 if value.sourceStale else 0
+        )
+        if value.sourceStale:
+            value.lastFreshVehicleDataAt = (
+                previous.lastFreshVehicleDataAt
+                if isinstance(previous, VehicleData)
+                else ""
+            )
+        elif value.sourceFreshnessKnown:
+            value.lastFreshVehicleDataAt = value.sourceObservedAt or value.observedAt
+        else:
+            value.lastFreshVehicleDataAt = (
+                previous.lastFreshVehicleDataAt
+                if isinstance(previous, VehicleData)
+                else ""
+            )
+        value.vehicleEnergyProtectionLastSeenAt = (
+            energy_protection_last_seen_at
+            or (
+                previous.vehicleEnergyProtectionLastSeenAt
+                if isinstance(previous, VehicleData)
+                else ""
+            )
+        )
+        return value
+
     def __init__(self) -> None:
         self.mqtt: MqttPublisher | None = None
         self.reader = VolkswagenReader()
@@ -3155,8 +3417,19 @@ class AppState:
         error_retry_interval = float(
             os.getenv("BACKGROUND_ERROR_RETRY_SECONDS", "900")
         )
+        transient_backoff_max = float(
+            os.getenv("BACKGROUND_TRANSIENT_BACKOFF_MAX_SECONDS", "7200")
+        )
+        source_stale_after_minutes = int(
+            os.getenv("SOURCE_STALE_AFTER_MINUTES", "60")
+        )
         cache_dir = Path(
             os.getenv("CACHE_STATE_DIR", "/var/lib/vw-app-connector/cache")
+        )
+        self.background_backoff = BackgroundTransientBackoff(
+            cache_dir / "background-backoff.json",
+            base_seconds=error_retry_interval,
+            max_seconds=transient_backoff_max,
         )
 
         def priority_pending() -> bool:
@@ -3198,6 +3471,17 @@ class AppState:
 
         charge_interval = ChargeRefreshInterval(charging_interval, idle_interval)
 
+        def annotate_charge(
+            value: VehicleData, previous: VehicleData | None
+        ) -> VehicleData:
+            notice_at, _notice_count = self.reader.energy_protection_telemetry()
+            return self.annotate_vehicle_source(
+                value,
+                previous,
+                source_stale_after_minutes,
+                notice_at,
+            )
+
         def charge_updated(name: str, value: VehicleData) -> None:
             charge_interval.observe(value)
             self._cache_updated(name, value)
@@ -3207,8 +3491,17 @@ class AppState:
             background(self.reader.read, 1),
             charge_interval,
             VehicleData,
+            error_retry_interval=error_retry_interval,
             state_path=cache_dir / "charge.json",
             on_update=charge_updated,
+            prepare_value=annotate_charge,
+            shared_backoff=self.background_backoff,
+            shared_backoff_reason=lambda value: (
+                "SOURCE_DATA_STALE" if value.sourceStale else ""
+            ),
+            clears_shared_backoff=lambda value: (
+                value.sourceAgeMinutes is not None and not value.sourceStale
+            ),
         )
         self.details = BackgroundCache(
             "details",
@@ -3219,6 +3512,7 @@ class AppState:
             error_retry_interval=error_retry_interval,
             state_path=cache_dir / "details.json",
             on_update=self._cache_updated,
+            shared_backoff=self.background_backoff,
         )
         self.location = BackgroundCache(
             "location",
@@ -3229,6 +3523,7 @@ class AppState:
             error_retry_interval=error_retry_interval,
             state_path=cache_dir / "location.json",
             on_update=self._cache_updated,
+            shared_backoff=self.background_backoff,
         )
 
         self.mqtt = MqttPublisher.from_environment(self.mqtt_state)
@@ -3305,6 +3600,8 @@ class AppState:
                 "appVersionVerified": health.appVersionVerified,
                 "mqtt": self.mqtt is not None,
                 "cachePersistence": True,
+                "sourceFreshness": True,
+                "adaptiveTransientBackoff": True,
                 "asyncActions": True,
                 "cooldownProbe": True,
                 "diagnosticsIndex": True,
@@ -3358,6 +3655,13 @@ class AppState:
             "# HELP vw_app_connector_cooldown_seconds Active Volkswagen rate-limit cooldown.",
             "# TYPE vw_app_connector_cooldown_seconds gauge",
             f'vw_app_connector_cooldown_seconds {usage["cooldownSeconds"]}',
+            "# HELP vw_app_connector_background_backoff_seconds Shared pause after transient Volkswagen states.",
+            "# TYPE vw_app_connector_background_backoff_seconds gauge",
+            "vw_app_connector_background_backoff_seconds{reason=\""
+            f'{self._metric_label(health.backgroundBackoffReason)}"}} '
+            f"{health.backgroundBackoffSeconds}",
+            "# HELP vw_app_connector_vehicle_source_age_minutes Age reported by the Volkswagen app for vehicle data.",
+            "# TYPE vw_app_connector_vehicle_source_age_minutes gauge",
             "# HELP vw_app_connector_phone_battery_level_percent Android phone battery level.",
             "# TYPE vw_app_connector_phone_battery_level_percent gauge",
         ]
@@ -3365,6 +3669,26 @@ class AppState:
             lines.append(
                 f"vw_app_connector_phone_battery_level_percent {health.phoneBatteryLevel}"
             )
+        if health.vehicleSourceAgeMinutes is not None:
+            lines.append(
+                f"vw_app_connector_vehicle_source_age_minutes {health.vehicleSourceAgeMinutes}"
+            )
+        lines.extend(
+            [
+                "# HELP vw_app_connector_vehicle_source_stale Vehicle data exceeds the configured source-age threshold.",
+                "# TYPE vw_app_connector_vehicle_source_stale gauge",
+                f"vw_app_connector_vehicle_source_stale {1 if health.vehicleSourceStale else 0}",
+                "# HELP vw_app_connector_vehicle_source_freshness_known Whether the Volkswagen app reported a source age.",
+                "# TYPE vw_app_connector_vehicle_source_freshness_known gauge",
+                f"vw_app_connector_vehicle_source_freshness_known {1 if health.vehicleSourceFreshnessKnown else 0}",
+                "# HELP vw_app_connector_vehicle_source_stale_reads Consecutive source-stale charge reads.",
+                "# TYPE vw_app_connector_vehicle_source_stale_reads gauge",
+                f"vw_app_connector_vehicle_source_stale_reads {health.vehicleConsecutiveSourceStaleReads}",
+                "# HELP vw_app_connector_vehicle_energy_protection_notices_total Energy-protection notices observed in this process.",
+                "# TYPE vw_app_connector_vehicle_energy_protection_notices_total counter",
+                f"vw_app_connector_vehicle_energy_protection_notices_total {health.vehicleEnergyProtectionNoticeCount}",
+            ]
+        )
         lines.extend(
             [
                 "# HELP vw_app_connector_cache_age_seconds Seconds since a cache last refreshed successfully.",
@@ -3539,6 +3863,9 @@ class AppState:
         except VolkswagenRateLimit as exc:
             self.usage.record_rate_limit(exc.reason)
             raise
+        except TransientVolkswagenState as exc:
+            self.background_backoff.record_failure(exc.reason)
+            raise
         finally:
             self.reader.action_pending.clear()
 
@@ -3640,7 +3967,11 @@ class AppState:
         self.usage.acquire_background(1, bypass_cooldown=True)
         self.reader.context.background = True
         try:
-            value = self.reader.read()
+            try:
+                value = self.reader.read()
+            except TransientVolkswagenState as exc:
+                self.background_backoff.record_failure(exc.reason)
+                raise
         finally:
             self.reader.context.background = False
         if not self.usage.clear_rate_limit(expected_until):
@@ -3677,6 +4008,31 @@ class AppState:
         value.locationAgeSeconds = (
             round(self.location.age()) if self.location.last_success_at else None
         )
+        charge_value = self.charge.value
+        if isinstance(charge_value, VehicleData):
+            value.vehicleSourceAgeMinutes = charge_value.sourceAgeMinutes
+            value.vehicleSourceFreshnessKnown = charge_value.sourceFreshnessKnown
+            value.vehicleSourceStale = charge_value.sourceStale
+            value.vehicleConsecutiveSourceStaleReads = (
+                charge_value.consecutiveSourceStaleReads
+            )
+            value.vehicleLastFreshDataAt = charge_value.lastFreshVehicleDataAt
+            value.vehicleEnergyProtectionLastSeenAt = (
+                charge_value.vehicleEnergyProtectionLastSeenAt
+            )
+        if isinstance(self.reader, VolkswagenReader):
+            notice_at, notice_count = self.reader.energy_protection_telemetry()
+            value.vehicleEnergyProtectionLastSeenAt = (
+                notice_at or value.vehicleEnergyProtectionLastSeenAt
+            )
+            value.vehicleEnergyProtectionNoticeCount = notice_count
+        background_backoff = getattr(self, "background_backoff", None)
+        if isinstance(background_backoff, BackgroundTransientBackoff):
+            backoff = background_backoff.snapshot()
+            value.backgroundBackoffSeconds = int(backoff["seconds"])
+            value.backgroundBackoffReason = str(backoff["reason"])
+            value.backgroundBackoffUntil = str(backoff["until"])
+            value.backgroundBackoffFailureCount = int(backoff["failureCount"])
         usage = self.usage.snapshot()
         value.usageBackgroundUsed = int(usage["backgroundUsed"])
         value.usageBackgroundLimit = int(usage["backgroundLimit"])
@@ -3693,6 +4049,8 @@ class AppState:
         elif (
             self.charge.last_error
             or value.usageCooldownSeconds
+            or value.backgroundBackoffSeconds
+            or value.vehicleSourceStale
             or not value.actionAvailable
         ):
             value.status = "degraded"

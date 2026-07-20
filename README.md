@@ -25,6 +25,13 @@ Optional authenticated actions use the same accessibility UI.
   "climater": false,
   "locked": false,
   "syncAgeMinutes": 18,
+  "sourceAgeMinutes": 18,
+  "sourceObservedAt": "2026-06-13T19:02:00+02:00",
+  "sourceFreshnessKnown": true,
+  "sourceStale": false,
+  "consecutiveSourceStaleReads": 0,
+  "lastFreshVehicleDataAt": "2026-06-13T19:02:00+02:00",
+  "vehicleEnergyProtectionLastSeenAt": "",
   "observedAt": "2026-06-13T19:20:00+02:00",
   "error": ""
 }
@@ -60,6 +67,15 @@ The connector refreshes data in background. API reads return immediately and
 continue serving the last successful value with `stale: true` when a refresh
 fails. Failed UI reads are retried once and store a UI dump, screenshot and
 error summary in the diagnostics directory.
+
+Known Volkswagen states such as `data no longer up-to-date`, `currently
+unavailable` and explicit rate limits are not retried immediately as UI
+failures. Transient stale/unavailable states and successfully read source data
+above the stale-age threshold start one shared, persisted exponential
+background pause across charge, details and location refreshes.
+The pause resets only after the charge view reports source data below the
+configured stale-age threshold. Explicit authenticated actions remain
+available during this transient background pause.
 
 Usage protection is enforced inside the connector and persisted across service
 restarts. Defaults are deliberately conservative: 15 minutes while parked,
@@ -119,6 +135,10 @@ Environment variables:
 - `BACKGROUND_MIN_INTERVAL_SECONDS`: default `300`
 - `BACKGROUND_ERROR_RETRY_SECONDS`: default `900`; failed cache refreshes wait
   before retrying so persistent UI problems do not consume the daily budget
+- `BACKGROUND_TRANSIENT_BACKOFF_MAX_SECONDS`: default `7200`; maximum shared
+  exponential pause after repeated transient or source-stale states
+- `SOURCE_STALE_AFTER_MINUTES`: default `60`; source ages at or above this value
+  set `sourceStale` and do not clear the transient background pause
 - `BACKGROUND_DAILY_LIMIT`: default `180`
 - `ACTION_MIN_INTERVAL_SECONDS`: default `60`
 - `ACTION_DAILY_LIMIT`: default `20`
@@ -225,9 +245,10 @@ only by root because it contains the Volkswagen S-PIN.
 
 An explicit Volkswagen `too many requests` response starts the configured
 global rate-limit cooldown. Transient app states such as `data no longer
-up-to-date` use the normal background error retry interval instead and do not
-start the 12-hour cooldown. `/health` exposes `usageCooldownReason`,
-`usageCooldownUntil` and the remaining probe wait.
+up-to-date` use the shared adaptive background backoff instead and do not start
+the 12-hour cooldown. `/health` exposes `backgroundBackoffReason`, source-data
+freshness, `usageCooldownReason`, `usageCooldownUntil` and the remaining probe
+wait.
 
 After correcting a local phone or ADB problem, an administrator can request one
 budgeted charge-data probe:
