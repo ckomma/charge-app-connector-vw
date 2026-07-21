@@ -83,10 +83,11 @@ available during this transient background pause.
 Usage protection is enforced inside the connector and persisted across service
 restarts. Defaults are deliberately conservative: 15 minutes while parked,
 5 minutes while charging, details every 12 hours and location every 4 hours.
-After a newly connected `B` state, or the first connected read without a target
-state of charge, the connector performs one bounded follow-up at the charging
-interval. A continued connected-idle state then returns to the 15-minute
-interval so a missing app value cannot cause continuous five-minute polling.
+After a newly connected `B` state, a `C` to `B` transition, or the first
+connected read without a target state of charge, the connector performs one
+bounded follow-up at the charging interval. A continued connected-idle state
+then returns to the 15-minute interval so a missing app value or PV pause
+cannot cause continuous five-minute polling.
 Background work has a weighted daily budget, actions have a separate daily
 budget and 60-second minimum interval, and Volkswagen rate-limit responses
 pause app operations for 12 hours. Current usage and cooldown are exposed by
@@ -175,6 +176,12 @@ Environment variables:
 - `MQTT_DISCOVERY_PREFIX`: default `homeassistant`
 - `MQTT_CLIENT_ID`: default `vw-app-connector`; use a unique value per connector
 - `MQTT_TLS`: default `false`; enable TLS using the system CA store
+
+When an ADB command reports a missing, offline or unreachable transport, the
+connector performs one bounded recovery attempt. It first asks ADB to reconnect
+offline devices, then restarts the local ADB server only if the transport is
+still unavailable, reselects USB/Wi-Fi according to `ADB_MODE`, and retries the
+original command once.
 
 Due detail and location refreshes take priority over routine charge refreshes.
 This prevents the five-minute charge polling interval from repeatedly delaying
@@ -454,7 +461,9 @@ access should not be exposed as an unattended example control.
 
 [`examples/evcc.yaml`](examples/evcc.yaml) provides a complete custom vehicle
 entry for evcc. It exposes state of charge, connection/charging status and
-estimated range.
+estimated range. Its jq expressions reject responses marked `stale` or
+`sourceStale`, preventing the last successful cache value from being accepted
+as a current vehicle measurement after a connector or Volkswagen-data failure.
 
 Replace `CONNECTOR_HOST` with the connector host name or IP address and merge
 the `vehicles` entry into `evcc.yaml`. If evcc and the connector run on the

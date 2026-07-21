@@ -7,6 +7,8 @@
 #
 # When evcc and the connector run on the same host, CONNECTOR_HOST can be
 # replaced with 127.0.0.1.
+# The jq expressions reject failed-cache and source-stale responses so evcc
+# does not treat an old connector value as a current vehicle measurement.
 
 vehicles:
   - name: volkswagen_app
@@ -18,7 +20,7 @@ vehicles:
       source: http
       uri: http://CONNECTOR_HOST:9920/charge
       method: GET
-      jq: .soc
+      jq: 'if (.stale or .sourceStale) then error("stale Volkswagen connector data") else .soc end'
       cache: 60s
       timeout: 10s
 
@@ -26,7 +28,7 @@ vehicles:
       source: http
       uri: http://CONNECTOR_HOST:9920/charge
       method: GET
-      jq: .status
+      jq: 'if (.stale or .sourceStale) then error("stale Volkswagen connector data") else .status end'
       cache: 60s
       timeout: 10s
 
@@ -34,7 +36,7 @@ vehicles:
       source: http
       uri: http://CONNECTOR_HOST:9920/charge
       method: GET
-      jq: .range
+      jq: 'if (.stale or .sourceStale) then error("stale Volkswagen connector data") else .range end'
       cache: 60s
       timeout: 10s
 

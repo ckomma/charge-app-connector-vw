@@ -79,6 +79,15 @@ coordinates, screenshots, raw UI dumps, and private network details.
   limit or proof of a 12-volt battery problem.
 - USB remains the preferred transport in `ADB_MODE=auto`; configured ADB Wi-Fi
   is only the fallback while USB is unavailable.
+- Missing, offline and unreachable ADB transports receive one bounded recovery
+  attempt per command: reconnect offline devices, restart the local ADB server
+  only if needed, reselect the configured transport and retry once.
+- A charging-to-connected-idle (`C` to `B`) transition schedules exactly one
+  follow-up at the charging interval before returning to the idle interval.
+  This narrows short PV-pause and target-SoC gaps without creating continuous
+  five-minute polling.
+- The evcc example rejects both `stale` and `sourceStale` charge responses so
+  evcc does not consume a preserved cache value as a current measurement.
 
 ## Live Test Budget Policy
 

@@ -9,7 +9,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from vw_app_connector import (
     ActionJobManager,
@@ -628,6 +628,18 @@ class ParserTests(unittest.TestCase):
         interval.observe(charging)
         self.assertEqual(interval(charging), 300)
 
+    def test_charge_refresh_interval_schedules_one_post_charging_follow_up(self):
+        interval = ChargeRefreshInterval(300, 900)
+        charging = VehicleData(status="C", targetSoc=80)
+        connected = VehicleData(status="B", targetSoc=80)
+
+        interval.observe(charging)
+        interval.observe(connected)
+        self.assertEqual(interval(connected), 300)
+
+        interval.observe(connected)
+        self.assertEqual(interval(connected), 900)
+
     def test_mqtt_failure_does_not_escape_cache_update(self):
         state = object.__new__(AppState)
         state.mqtt = Mock()
@@ -711,6 +723,67 @@ class ParserTests(unittest.TestCase):
 
         self.assertNotIn(reader.serial, str(caught.exception))
         self.assertIn("<redacted>", str(caught.exception))
+
+    def test_adb_recovers_once_after_device_not_found(self):
+        reader = object.__new__(VolkswagenReader)
+        reader.serial = "USB-SERIAL-SECRET"
+        reader.usb_serial = "USB-SERIAL-SECRET"
+        reader.wifi_address = ""
+        reader.select_serial = Mock(return_value=reader.serial)
+        reader.recover_adb_transport = Mock()
+        missing = SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="adb: device USB-SERIAL-SECRET not found",
+        )
+        recovered = SimpleNamespace(returncode=0, stdout="device\n", stderr="")
+
+        with patch("subprocess.run", side_effect=(missing, recovered)) as run:
+            result = reader.adb("get-state", timeout=5)
+
+        self.assertEqual(result, "device\n")
+        self.assertEqual(run.call_count, 2)
+        reader.recover_adb_transport.assert_called_once_with()
+
+    def test_adb_does_not_retry_non_transport_error(self):
+        reader = object.__new__(VolkswagenReader)
+        reader.serial = "USB-SERIAL-SECRET"
+        reader.usb_serial = "USB-SERIAL-SECRET"
+        reader.wifi_address = ""
+        reader.select_serial = Mock(return_value=reader.serial)
+        reader.recover_adb_transport = Mock()
+        denied = SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="remote permission denied",
+        )
+
+        with (
+            patch("subprocess.run", return_value=denied) as run,
+            self.assertRaisesRegex(RuntimeError, "permission denied"),
+        ):
+            reader.adb("shell", "id")
+
+        run.assert_called_once()
+        reader.recover_adb_transport.assert_not_called()
+
+    def test_adb_recovery_restarts_server_when_reconnect_is_insufficient(self):
+        reader = object.__new__(VolkswagenReader)
+        reader.adb_recovery_lock = threading.Lock()
+        reader.adb_transport_ready = Mock(side_effect=(False, False))
+        reader.run_adb = Mock(return_value=SimpleNamespace(returncode=0))
+
+        with self.assertLogs("vw-app-connector", level="WARNING"):
+            reader.recover_adb_transport()
+
+        self.assertEqual(
+            reader.run_adb.call_args_list,
+            [
+                call("reconnect", "offline", timeout=10),
+                call("kill-server", timeout=10),
+                call("start-server", timeout=10),
+            ],
+        )
 
     def test_charging_setting_values_are_sorted_and_localization_independent(self):
         root = ET.fromstring(
