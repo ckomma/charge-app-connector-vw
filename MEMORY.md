@@ -27,6 +27,12 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## Screen And Refresh Behavior
 
+- Some PHEVs show a numeric `0%` state of charge on the overview while the
+  charge detail arc displays `--`. Charge reads use the overview SoC only when
+  the detail has no numeric value; a numeric detail SoC remains authoritative.
+  The charge-detail readiness check recognizes the dedicated range-arc
+  resource IDs so this empty-battery view does not time out on a generic
+  `Start` button label.
 - Only an explicit localized Volkswagen `too many requests` state starts the
   persisted global rate-limit cooldown. `Data no longer up-to-date` and the
   localized `currently unavailable` report state use the normal background

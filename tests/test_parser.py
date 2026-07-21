@@ -497,7 +497,7 @@ class ParserTests(unittest.TestCase):
             "MQTT_USERNAME": "connector",
             "MQTT_PASSWORD": "secret",
         }
-        state = VehicleData(status="B", soc=55, locked=True)
+        state = VehicleData(status="B", soc=0, locked=True)
         with patch.dict("os.environ", environment, clear=True):
             publisher = MqttPublisher(lambda: {"charge": state}, mqtt)
             publisher.start()
@@ -541,7 +541,7 @@ class ParserTests(unittest.TestCase):
             call for call in mqtt.client.published
             if call[0][0] == "vw_app_connector/charge"
         )
-        self.assertEqual(json.loads(state_call[0][1])["soc"], 55)
+        self.assertEqual(json.loads(state_call[0][1])["soc"], 0)
         self.assertTrue(state_call[1]["retain"])
         locked_config_call = next(
             call for call in mqtt.client.published
@@ -998,6 +998,24 @@ class ParserTests(unittest.TestCase):
             70,
         )
 
+    def test_zero_state_of_charge_in_both_languages(self):
+        for text in ("Battery 0%", "Batterie 0 %"):
+            with self.subTest(text=text):
+                self.assertEqual(VolkswagenReader.parse_soc(text), 0)
+
+    def test_empty_phev_charge_detail_is_ready_by_resource_anchor(self):
+        for label in ("Battery", "Batterie"):
+            with self.subTest(label=label):
+                root = ET.fromstring(
+                    f"""<hierarchy>
+                    <node resource-id="com.volkswagen.weconnect:id/rangeArcBatterySoc"
+                          text="--"/>
+                    <node text="{label}"/>
+                    <node text="Start"/>
+                    </hierarchy>"""
+                )
+                self.assertTrue(VolkswagenReader.is_charge_detail_page(root))
+
     def test_charging_details(self):
         result = VehicleData()
         VolkswagenReader.parse_charging_details(
@@ -1105,6 +1123,83 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.chargePowerKw, 2)
         self.assertEqual(result.targetSoc, 100)
         self.assertEqual(result.chargingMode, "Immediate charging")
+
+    def test_empty_phev_detail_uses_zero_soc_from_overview(self):
+        cases = (
+            (
+                "Battery range: 0 km. Battery 0%. Open details",
+                "Battery",
+            ),
+            (
+                "Batteriereichweite: 0 Kilometer. Batterie 0 %. Details öffnen",
+                "Batterie",
+            ),
+        )
+        for description, label in cases:
+            with self.subTest(description=description):
+                overview = ET.fromstring(
+                    f'<hierarchy><node content-desc="{description}" '
+                    'bounds="[100,500][900,760]"/></hierarchy>'
+                )
+                detail = ET.fromstring(
+                    f"""<hierarchy>
+                    <node resource-id="com.volkswagen.weconnect:id/rangeArcBatterySoc"
+                          text="--"/>
+                    <node text="{label}"/>
+                    <node text="Start"/>
+                    </hierarchy>"""
+                )
+                with TemporaryDirectory() as directory:
+                    with patch.dict(
+                        "os.environ",
+                        {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                        clear=False,
+                    ):
+                        reader = VolkswagenReader()
+                        with (
+                            patch.object(reader, "launch"),
+                            patch.object(
+                                reader, "open_overview", return_value=overview
+                            ),
+                            patch.object(
+                                reader,
+                                "wait_for_charge_detail",
+                                return_value=detail,
+                            ),
+                            patch.object(reader, "shell"),
+                            patch("time.sleep"),
+                        ):
+                            result = reader._read()
+                self.assertEqual(result.soc, 0)
+                self.assertEqual(result.range, 0)
+                self.assertEqual(result.status, "A")
+
+    def test_numeric_detail_soc_remains_authoritative(self):
+        overview = ET.fromstring(
+            '<hierarchy><node content-desc="Battery range: 0 km. Battery 0%. '
+            'Open details" bounds="[100,500][900,760]"/></hierarchy>'
+        )
+        detail = ET.fromstring(
+            '<hierarchy><node text="Battery 1%"/></hierarchy>'
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "launch"),
+                    patch.object(reader, "open_overview", return_value=overview),
+                    patch.object(
+                        reader, "wait_for_charge_detail", return_value=detail
+                    ),
+                    patch.object(reader, "shell"),
+                    patch("time.sleep"),
+                ):
+                    result = reader._read()
+        self.assertEqual(result.soc, 1)
 
     def test_charge_health_warning_is_dismissed_before_detail_parse(self):
         notice = ET.fromstring(

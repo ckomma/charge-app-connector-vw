@@ -44,7 +44,10 @@ intentionally separate because map navigation is slower than the evcc
 charge-data poll.
 
 For PHEV/hybrid vehicles, `range` remains the electric battery range and
-`fuelRange` exposes the fuel range when the Volkswagen app shows it.
+`fuelRange` exposes the fuel range when the Volkswagen app shows it. If an
+empty PHEV battery is shown as a numeric zero on the overview but as `--` in
+the charge detail, `soc` uses the overview value while numeric detail values
+remain authoritative.
 
 `GET /details` returns the target temperature, automatic window heating,
 front climate zones, odometer, service interval, warning status and departure

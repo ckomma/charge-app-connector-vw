@@ -1217,6 +1217,13 @@ class VolkswagenReader:
         text = "\n".join(cls.strings(root))
         if cls.parse_soc(text) is not None:
             return True
+        if any(
+            node.attrib.get("resource-id", "").endswith(
+                ("rangeArcBatterySoc", "rangeArcRangeAndUnit")
+            )
+            for node in root.iter()
+        ):
+            return True
         return bool(
             re.search(
                 r"Laden starten|Laden stoppen|Wird geladen|Start charging|"
@@ -1914,6 +1921,7 @@ class VolkswagenReader:
         result.syncAgeMinutes = self.parse_sync_age(overview_text)
         result.climater = self.parse_climater(overview_text)
         result.locked = self.parse_locked(overview_text)
+        overview_soc = self.parse_soc(overview_text)
 
         x, y = self.range_tile_center(overview)
         self.shell("input", "tap", str(x), str(y))
@@ -1922,7 +1930,8 @@ class VolkswagenReader:
         detail_text = "\n".join(
             self.strings(self.wait_for_charge_detail("vw-detail.xml"))
         )
-        result.soc = self.parse_soc(detail_text)
+        detail_soc = self.parse_soc(detail_text)
+        result.soc = detail_soc if detail_soc is not None else overview_soc
         if result.soc is None:
             raise RuntimeError("Volkswagen state of charge not found")
         self.parse_charging_details(detail_text, result)
