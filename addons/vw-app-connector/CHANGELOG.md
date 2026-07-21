@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.16
+
+- Recheck the live charging state immediately before start/stop taps to narrow
+  races with manual Volkswagen app use or another automation.
+- Add a Home Assistant `Actions Ready` guard for failed, stale, source-stale or
+  old charge data, app-version quarantine and Volkswagen cooldowns; document a
+  single-writer/manual-override policy for charging automations.
+- Recover missing, offline and unreachable ADB transports with one bounded
+  retry and follow a `C` to `B` transition once at the charging interval.
+- Reject stale connector data in the evcc example and preserve a numeric zero
+  state of charge for empty PHEV batteries when the detail view shows `--`.
+
 ## 0.1.15
 
 - Verify Volkswagen app `4.1.1` in German and English on Redmi and Pixel

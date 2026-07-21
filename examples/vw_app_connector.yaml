@@ -10,6 +10,11 @@
 #
 # Copy this file to the Home Assistant packages directory and restart
 # Home Assistant after validating the configuration.
+#
+# Keep one automation system authoritative for charging decisions. If evcc
+# controls PV charging, use an explicit Home Assistant manual-override mode
+# instead of letting independent automations and Volkswagen app users issue
+# opposing start/stop commands.
 
 rest:
   - resource: "http://CONNECTOR_HOST:9920/charge"
@@ -32,6 +37,12 @@ rest:
           - climater
           - locked
           - syncAgeMinutes
+          - sourceAgeMinutes
+          - sourceObservedAt
+          - sourceFreshnessKnown
+          - sourceStale
+          - consecutiveSourceStaleReads
+          - lastFreshVehicleDataAt
           - observedAt
           - error
           - errorCategory
@@ -169,6 +180,23 @@ rest_command:
       X-API-Key: !secret vw_app_connector_api_key
 
 template:
+  - binary_sensor:
+      - name: "Volkswagen App Actions Ready"
+        unique_id: volkswagen_app_actions_ready
+        icon: mdi:car-cog
+        state: >
+          {% set observed = state_attr('sensor.volkswagen_app_status', 'observedAt') %}
+          {% set age = as_timestamp(now()) - as_timestamp(observed, 0) %}
+          {{ has_value('sensor.volkswagen_app_status')
+             and states('sensor.volkswagen_app_status') in ['A', 'B', 'C']
+             and state_attr('sensor.volkswagen_app_status', 'stale') is false
+             and state_attr('sensor.volkswagen_app_status', 'sourceStale') is false
+             and not state_attr('sensor.volkswagen_app_status', 'error')
+             and observed not in [none, '']
+             and 0 <= age <= 1200
+             and state_attr('sensor.volkswagen_app_connector', 'actionAvailable') is true
+             and (state_attr('sensor.volkswagen_app_connector', 'usageCooldownSeconds') | int(0)) == 0 }}
+
   - device_tracker:
       - name: "Volkswagen App Vehicle Location"
         unique_id: volkswagen_app_vehicle_location
@@ -182,7 +210,7 @@ template:
         state: >
           {% set locked = state_attr('sensor.volkswagen_app_status', 'locked') %}
           {{ 'locked' if locked is true else 'unlocked' if locked is false else none }}
-        availability: "{{ has_value('sensor.volkswagen_app_status') }}"
+        availability: "{{ is_state('binary_sensor.volkswagen_app_actions_ready', 'on') }}"
         lock:
           - action: rest_command.volkswagen_app_lock
         unlock:
@@ -193,7 +221,7 @@ template:
         unique_id: volkswagen_app_charging
         icon: mdi:ev-station
         state: "{{ is_state('sensor.volkswagen_app_status', 'C') }}"
-        availability: "{{ has_value('sensor.volkswagen_app_status') }}"
+        availability: "{{ is_state('binary_sensor.volkswagen_app_actions_ready', 'on') }}"
         turn_on:
           - action: rest_command.volkswagen_app_charging_start
         turn_off:
@@ -203,7 +231,7 @@ template:
         unique_id: volkswagen_app_climate
         icon: mdi:car-defrost-front
         state: "{{ state_attr('sensor.volkswagen_app_status', 'climater') is true }}"
-        availability: "{{ has_value('sensor.volkswagen_app_status') }}"
+        availability: "{{ is_state('binary_sensor.volkswagen_app_actions_ready', 'on') }}"
         turn_on:
           - action: rest_command.volkswagen_app_climate_start
         turn_off:

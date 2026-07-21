@@ -1,5 +1,5 @@
 name: Volkswagen App Connector
-version: 0.1.15
+version: 0.1.16
 slug: vw_app_connector
 description: ADB-based connector for the Volkswagen Android app.
 url: https://github.com/ckomma/charge-app-connector-vw

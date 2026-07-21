@@ -479,6 +479,7 @@ class VolkswagenReader:
         self.adb_transport = "usb"
         self.adb_last_connect_error = ""
         self.adb_connection_lock = threading.Lock()
+        self.adb_recovery_lock = threading.Lock()
         self.package = os.getenv("APP_PACKAGE", "com.volkswagen.weconnect")
         self.maps_package = os.getenv("MAPS_PACKAGE", "com.google.android.apps.maps")
         self.start_wait = float(os.getenv("APP_START_WAIT_SECONDS", "8"))
@@ -627,62 +628,104 @@ class VolkswagenReader:
                 self.adb_last_connect_error or "ADB Wi-Fi connection is unavailable"
             )
 
-    def adb(self, *args: str, timeout: float = 20) -> str:
+    @staticmethod
+    def recoverable_adb_error(message: str) -> bool:
+        normalized = message.casefold()
+        if "device" in normalized and "not found" in normalized:
+            return True
+        return any(
+            marker in normalized
+            for marker in (
+                "device offline",
+                "device unauthorized",
+                "no devices/emulators found",
+                "no authorized usb adb device found",
+                "neither usb nor configured adb wi-fi connection is available",
+                "adb wi-fi connection is unavailable",
+                "cannot connect",
+                "connection refused",
+                "connection reset",
+                "transport error",
+            )
+        )
+
+    def adb_transport_ready(self) -> bool:
         try:
             serial = self.select_serial()
-            result = subprocess.run(
-                ["adb", "-s", serial, *args],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as exc:
-            message = self.redact_adb_error(
-                str(exc),
-                self.serial,
-                self.usb_serial,
-                self.wifi_address,
-            )
-            raise TimeoutError(message) from None
-        if result.returncode:
-            message = self.redact_adb_error(
-                (result.stderr or result.stdout).strip(),
+        except RuntimeError:
+            return False
+        return self.adb_state(serial) == "device"
+
+    def recover_adb_transport(self) -> None:
+        """Try one bounded reconnect, then restart the local ADB server."""
+        with self.adb_recovery_lock:
+            if self.adb_transport_ready():
+                return
+            LOG.warning("ADB transport unavailable; attempting bounded recovery")
+            self.run_adb("reconnect", "offline", timeout=10)
+            if self.adb_transport_ready():
+                return
+            self.run_adb("kill-server", timeout=10)
+            self.run_adb("start-server", timeout=10)
+
+    def run_selected_adb(
+        self, *args: str, timeout: float, text: bool
+    ) -> subprocess.CompletedProcess:
+        for attempt in range(2):
+            try:
+                serial = self.select_serial()
+                result = subprocess.run(
+                    ["adb", "-s", serial, *args],
+                    check=False,
+                    capture_output=True,
+                    text=text,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                message = self.redact_adb_error(
+                    str(exc),
+                    self.serial,
+                    self.usb_serial,
+                    self.wifi_address,
+                )
+                raise TimeoutError(message) from None
+            except RuntimeError as exc:
+                if attempt == 0 and self.recoverable_adb_error(str(exc)):
+                    self.recover_adb_transport()
+                    continue
+                raise
+
+            raw_message = result.stderr or result.stdout
+            message = (
+                raw_message
+                if isinstance(raw_message, str)
+                else raw_message.decode(errors="replace")
+            ).strip()
+            if result.returncode == 0:
+                return result
+            if attempt == 0 and self.recoverable_adb_error(message):
+                self.recover_adb_transport()
+                continue
+            redacted = self.redact_adb_error(
+                message,
                 serial,
                 self.usb_serial,
                 self.wifi_address,
             )
-            raise RuntimeError(f"ADB failed ({result.returncode}): {message}")
+            raise RuntimeError(f"ADB failed ({result.returncode}): {redacted}")
+        raise AssertionError("bounded ADB retry exhausted")
+
+    def adb(self, *args: str, timeout: float = 20) -> str:
+        result = self.run_selected_adb(*args, timeout=timeout, text=True)
+        assert isinstance(result.stdout, str)
         return result.stdout
 
     def shell(self, *args: str, timeout: float = 20) -> str:
         return self.adb("shell", *args, timeout=timeout)
 
     def adb_bytes(self, *args: str, timeout: float = 20) -> bytes:
-        try:
-            serial = self.select_serial()
-            result = subprocess.run(
-                ["adb", "-s", serial, *args],
-                check=False,
-                capture_output=True,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as exc:
-            message = self.redact_adb_error(
-                str(exc),
-                self.serial,
-                self.usb_serial,
-                self.wifi_address,
-            )
-            raise TimeoutError(message) from None
-        if result.returncode:
-            message = self.redact_adb_error(
-                (result.stderr or result.stdout).decode(errors="replace").strip(),
-                serial,
-                self.usb_serial,
-                self.wifi_address,
-            )
-            raise RuntimeError(f"ADB failed ({result.returncode}): {message}")
+        result = self.run_selected_adb(*args, timeout=timeout, text=False)
+        assert isinstance(result.stdout, bytes)
         return result.stdout
 
     @staticmethod
@@ -2099,6 +2142,15 @@ class VolkswagenReader:
             text = "\n".join(self.strings(detail))
             current = self.text_reports_active_charging(text)
             if current != desired:
+                # A user or another automation can change the backend after
+                # the first UI snapshot. Re-read immediately before resolving
+                # and tapping the action button to narrow that race window.
+                detail = self.wait_for_charge_detail(
+                    "vw-charge-action-before-tap.xml"
+                )
+                text = "\n".join(self.strings(detail))
+                current = self.text_reports_active_charging(text)
+            if current != desired:
                 labels = (
                     ("Laden starten", "Start charging")
                     if desired
@@ -2872,7 +2924,7 @@ class ChargeRefreshInterval:
             elif status != "B":
                 self.connected_follow_up_used = False
 
-            transition_follow_up = status == "B" and previous in (None, "A")
+            transition_follow_up = status == "B" and previous in (None, "A", "C")
             missing_target_follow_up = (
                 status == "B"
                 and value.targetSoc is None

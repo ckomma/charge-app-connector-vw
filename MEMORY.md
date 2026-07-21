@@ -234,6 +234,17 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## Verification
 
+- On 2026-07-21, the immediate pre-tap charging-state recheck was deployed to
+  the production USB runtime and live-verified with Volkswagen app `4.1.1`.
+  The target SoC was temporarily changed from 80 to 90 percent and evcc from
+  `pv` to `now` so the connected vehicle could perform a verified `B` to `C`
+  start and `C` to `B` stop through the connector. The original target SoC,
+  evcc mode, lock and climate states were restored; the vehicle remained
+  connected and idle. The exact production limits of 180 background operations
+  and 20 actions were restored without resetting persisted counters, no
+  cooldown was active, the display returned to sleep and temporary root-only
+  test artifacts were removed.
+
 - On 2026-07-20, Volkswagen app `4.1.1` was live-verified on Redmi and Pixel
   phones in German and English. Charge, details, location and localized
   settings reads succeeded, as did the exercised vehicle actions. The original

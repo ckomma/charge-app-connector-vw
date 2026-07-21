@@ -1343,6 +1343,54 @@ class ParserTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "at or above"):
                         reader.set_charging(True)
 
+    def test_start_charging_rechecks_state_immediately_before_tap(self):
+        overview = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Battery range: 120 km" bounds="[100,500][900,760]"/>
+            </hierarchy>"""
+        )
+        stopped = ET.fromstring(
+            """<hierarchy>
+            <node text="Charging status. Battery charge level: 40 per cent."/>
+            <node text="Start charging" bounds="[100,1700][800,1850]"/>
+            </hierarchy>"""
+        )
+        started = ET.fromstring(
+            """<hierarchy>
+            <node text="Charging. Battery charge level: 40 per cent."/>
+            <node text="Stop charging" bounds="[100,1700][800,1850]"/>
+            </hierarchy>"""
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "screen_session", return_value=nullcontext()),
+                    patch.object(reader, "launch"),
+                    patch.object(reader, "open_overview", return_value=overview),
+                    patch.object(
+                        reader,
+                        "wait_for_charge_detail",
+                        side_effect=(stopped, started),
+                    ) as wait_for_detail,
+                    patch.object(
+                        reader,
+                        "with_retries",
+                        return_value=VehicleData(status="C", soc=40, targetSoc=80),
+                    ),
+                    patch.object(reader, "shell") as shell,
+                    patch("time.sleep"),
+                ):
+                    result = reader.set_charging(True)
+
+        self.assertEqual(result.status, "C")
+        self.assertEqual(wait_for_detail.call_count, 2)
+        shell.assert_called_once_with("input", "tap", "500", "630")
+
     def test_english_charging_details(self):
         result = VehicleData()
         VolkswagenReader.parse_charging_details(

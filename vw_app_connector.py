@@ -2142,6 +2142,15 @@ class VolkswagenReader:
             text = "\n".join(self.strings(detail))
             current = self.text_reports_active_charging(text)
             if current != desired:
+                # A user or another automation can change the backend after
+                # the first UI snapshot. Re-read immediately before resolving
+                # and tapping the action button to narrow that race window.
+                detail = self.wait_for_charge_detail(
+                    "vw-charge-action-before-tap.xml"
+                )
+                text = "\n".join(self.strings(detail))
+                current = self.text_reports_active_charging(text)
+            if current != desired:
                 labels = (
                     ("Laden starten", "Start charging")
                     if desired

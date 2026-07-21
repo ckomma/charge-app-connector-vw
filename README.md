@@ -445,6 +445,35 @@ connector performs background refreshes according to its own rate limits;
 reading its cached HTTP endpoints from Home Assistant does not trigger one
 Volkswagen app operation per request.
 
+The package exposes `binary_sensor.volkswagen_app_actions_ready` and makes its
+lock, charging and climate write entities unavailable unless the charge cache
+is successful, neither cache- nor source-stale, no older than 20 minutes, the
+installed app version is verified and no Volkswagen cooldown is active. Keep
+the guard in automation conditions as well if an automation calls the
+`rest_command` actions directly. Increase the 20-minute threshold in the
+example only when `IDLE_INTERVAL_SECONDS` is deliberately configured above its
+15-minute default.
+
+#### Automation and manual control
+
+Use one system as the authoritative writer for charging decisions. The
+connector serializes its own Android UI operations, checks whether charging is
+already in the requested state, rechecks immediately before tapping and
+verifies the result, so repeated requests for the same desired state are
+normally harmless. It cannot lock out a person using another Volkswagen app
+instance or identify that action as a deliberate manual override. Opposing
+manual and automated start/stop decisions therefore remain a policy conflict
+in which the last successful command can win.
+
+For PV charging, let evcc remain authoritative for the wallbox and avoid an
+independent Home Assistant automation that issues competing vehicle charging
+commands. If manual vehicle charging must take precedence, model it explicitly,
+for example with a Home Assistant override helper that pauses the automation
+for a defined period. Recheck that override, current PV conditions and
+`binary_sensor.volkswagen_app_actions_ready` immediately before every write;
+use the explicit `charging/start` and `charging/stop` actions rather than a
+toggle.
+
 ### openHAB
 
 openHAB 5 can consume the existing Home Assistant MQTT discovery messages.
