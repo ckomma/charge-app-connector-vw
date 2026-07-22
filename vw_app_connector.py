@@ -47,10 +47,18 @@ class VolkswagenRateLimit(UsageLimit):
         self.reason = reason
 
 
-class TransientVolkswagenState(UsageLimit):
+class TransientBackgroundState(UsageLimit):
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
         self.reason = reason
+
+
+class TransientVolkswagenState(TransientBackgroundState):
+    pass
+
+
+class TransientTransportState(TransientBackgroundState):
+    pass
 
 
 class CooldownProbeRejected(RuntimeError):
@@ -655,6 +663,18 @@ class VolkswagenReader:
         except RuntimeError:
             return False
         return self.adb_state(serial) == "device"
+
+    def require_background_adb_transport(self) -> None:
+        """Reject background work before budget use when ADB is unavailable."""
+        if self.adb_transport_ready():
+            return
+        self.recover_adb_transport()
+        if self.adb_transport_ready():
+            return
+        raise TransientTransportState(
+            "ADB_UNAVAILABLE",
+            "ADB transport unavailable before Volkswagen app access",
+        )
 
     def recover_adb_transport(self) -> None:
         """Try one bounded reconnect, then restart the local ADB server."""
@@ -1867,7 +1887,7 @@ class VolkswagenReader:
 
     @staticmethod
     def error_category(exc: Exception) -> str:
-        if isinstance(exc, TransientVolkswagenState):
+        if isinstance(exc, TransientBackgroundState):
             return exc.reason
         if isinstance(exc, UsageLimit):
             return "RATE_LIMIT"
@@ -2058,7 +2078,8 @@ class VolkswagenReader:
             or "eingeschraenkte dienste" in root_text
             or "nicht im fahrzeug angemeldet" in root_text
         ):
-            raise RuntimeError(
+            raise TransientVolkswagenState(
+                "APP_UNAVAILABLE",
                 "Volkswagen app reports limited services; not logged into the vehicle"
             )
         vehicle_name = self.parse_vehicle_name(root)
@@ -3004,27 +3025,37 @@ class BackgroundTransientBackoff:
         with self.lock:
             return max(0.0, float(self.state["nextAttemptAt"]) - time.time())
 
+    def _record_failure_locked(self, reason: str) -> None:
+        count = int(self.state["failureCount"]) + 1
+        delay = min(
+            self.max_seconds,
+            self.base_seconds * (2 ** min(count - 1, 30)),
+        )
+        if self.jitter_ratio:
+            delay *= random.uniform(1 - self.jitter_ratio, 1 + self.jitter_ratio)
+            delay = min(self.max_seconds, delay)
+        self.state.update(
+            {
+                "failureCount": count,
+                "reason": reason,
+                "nextAttemptAt": time.time() + delay,
+                "lastFailureAt": datetime.now()
+                .astimezone()
+                .isoformat(timespec="seconds"),
+            }
+        )
+        self._save()
+
     def record_failure(self, reason: str) -> None:
         with self.lock:
-            count = int(self.state["failureCount"]) + 1
-            delay = min(
-                self.max_seconds,
-                self.base_seconds * (2 ** min(count - 1, 30)),
-            )
-            if self.jitter_ratio:
-                delay *= random.uniform(1 - self.jitter_ratio, 1 + self.jitter_ratio)
-                delay = min(self.max_seconds, delay)
-            self.state.update(
-                {
-                    "failureCount": count,
-                    "reason": reason,
-                    "nextAttemptAt": time.time() + delay,
-                    "lastFailureAt": datetime.now()
-                    .astimezone()
-                    .isoformat(timespec="seconds"),
-                }
-            )
-            self._save()
+            self._record_failure_locked(reason)
+
+    def record_failure_unless_active(self, reason: str) -> bool:
+        with self.lock:
+            if float(self.state["nextAttemptAt"]) > time.time():
+                return False
+            self._record_failure_locked(reason)
+            return True
 
     def clear(self) -> None:
         with self.lock:
@@ -3039,6 +3070,21 @@ class BackgroundTransientBackoff:
                 }
             )
             self._save()
+
+    def clear_if_reason(self, reason: str) -> bool:
+        with self.lock:
+            if self.state["reason"] != reason:
+                return False
+            self.state.update(
+                {
+                    "failureCount": 0,
+                    "reason": "",
+                    "nextAttemptAt": 0.0,
+                    "lastFailureAt": "",
+                }
+            )
+            self._save()
+            return True
 
     def snapshot(self) -> dict[str, object]:
         with self.lock:
@@ -3193,6 +3239,8 @@ class BackgroundCache(Generic[T]):
         )
         if reason:
             self.shared_backoff.record_failure(reason)
+        elif self.shared_backoff.clear_if_reason("ADB_UNAVAILABLE"):
+            return
         elif (
             self.clears_shared_backoff is not None
             and self.clears_shared_backoff(value)
@@ -3241,9 +3289,9 @@ class BackgroundCache(Generic[T]):
             category = VolkswagenReader.error_category(exc)
             if (
                 self.shared_backoff is not None
-                and isinstance(exc, TransientVolkswagenState)
+                and isinstance(exc, TransientBackgroundState)
             ):
-                self.shared_backoff.record_failure(exc.reason)
+                self.shared_backoff.record_failure_unless_active(exc.reason)
             if isinstance(exc, UsageLimit):
                 LOG.warning("%s refresh skipped: %s", self.name, exc)
             else:
@@ -3534,6 +3582,64 @@ class AppState:
         )
         return value
 
+    def priority_pending(self) -> bool:
+        with self.priority_lock:
+            return self.priority_waiters > 0
+
+    def background_loader(
+        self, loader: Callable[[], T], cost: int, priority: bool = False
+    ) -> Callable[[], T]:
+        def run() -> T:
+            priority_yield_until = (
+                time.monotonic()
+                + max(self.usage.background_min_interval, 0.25)
+            )
+            if priority:
+                with self.priority_lock:
+                    self.priority_waiters += 1
+            try:
+                while self.reader.action_pending.is_set():
+                    time.sleep(0.25)
+                with self.background_preflight_lock:
+                    backoff = self.background_backoff.snapshot()
+                    if int(backoff["seconds"]):
+                        raise TransientBackgroundState(
+                            str(backoff["reason"]),
+                            "Background refresh deferred by shared backoff",
+                        )
+                    try:
+                        self.reader.require_background_adb_transport()
+                    except TransientTransportState as exc:
+                        self.background_backoff.record_failure_unless_active(
+                            exc.reason
+                        )
+                        raise
+                self.usage.acquire_background(
+                    cost,
+                    yield_to=(
+                        None
+                        if priority
+                        else lambda: (
+                            self.priority_pending()
+                            and time.monotonic() < priority_yield_until
+                        )
+                    ),
+                )
+                self.reader.context.background = True
+                try:
+                    return loader()
+                except VolkswagenRateLimit as exc:
+                    self.usage.record_rate_limit(exc.reason)
+                    raise
+                finally:
+                    self.reader.context.background = False
+            finally:
+                if priority:
+                    with self.priority_lock:
+                        self.priority_waiters -= 1
+
+        return run
+
     def __init__(self) -> None:
         self.mqtt: MqttPublisher | None = None
         self.reader = VolkswagenReader()
@@ -3566,50 +3672,7 @@ class AppState:
             base_seconds=error_retry_interval,
             max_seconds=transient_backoff_max,
         )
-
-        def priority_pending() -> bool:
-            with self.priority_lock:
-                return self.priority_waiters > 0
-
-        def background(
-            loader: Callable[[], T], cost: int, priority: bool = False
-        ) -> Callable[[], T]:
-            def run() -> T:
-                priority_yield_until = (
-                    time.monotonic()
-                    + max(self.usage.background_min_interval, 0.25)
-                )
-                if priority:
-                    with self.priority_lock:
-                        self.priority_waiters += 1
-                try:
-                    while self.reader.action_pending.is_set():
-                        time.sleep(0.25)
-                    self.usage.acquire_background(
-                        cost,
-                        yield_to=(
-                            None
-                            if priority
-                            else lambda: (
-                                priority_pending()
-                                and time.monotonic() < priority_yield_until
-                            )
-                        ),
-                    )
-                    self.reader.context.background = True
-                    try:
-                        return loader()
-                    except VolkswagenRateLimit as exc:
-                        self.usage.record_rate_limit(exc.reason)
-                        raise
-                    finally:
-                        self.reader.context.background = False
-                finally:
-                    if priority:
-                        with self.priority_lock:
-                            self.priority_waiters -= 1
-
-            return run
+        self.background_preflight_lock = threading.Lock()
 
         charge_interval = ChargeRefreshInterval(charging_interval, idle_interval)
 
@@ -3630,7 +3693,7 @@ class AppState:
 
         self.charge = BackgroundCache(
             "charge",
-            background(self.reader.read, 1),
+            self.background_loader(self.reader.read, 1),
             charge_interval,
             VehicleData,
             error_retry_interval=error_retry_interval,
@@ -3647,7 +3710,7 @@ class AppState:
         )
         self.details = BackgroundCache(
             "details",
-            background(self.reader.read_details, 3, priority=True),
+            self.background_loader(self.reader.read_details, 3, priority=True),
             lambda _: detail_interval,
             DetailData,
             initial_delay=600,
@@ -3658,7 +3721,7 @@ class AppState:
         )
         self.location = BackgroundCache(
             "location",
-            background(self.reader.read_location, 1, priority=True),
+            self.background_loader(self.reader.read_location, 1, priority=True),
             lambda _: location_interval,
             LocationData,
             initial_delay=300,

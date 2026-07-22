@@ -76,9 +76,13 @@ unavailable` and explicit rate limits are not retried immediately as UI
 failures. Transient stale/unavailable states and successfully read source data
 above the stale-age threshold start one shared, persisted exponential
 background pause across charge, details and location refreshes.
-The pause resets only after the charge view reports source data below the
-configured stale-age threshold. Explicit authenticated actions remain
-available during this transient background pause.
+An unavailable ADB transport starts the same shared pause before background
+budget is consumed, so independent charge, details and location retries cannot
+inflate usage while no phone can be reached. A successful cache refresh clears
+an ADB-triggered pause. A Volkswagen/source-stale pause resets only after the
+charge view reports source data below the configured stale-age threshold.
+Explicit authenticated actions remain available during these transient
+background pauses.
 
 Usage protection is enforced inside the connector and persisted across service
 restarts. Defaults are deliberately conservative: 15 minutes while parked,
@@ -139,7 +143,8 @@ Environment variables:
 - `LOCATION_INTERVAL_SECONDS`: default `14400`
 - `BACKGROUND_MIN_INTERVAL_SECONDS`: default `300`
 - `BACKGROUND_ERROR_RETRY_SECONDS`: default `900`; failed cache refreshes wait
-  before retrying so persistent UI problems do not consume the daily budget
+  before retrying and provides the initial shared backoff interval for transient
+  app states and unavailable ADB transports
 - `BACKGROUND_TRANSIENT_BACKOFF_MAX_SECONDS`: default `7200`; maximum shared
   exponential pause after repeated transient or source-stale states
 - `SOURCE_STALE_AFTER_MINUTES`: default `60`; source ages at or above this value

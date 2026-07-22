@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.17
+
+- Prevent unavailable ADB transports from consuming background usage before
+  the Volkswagen app can be reached.
+- Coordinate charge, details and location through one persisted exponential
+  ADB backoff so parallel retry loops cannot inflate the daily usage counter.
+- Treat the Volkswagen `Limited Services` location state as a shared transient
+  app outage and clear an ADB-triggered pause after a successful cache refresh.
+
 ## 0.1.16
 
 - Recheck the live charging state immediately before start/stop taps to narrow

@@ -82,6 +82,14 @@ coordinates, screenshots, raw UI dumps, and private network details.
 - Missing, offline and unreachable ADB transports receive one bounded recovery
   attempt per command: reconnect offline devices, restart the local ADB server
   only if needed, reselect the configured transport and retry once.
+- Background work performs that bounded ADB transport check before acquiring
+  usage budget. If no transport is available, charge, details and location use
+  one shared persisted exponential `ADB_UNAVAILABLE` pause and consume no
+  background unit. Any later successful cache refresh clears that transport
+  pause. App operations that begin after a successful preflight retain their
+  normal weighted cost even if ADB fails later during the operation.
+- The localized `Limited Services` / not-logged-into-vehicle location state is
+  classified as shared `APP_UNAVAILABLE` instead of a generic per-cache retry.
 - A charging-to-connected-idle (`C` to `B`) transition schedules exactly one
   follow-up at the charging interval before returning to the idle interval.
   This narrows short PV-pause and target-SoC gaps without creating continuous
@@ -233,6 +241,17 @@ coordinates, screenshots, raw UI dumps, and private network details.
   restored the original temperature.
 
 ## Verification
+
+- On 2026-07-22, the shared ADB-unavailable background backoff fix for GitHub
+  issue #21 was deployed to the production USB runtime. A natural due charge
+  refresh exercised the new ADB preflight and succeeded, advancing the cache
+  timestamp and persisted background counter by exactly one. No vehicle action
+  was used. The exact production limits of 180 background operations and 20
+  actions were restored without resetting counters; `/health` was healthy,
+  USB ADB remained selected, no cooldown or background backoff was active, and
+  recent service logs contained no warnings, errors or tracebacks. The deployed
+  file matched the locally tested SHA-256 and all temporary root-only test and
+  rollback files were removed.
 
 - On 2026-07-21, the immediate pre-tap charging-state recheck was deployed to
   the production USB runtime and live-verified with Volkswagen app `4.1.1`.

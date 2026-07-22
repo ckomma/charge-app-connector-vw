@@ -27,6 +27,7 @@ from vw_app_connector import (
     IdempotencyConflict,
     LocationData,
     RequestHandler,
+    TransientTransportState,
     TransientVolkswagenState,
     UsageLimit,
     UsageLimiter,
@@ -2407,6 +2408,90 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.error, "failed")
         self.assertGreaterEqual(cache.next_attempt_monotonic, before + 899)
 
+    def test_adb_preflight_defers_all_caches_without_consuming_budget(self):
+        state = object.__new__(AppState)
+        state.priority_lock = threading.Lock()
+        state.priority_waiters = 0
+        state.reader = Mock()
+        state.reader.action_pending = threading.Event()
+        state.reader.context = SimpleNamespace(background=False)
+        state.reader.require_background_adb_transport.side_effect = (
+            TransientTransportState(
+                "ADB_UNAVAILABLE",
+                "ADB transport unavailable before Volkswagen app access",
+            )
+        )
+        state.usage = Mock()
+        state.usage.background_min_interval = 0
+
+        with TemporaryDirectory() as directory, patch("threading.Thread.start"):
+            backoff = BackgroundTransientBackoff(
+                Path(directory) / "background-backoff.json",
+                base_seconds=900,
+                max_seconds=7200,
+                jitter_ratio=0,
+            )
+            state.background_backoff = backoff
+            state.background_preflight_lock = threading.Lock()
+            charge_loader = state.background_loader(Mock(), 1)
+            details_loader = Mock(return_value=DetailData())
+            charge = BackgroundCache(
+                "charge",
+                charge_loader,
+                lambda _: 900,
+                VehicleData,
+                shared_backoff=backoff,
+            )
+            details = BackgroundCache(
+                "details",
+                details_loader,
+                lambda _: 43200,
+                DetailData,
+                shared_backoff=backoff,
+            )
+
+            failed = charge.refresh()
+            deferred = details.refresh()
+
+        self.assertEqual(failed.errorCategory, "ADB_UNAVAILABLE")
+        self.assertEqual(deferred.errorCategory, "ADB_UNAVAILABLE")
+        self.assertEqual(backoff.snapshot()["failureCount"], 1)
+        state.usage.acquire_background.assert_not_called()
+        details_loader.assert_not_called()
+
+    def test_successful_cache_refresh_clears_adb_backoff(self):
+        with TemporaryDirectory() as directory, patch("threading.Thread.start"):
+            backoff = BackgroundTransientBackoff(
+                Path(directory) / "background-backoff.json",
+                base_seconds=900,
+                max_seconds=7200,
+                jitter_ratio=0,
+            )
+            backoff.record_failure("ADB_UNAVAILABLE")
+            with backoff.lock:
+                backoff.state["nextAttemptAt"] = time.time() - 1
+            cache = BackgroundCache(
+                "details",
+                DetailData,
+                lambda _: 43200,
+                DetailData,
+                shared_backoff=backoff,
+            )
+            cache.refresh()
+
+        self.assertEqual(backoff.snapshot()["failureCount"], 0)
+
+    def test_background_adb_preflight_raises_after_bounded_recovery(self):
+        reader = object.__new__(VolkswagenReader)
+        with (
+            patch.object(reader, "adb_transport_ready", side_effect=(False, False)),
+            patch.object(reader, "recover_adb_transport") as recover,
+        ):
+            with self.assertRaises(TransientTransportState) as raised:
+                reader.require_background_adb_transport()
+        self.assertEqual(raised.exception.reason, "ADB_UNAVAILABLE")
+        recover.assert_called_once_with()
+
     def test_transient_background_backoff_escalates_and_persists(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "background-backoff.json"
@@ -3015,8 +3100,10 @@ class ParserTests(unittest.TestCase):
                         return_value=limited,
                     ),
                 ):
-                    with self.assertRaisesRegex(RuntimeError, "limited services"):
+                    with self.assertRaises(TransientVolkswagenState) as raised:
                         reader._read_location()
+        self.assertEqual(raised.exception.reason, "APP_UNAVAILABLE")
+        self.assertIn("limited services", str(raised.exception))
 
     def test_location_wait_dismisses_map_notice_before_car_locate(self):
         notice = ET.fromstring(
