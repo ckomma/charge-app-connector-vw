@@ -2207,6 +2207,22 @@ class ParserTests(unittest.TestCase):
             ("Example Street 1", "Geparkt seit 2 Std."),
         )
 
+    def test_location_details_parse_vw_421_location_card(self):
+        """VW 4.2.1 exposes the address and parking time in one card."""
+        root = ET.fromstring(
+            """<hierarchy>
+            <node class="android.widget.TextView"
+                text="Västmanlandsgatan 16, SE-262 43&#10;Parked since 4h 48 mins"
+                bounds="[30,1676][352,1732]"/>
+            <node class="android.widget.TextView" text="Route"
+                bounds="[30,1807][176,1855]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(
+            VolkswagenReader.parse_location_details(root),
+            ("Västmanlandsgatan 16, SE-262 43", "Parked since 4h 48 mins"),
+        )
+
     def test_location_details_parse_separate_address_text_view(self):
         root = ET.fromstring(
             """<hierarchy>
@@ -2782,7 +2798,7 @@ class ParserTests(unittest.TestCase):
         )
         map_root = ET.fromstring(
             """<hierarchy>
-            <node content-desc="Car Locate Button" bounds="[20,20][120,120]"/>
+            <node content-desc="Find vehicle" bounds="[1116,1370][1152,1406]"/>
             </hierarchy>"""
         )
         centered = ET.fromstring(
@@ -2834,8 +2850,10 @@ class ParserTests(unittest.TestCase):
         self.assertEqual((result.latitude, result.longitude), (48.114598, 11.480513))
         maps_stop = ("am", "force-stop", "com.google.android.apps.maps")
         route_tap = ("input", "tap", "562", "2014")
+        find_vehicle_tap = ("input", "tap", "1134", "1388")
         self.assertIn(maps_stop, calls)
         self.assertIn(route_tap, calls)
+        self.assertIn(find_vehicle_tap, calls)
         self.assertLess(calls.index(maps_stop), calls.index(route_tap))
 
     def test_location_retries_vehicle_marker_at_centered_pin(self):

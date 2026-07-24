@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.18
+
+- Support the Volkswagen navigation map's `Find vehicle` selector alongside
+  the older `Car Locate Button` selector when reading vehicle location.
+
 ## 0.1.17
 
 - Prevent unavailable ADB transports from consuming background usage before

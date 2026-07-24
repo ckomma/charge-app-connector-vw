@@ -1314,7 +1314,9 @@ class VolkswagenReader:
                 self.dump_ui_with_overlay_recovery(remote_name)
             )
             try:
-                self.described_node_center(root, "Car Locate Button")
+                self.described_node_center_any(
+                    root, ("Car Locate Button", "Find vehicle")
+                )
                 return root
             except RuntimeError:
                 if time.monotonic() >= deadline:
@@ -1357,6 +1359,7 @@ class VolkswagenReader:
             "Map Back Button",
             "Map Settings Button",
             "Car Locate Button",
+            "Find vehicle",
             "Device Location Button",
             "Close details view",
         }
@@ -2088,7 +2091,9 @@ class VolkswagenReader:
         time.sleep(self.detail_wait)
 
         map_root = self.wait_for_car_locate_button("vw-location-map.xml")
-        x, y = self.described_node_center(map_root, "Car Locate Button")
+        x, y = self.described_node_center_any(
+            map_root, ("Car Locate Button", "Find vehicle")
+        )
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
 
@@ -2113,7 +2118,9 @@ class VolkswagenReader:
                     self.shell("input", "keyevent", "KEYCODE_BACK")
                     time.sleep(1)
                 map_root = self.wait_for_car_locate_button("vw-location-map.xml")
-                x, y = self.described_node_center(map_root, "Car Locate Button")
+                x, y = self.described_node_center_any(
+                    map_root, ("Car Locate Button", "Find vehicle")
+                )
                 self.shell("input", "tap", str(x), str(y))
                 time.sleep(self.detail_wait)
                 centered_map = self.dump_ui("vw-location-centered-map.xml")
