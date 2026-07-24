@@ -2020,6 +2020,19 @@ class ParserTests(unittest.TestCase):
             ((540, 812), (540, 992)),
         )
 
+    def test_vehicle_marker_tap_centers_prefer_exposed_map_hit_target(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node class="android.view.TextureView" bounds="[0,0][1200,1891]"/>
+            <node class="android.view.View" clickable="true" bounds="[579,778][621,829]"/>
+            <node class="android.view.View" clickable="true" bounds="[604,1757][765,1808]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(
+            VolkswagenReader.vehicle_marker_tap_centers(root),
+            ((600, 803), (600, 945)),
+        )
+
     def test_vehicle_name_is_read_from_german_and_english_overview(self):
         for description in (
             "Ihr Fahrzeug: ID.7 Tourer Pro. Gerade synchronisiert.",
