@@ -2212,7 +2212,7 @@ class ParserTests(unittest.TestCase):
         root = ET.fromstring(
             """<hierarchy>
             <node class="android.widget.TextView"
-                text="Västmanlandsgatan 16, SE-262 43&#10;Parked since 4h 48 mins"
+                text="Example Street 16, SE-123 45&#10;Parked since 4h 48 mins"
                 bounds="[30,1676][352,1732]"/>
             <node class="android.widget.TextView" text="Route"
                 bounds="[30,1807][176,1855]"/>
@@ -2220,7 +2220,7 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(
             VolkswagenReader.parse_location_details(root),
-            ("Västmanlandsgatan 16, SE-262 43", "Parked since 4h 48 mins"),
+            ("Example Street 16, SE-123 45", "Parked since 4h 48 mins"),
         )
 
     def test_location_details_parse_separate_address_text_view(self):
