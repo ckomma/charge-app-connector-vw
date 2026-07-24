@@ -1095,14 +1095,55 @@ class VolkswagenReader:
         return (x, y - max(40, round(height * 0.075)))
 
     @classmethod
+    def vehicle_marker_center(cls, root: ET.Element) -> tuple[int, int] | None:
+        """Return the explicit, anonymous Google Maps vehicle marker if exposed.
+
+        Recent Volkswagen app versions expose the centered vehicle marker as a
+        small clickable view without a label. Prefer that actual hit target to
+        a calculated coordinate, but only when it is close to the centered pin
+        position and has no semantics of its own.
+        """
+        expected_x, expected_y = cls.vehicle_marker_label_center(root)
+        candidates: list[tuple[int, tuple[int, int]]] = []
+        for node in root.iter():
+            if node.attrib.get("class") != "android.view.View":
+                continue
+            if node.attrib.get("clickable") != "true":
+                continue
+            if any(
+                node.attrib.get(key, "").strip()
+                for key in ("text", "content-desc", "resource-id")
+            ):
+                continue
+            bounds = cls.node_bounds(node)
+            center = cls.node_center(node)
+            if not bounds or not center:
+                continue
+            left, top, right, bottom = bounds
+            width, height = right - left, bottom - top
+            if not (20 <= width <= 100 and 20 <= height <= 120):
+                continue
+            distance = abs(center[0] - expected_x) + abs(center[1] - expected_y)
+            if distance <= 180:
+                candidates.append((distance, center))
+        return min(candidates, key=lambda item: item[0])[1] if candidates else None
+
+    @classmethod
     def vehicle_marker_tap_centers(
         cls, root: ET.Element
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> tuple[tuple[int, int], ...]:
         # App and Maps versions differ: some expose a tappable label above the
         # centered pin, while others expose only the pin itself in the canvas.
-        # Keep the live-verified label position first, then use the pin center
-        # as one bounded fallback after re-centering the map.
-        return (cls.vehicle_marker_label_center(root), cls.map_view_center(root))
+        # Prefer the live hit target when the map provides one, then preserve
+        # the label and pin-coordinate fallbacks for older app versions.
+        centers: list[tuple[int, int]] = []
+        marker = cls.vehicle_marker_center(root)
+        if marker:
+            centers.append(marker)
+        for center in (cls.vehicle_marker_label_center(root), cls.map_view_center(root)):
+            if center not in centers:
+                centers.append(center)
+        return tuple(centers)
 
     @classmethod
     def vehicle_marker_is_selected(cls, root: ET.Element, vehicle_name: str) -> bool:
@@ -2099,14 +2140,14 @@ class VolkswagenReader:
 
         centered_map = self.dump_ui("vw-location-centered-map.xml")
         details = centered_map
-        for marker_attempt in range(2):
-            x, y = self.vehicle_marker_tap_centers(centered_map)[marker_attempt]
+        marker_centers = self.vehicle_marker_tap_centers(centered_map)
+        for marker_attempt, (x, y) in enumerate(marker_centers):
             self.shell("input", "tap", str(x), str(y))
             time.sleep(self.detail_wait)
             details = self.dump_ui("vw-location-details.xml")
             if self.vehicle_marker_is_selected(details, vehicle_name):
                 break
-            if marker_attempt == 0:
+            if marker_attempt < len(marker_centers) - 1:
                 # A missed label tap leaves the map open; a nearby charging POI
                 # opens a details card. Close only the latter before centering
                 # the vehicle again for the pin-center fallback.
