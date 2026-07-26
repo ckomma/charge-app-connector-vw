@@ -1085,7 +1085,14 @@ class VolkswagenReader:
                 center = cls.node_center(node)
                 if center:
                     return center
-        return (540, 786)
+        # VW 4.2 dumps can omit both semantic map nodes. The centered map
+        # fills the visible viewport, so its center anchors marker selection
+        # better than the legacy fixed phone coordinates.
+        try:
+            width, height = cls.viewport_size(root)
+        except RuntimeError:
+            return (540, 786)
+        return (width // 2, height // 2)
 
     @classmethod
     def vehicle_marker_label_center(cls, root: ET.Element) -> tuple[int, int]:
@@ -1097,20 +1104,79 @@ class VolkswagenReader:
         return (x, y - max(40, round(height * 0.075)))
 
     @classmethod
+    def vehicle_marker_center(cls, root: ET.Element) -> tuple[int, int] | None:
+        """Return the explicit, anonymous Google Maps vehicle marker if exposed.
+
+        Recent Volkswagen app versions expose the centered vehicle marker as a
+        small clickable view without a label.  Prefer that actual hit target to
+        a calculated coordinate.  A single marker-sized candidate is trusted
+        directly because Car Locate / Find vehicle has just centered the map on
+        the vehicle; the dump may lack the map view geometry needed for a
+        reliable calculated pin position.  With several candidates (nearby POI
+        markers) only the one close to the calculated pin position is trusted.
+        """
+        candidates: list[tuple[int, int]] = []
+        for node in root.iter():
+            if node.attrib.get("class") != "android.view.View":
+                continue
+            if node.attrib.get("clickable") != "true":
+                continue
+            if any(node.attrib.get(key, "").strip() for key in ("text", "content-desc", "resource-id")):
+                continue
+            bounds = cls.node_bounds(node)
+            center = cls.node_center(node)
+            if not bounds or not center:
+                continue
+            left, top, right, bottom = bounds
+            width, height = right - left, bottom - top
+            if not (20 <= width <= 100 and 20 <= height <= 120):
+                continue
+            candidates.append(center)
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+        expected_x, expected_y = cls.vehicle_marker_label_center(root)
+        distance, center = min(
+            (abs(x - expected_x) + abs(y - expected_y), (x, y))
+            for x, y in candidates
+        )
+        return center if distance <= 180 else None
+
+    @classmethod
     def vehicle_marker_tap_centers(
         cls, root: ET.Element
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> tuple[tuple[int, int], ...]:
         # App and Maps versions differ: some expose a tappable label above the
         # centered pin, while others expose only the pin itself in the canvas.
-        # Keep the live-verified label position first, then use the pin center
-        # as one bounded fallback after re-centering the map.
-        return (cls.vehicle_marker_label_center(root), cls.map_view_center(root))
+        # Prefer the live hit target when the map provides one, then preserve
+        # the label and pin-coordinate fallbacks for older app versions.
+        centers: list[tuple[int, int]] = []
+        marker = cls.vehicle_marker_center(root)
+        if marker:
+            centers.append(marker)
+        for center in (cls.vehicle_marker_label_center(root), cls.map_view_center(root)):
+            if center not in centers:
+                centers.append(center)
+        return tuple(centers)
 
     @classmethod
     def vehicle_marker_is_selected(cls, root: ET.Element, vehicle_name: str) -> bool:
-        return not vehicle_name or any(
-            vehicle_name.casefold() in value.casefold()
-            for value in cls.strings(root)
+        values = cls.strings(root)
+        if not vehicle_name or any(
+            vehicle_name.casefold() in value.casefold() for value in values
+        ):
+            return True
+        # The map bottom sheet can name the vehicle differently from the
+        # overview greeting.  A parked-duration line identifies the vehicle
+        # details sheet; nearby POI cards never show one.
+        return any(
+            re.search(
+                r"(?:Geparkt seit|Parked since|Parked for)\b",
+                value,
+                re.IGNORECASE,
+            )
+            for value in values
         )
 
     @classmethod
@@ -1316,7 +1382,9 @@ class VolkswagenReader:
                 self.dump_ui_with_overlay_recovery(remote_name)
             )
             try:
-                self.described_node_center(root, "Car Locate Button")
+                self.described_node_center_any(
+                    root, ("Car Locate Button", "Find vehicle")
+                )
                 return root
             except RuntimeError:
                 if time.monotonic() >= deadline:
@@ -1359,6 +1427,7 @@ class VolkswagenReader:
             "Map Back Button",
             "Map Settings Button",
             "Car Locate Button",
+            "Find vehicle",
             "Device Location Button",
             "Close details view",
         }
@@ -2090,23 +2159,35 @@ class VolkswagenReader:
         time.sleep(self.detail_wait)
 
         map_root = self.wait_for_car_locate_button("vw-location-map.xml")
-        x, y = self.described_node_center(map_root, "Car Locate Button")
+        x, y = self.described_node_center_any(
+            map_root, ("Car Locate Button", "Find vehicle")
+        )
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
 
         centered_map = self.dump_ui("vw-location-centered-map.xml")
         details = centered_map
-        for marker_attempt in range(2):
-            x, y = self.vehicle_marker_tap_centers(centered_map)[marker_attempt]
+        tried: set[tuple[int, int]] = set()
+        for marker_attempt in range(3):
+            candidates = [
+                center
+                for center in self.vehicle_marker_tap_centers(centered_map)
+                if center not in tried
+            ]
+            if not candidates:
+                break
+            x, y = candidates[0]
+            tried.add((x, y))
             self.shell("input", "tap", str(x), str(y))
             time.sleep(self.detail_wait)
             details = self.dump_ui("vw-location-details.xml")
             if self.vehicle_marker_is_selected(details, vehicle_name):
                 break
-            if marker_attempt == 0:
+            if marker_attempt < 2:
                 # A missed label tap leaves the map open; a nearby charging POI
                 # opens a details card. Close only the latter before centering
-                # the vehicle again for the pin-center fallback.
+                # the vehicle again. Re-centering can move the map, so marker
+                # candidates are recomputed from the fresh dump above.
                 try:
                     self.described_node_center(details, "Route")
                 except RuntimeError:
@@ -2115,7 +2196,9 @@ class VolkswagenReader:
                     self.shell("input", "keyevent", "KEYCODE_BACK")
                     time.sleep(1)
                 map_root = self.wait_for_car_locate_button("vw-location-map.xml")
-                x, y = self.described_node_center(map_root, "Car Locate Button")
+                x, y = self.described_node_center_any(
+                    map_root, ("Car Locate Button", "Find vehicle")
+                )
                 self.shell("input", "tap", str(x), str(y))
                 time.sleep(self.detail_wait)
                 centered_map = self.dump_ui("vw-location-centered-map.xml")
