@@ -40,7 +40,9 @@ response.
 `/health` separates the Volkswagen rate-limit cooldown from the transient
 background backoff and exposes vehicle source age, consecutive stale reads and
 the last observed intelligent power-saving notice. Cached API responses remain
-available during either pause.
+available during either pause. `statusReasons` explains operational connector
+degradation, while `dataWarnings` reports old Volkswagen source data separately;
+a `SOURCE_DATA_STALE` warning alone leaves connector health at `ok`.
 
 `/details` and `/location` perform slower multi-page reads and spend background
 budget. Use them only when you intentionally want to refresh those caches.
@@ -63,7 +65,10 @@ Set `mqtt_host` to your broker hostname or IP. The add-on publishes retained
 state from existing connector cache updates and Home Assistant discovery
 payloads. MQTT does not trigger additional Volkswagen app refreshes and does
 not accept vehicle write commands. Write actions remain REST-only through the
-authenticated `/action/*` endpoints.
+authenticated `/action/*` endpoints. Home Assistant receives separate entities
+for vehicle source age, stale source data, background-backoff reason and
+remaining backoff time instead of folding old parked-vehicle data into connector
+health.
 
 ## USB ADB
 

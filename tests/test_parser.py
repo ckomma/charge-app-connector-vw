@@ -132,8 +132,100 @@ class ParserTests(unittest.TestCase):
         }
         health = state.health()
         self.assertEqual(health.status, "degraded")
+        self.assertEqual(health.statusReasons, ("UNVERIFIED_APP_VERSION",))
         self.assertFalse(health.actionAvailable)
         self.assertEqual(health.actionBlockedReason, "UNVERIFIED_APP_VERSION")
+
+    def test_health_keeps_source_stale_data_separate_from_connector_status(self):
+        with TemporaryDirectory() as directory:
+            state = object.__new__(AppState)
+            state.verified_app_version = "4.1.1"
+            state.reader = Mock()
+            state.reader.phone_health.return_value = HealthData(
+                adbState="device", appVersion="4.1.1"
+            )
+            state.charge = SimpleNamespace(
+                last_success_at="now",
+                refreshing=False,
+                value=VehicleData(
+                    status="B",
+                    sourceAgeMinutes=75,
+                    sourceFreshnessKnown=True,
+                    sourceStale=True,
+                ),
+                last_error="",
+                last_error_category="",
+                age=lambda: 1,
+            )
+            state.details = SimpleNamespace(last_success_at="", age=lambda: 0)
+            state.location = SimpleNamespace(last_success_at="", age=lambda: 0)
+            state.usage = Mock()
+            state.usage.snapshot.return_value = {
+                "backgroundUsed": 1,
+                "backgroundLimit": 180,
+                "actionsUsed": 0,
+                "actionsLimit": 20,
+                "cooldownSeconds": 0,
+            }
+            state.background_backoff = BackgroundTransientBackoff(
+                Path(directory) / "backoff.json",
+                base_seconds=900,
+                max_seconds=7200,
+                jitter_ratio=0,
+            )
+            state.background_backoff.record_failure("SOURCE_DATA_STALE")
+
+            health = state.health()
+
+            self.assertEqual(health.status, "ok")
+            self.assertEqual(health.statusReasons, ())
+            self.assertEqual(health.dataWarnings, ("SOURCE_DATA_STALE",))
+            self.assertTrue(health.vehicleSourceStale)
+            self.assertEqual(health.vehicleSourceAgeMinutes, 75)
+            self.assertEqual(
+                health.backgroundBackoffReason, "SOURCE_DATA_STALE"
+            )
+            self.assertGreater(health.backgroundBackoffSeconds, 0)
+
+    def test_health_reports_operational_backoff_as_degraded_with_reason(self):
+        with TemporaryDirectory() as directory:
+            state = object.__new__(AppState)
+            state.verified_app_version = "4.1.1"
+            state.reader = Mock()
+            state.reader.phone_health.return_value = HealthData(
+                adbState="device", appVersion="4.1.1"
+            )
+            state.charge = SimpleNamespace(
+                last_success_at="now",
+                refreshing=False,
+                value=VehicleData(status="B"),
+                last_error="",
+                last_error_category="",
+                age=lambda: 1,
+            )
+            state.details = SimpleNamespace(last_success_at="", age=lambda: 0)
+            state.location = SimpleNamespace(last_success_at="", age=lambda: 0)
+            state.usage = Mock()
+            state.usage.snapshot.return_value = {
+                "backgroundUsed": 1,
+                "backgroundLimit": 180,
+                "actionsUsed": 0,
+                "actionsLimit": 20,
+                "cooldownSeconds": 0,
+            }
+            state.background_backoff = BackgroundTransientBackoff(
+                Path(directory) / "backoff.json",
+                base_seconds=900,
+                max_seconds=7200,
+                jitter_ratio=0,
+            )
+            state.background_backoff.record_failure("APP_UNAVAILABLE")
+
+            health = state.health()
+
+            self.assertEqual(health.status, "degraded")
+            self.assertEqual(health.statusReasons, ("APP_UNAVAILABLE",))
+            self.assertEqual(health.dataWarnings, ())
 
     def test_action_job_lifecycle(self):
         completed = threading.Event()
@@ -564,6 +656,22 @@ class ParserTests(unittest.TestCase):
             topics,
         )
         self.assertIn(
+            "homeassistant/sensor/vw-app-connector/vehicle_source_age/config",
+            topics,
+        )
+        self.assertIn(
+            "homeassistant/binary_sensor/vw-app-connector/vehicle_source_stale/config",
+            topics,
+        )
+        self.assertIn(
+            "homeassistant/sensor/vw-app-connector/background_backoff_reason/config",
+            topics,
+        )
+        self.assertIn(
+            "homeassistant/sensor/vw-app-connector/background_backoff/config",
+            topics,
+        )
+        self.assertIn(
             "homeassistant/binary_sensor/vw-app-connector/locked/config",
             topics,
         )
@@ -602,6 +710,17 @@ class ParserTests(unittest.TestCase):
         health_config = json.loads(health_config_call[0][1])
         self.assertEqual(health_config["name"], "Connector health")
         self.assertEqual(health_config["state_topic"], "vw_app_connector/health")
+        source_stale_config_call = next(
+            call for call in mqtt.client.published
+            if call[0][0]
+            == "homeassistant/binary_sensor/vw-app-connector/vehicle_source_stale/config"
+        )
+        source_stale_config = json.loads(source_stale_config_call[0][1])
+        self.assertEqual(source_stale_config["device_class"], "problem")
+        self.assertEqual(
+            source_stale_config["value_template"],
+            "{{ 'ON' if value_json.vehicleSourceStale else 'OFF' }}",
+        )
 
         location_config_call = next(
             call for call in mqtt.client.published

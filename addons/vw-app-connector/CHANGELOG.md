@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Keep successfully read but old Volkswagen source data as a separate data
+  warning instead of degrading an otherwise healthy connector.
+- Expose machine-readable health reasons and dedicated MQTT entities for
+  vehicle source age, stale source data and background backoff.
+
 ## 0.1.17
 
 - Prevent unavailable ADB transports from consuming background usage before

@@ -52,7 +52,11 @@ remain authoritative.
 `GET /details` returns the target temperature, automatic window heating,
 front climate zones, odometer, service interval, warning status and departure
 times. `GET /health` is a cheap endpoint that does not wake the display. It
-reports ADB/app status, phone battery telemetry and cache ages.
+reports ADB/app status, phone battery telemetry and cache ages. Machine-readable
+`statusReasons` explain connector errors and degraded states, while
+`dataWarnings` report separate vehicle-data quality conditions. Successfully
+read Volkswagen source data above the stale-age threshold is reported as
+`SOURCE_DATA_STALE` without degrading an otherwise healthy connector.
 
 `GET /capabilities` returns a read-only description of the connector's current
 operational surface, including supported endpoints, actions, ADB transport,
@@ -431,10 +435,12 @@ environment used by the service.
 Set `MQTT_HOST`, `MQTT_USERNAME` and `MQTT_PASSWORD` in
 `/etc/default/vw-app-connector`, then restart the service. Home Assistant
 automatically creates a `Volkswagen App Connector` device with charge, range,
-charging, climate, lock, vehicle-detail and location entities. No HA YAML is
-required. MQTT publishes retained copies of existing cache updates and never
-causes an additional Volkswagen app operation. REST remains enabled for evcc
-and existing clients.
+charging, climate, lock, vehicle-detail and location entities. Connector health
+is separate from the vehicle source-age, source-stale and background-backoff
+entities, so parked vehicle data can become old without falsely reporting a
+connector failure. No HA YAML is required. MQTT publishes retained copies of
+existing cache updates and never causes an additional Volkswagen app operation.
+REST remains enabled for evcc and existing clients.
 
 The MQTT location tracker publishes GPS attributes only. Home Assistant uses
 its configured zones to derive `home`, `not_home` or a zone name; the

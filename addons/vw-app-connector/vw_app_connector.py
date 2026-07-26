@@ -386,6 +386,8 @@ class DetailData:
 @dataclass
 class HealthData:
     status: str = "ok"
+    statusReasons: tuple[str, ...] = ()
+    dataWarnings: tuple[str, ...] = ()
     adbState: str = ""
     adbMode: str = ""
     adbTransport: str = ""
@@ -4300,16 +4302,47 @@ class AppState:
         value.usageCooldownProbeAvailableInSeconds = int(
             usage.get("cooldownProbeAvailableInSeconds", 0)
         )
-        if self.charge.value is None or value.adbState != "device":
+        status_reasons: list[str] = []
+
+        def add_status_reason(reason: str) -> None:
+            if reason and reason not in status_reasons:
+                status_reasons.append(reason)
+
+        if self.charge.value is None:
+            add_status_reason("CHARGE_DATA_UNAVAILABLE")
+        if value.adbState != "device":
+            add_status_reason("ADB_UNAVAILABLE")
+        if status_reasons:
             value.status = "error"
-        elif (
-            self.charge.last_error
-            or value.usageCooldownSeconds
-            or value.backgroundBackoffSeconds
-            or value.vehicleSourceStale
-            or not value.actionAvailable
-        ):
-            value.status = "degraded"
+        else:
+            if self.charge.last_error:
+                add_status_reason(
+                    str(
+                        getattr(self.charge, "last_error_category", "")
+                        or "CHARGE_REFRESH_FAILED"
+                    )
+                )
+            if value.usageCooldownSeconds:
+                add_status_reason(
+                    value.usageCooldownReason or "RATE_LIMIT_COOLDOWN"
+                )
+            if (
+                value.backgroundBackoffSeconds
+                and value.backgroundBackoffReason != "SOURCE_DATA_STALE"
+            ):
+                add_status_reason(
+                    value.backgroundBackoffReason or "BACKGROUND_BACKOFF"
+                )
+            if not value.actionAvailable:
+                add_status_reason(
+                    value.actionBlockedReason or "ACTIONS_UNAVAILABLE"
+                )
+            if status_reasons:
+                value.status = "degraded"
+        value.statusReasons = tuple(status_reasons)
+        value.dataWarnings = (
+            ("SOURCE_DATA_STALE",) if value.vehicleSourceStale else ()
+        )
         return value
 
 
