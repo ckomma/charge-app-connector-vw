@@ -10,6 +10,10 @@ truth across Windows, Linux, Termux/mobile, and Codex Cloud.
   behavior.
 - Use the repo-scoped `$vw-app-connector-manager` skill for implementation,
   deployment, diagnostics, and release work.
+- This project uses a direct-to-`main` workflow. Do not create or push separate
+  feature branches and do not open pull requests unless the user explicitly
+  requests an exception. Commit and push approved project changes directly to
+  `main`.
 - Keep German and English Volkswagen app localizations supported.
 - Preserve existing API response fields and evcc/Home Assistant compatibility
   unless the requested change explicitly requires a breaking change.
