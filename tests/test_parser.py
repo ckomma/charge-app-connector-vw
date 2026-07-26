@@ -1072,6 +1072,41 @@ class ParserTests(unittest.TestCase):
             ),
         )
 
+    def test_charging_option_scrolls_when_switch_is_behind_bottom_navigation(self):
+        clipped = ET.fromstring(
+            """<hierarchy>
+            <node bounds="[0,0][1080,2400]"/>
+            <node text="Automatically release AC connector"
+                bounds="[44,2163][893,2168]"/>
+            <node checkable="true" clickable="true" checked="false"
+                bounds="[44,2127][1036,2168]"/>
+            </hierarchy>"""
+        )
+        visible = ET.fromstring(
+            """<hierarchy>
+            <node bounds="[0,0][1080,2400]"/>
+            <node text="Automatically release AC connector"
+                bounds="[44,986][893,1047]"/>
+            <node checkable="true" clickable="true" checked="false"
+                bounds="[44,950][1036,1082]"/>
+            </hierarchy>"""
+        )
+        reader = object.__new__(VolkswagenReader)
+        reader.shell = Mock()
+        reader.dump_ui_with_overlay_recovery = Mock(return_value=visible)
+
+        root, option = reader.checked_option_with_scroll(
+            clipped,
+            reader.AUTO_RELEASE_AC_LABELS,
+            "vw-charging-option-scroll.xml",
+        )
+
+        self.assertIs(root, visible)
+        self.assertEqual(option.attrib["bounds"], "[44,950][1036,1082]")
+        reader.shell.assert_called_once_with(
+            "input", "swipe", "540", "1920", "540", "1080", "300"
+        )
+
     def test_gte_charging_settings_accept_missing_battery_care(self):
         root = ET.fromstring(
             """<hierarchy>
