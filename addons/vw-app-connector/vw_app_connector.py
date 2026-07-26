@@ -1083,7 +1083,14 @@ class VolkswagenReader:
                 center = cls.node_center(node)
                 if center:
                     return center
-        return (540, 786)
+        # VW 4.2 dumps can omit both semantic map nodes. The centered map
+        # fills the visible viewport, so its center anchors marker selection
+        # better than the legacy fixed phone coordinates.
+        try:
+            width, height = cls.viewport_size(root)
+        except RuntimeError:
+            return (540, 786)
+        return (width // 2, height // 2)
 
     @classmethod
     def vehicle_marker_label_center(cls, root: ET.Element) -> tuple[int, int]:
@@ -2158,17 +2165,27 @@ class VolkswagenReader:
 
         centered_map = self.dump_ui("vw-location-centered-map.xml")
         details = centered_map
-        marker_centers = self.vehicle_marker_tap_centers(centered_map)
-        for marker_attempt, (x, y) in enumerate(marker_centers):
+        tried: set[tuple[int, int]] = set()
+        for marker_attempt in range(3):
+            candidates = [
+                center
+                for center in self.vehicle_marker_tap_centers(centered_map)
+                if center not in tried
+            ]
+            if not candidates:
+                break
+            x, y = candidates[0]
+            tried.add((x, y))
             self.shell("input", "tap", str(x), str(y))
             time.sleep(self.detail_wait)
             details = self.dump_ui("vw-location-details.xml")
             if self.vehicle_marker_is_selected(details, vehicle_name):
                 break
-            if marker_attempt < len(marker_centers) - 1:
+            if marker_attempt < 2:
                 # A missed label tap leaves the map open; a nearby charging POI
                 # opens a details card. Close only the latter before centering
-                # the vehicle again for the pin-center fallback.
+                # the vehicle again. Re-centering can move the map, so marker
+                # candidates are recomputed from the fresh dump above.
                 try:
                     self.described_node_center(details, "Route")
                 except RuntimeError:

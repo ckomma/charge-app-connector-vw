@@ -2046,7 +2046,23 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(
             VolkswagenReader.vehicle_marker_tap_centers(root),
-            ((600, 803), (540, 642), (540, 786)),
+            ((600, 803), (600, 816), (600, 960)),
+        )
+
+    def test_vehicle_marker_tap_centers_pick_viewport_marker_without_map_view(self):
+        # Multiple anonymous candidates while the dump lacks both the
+        # TextureView and the catNavMapFragment: the marker close to the
+        # visible viewport center must win, not legacy phone coordinates.
+        root = ET.fromstring(
+            """<hierarchy>
+            <node class="android.widget.FrameLayout" bounds="[0,0][1200,1920]"/>
+            <node class="android.view.View" clickable="true" bounds="[579,778][621,829]"/>
+            <node class="android.view.View" clickable="true" bounds="[200,400][242,451]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(
+            VolkswagenReader.vehicle_marker_tap_centers(root)[0],
+            (600, 803),
         )
 
     def test_vehicle_marker_tap_centers_pick_nearest_of_multiple_markers(self):
@@ -3073,6 +3089,88 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.parkedDuration, "Parked since 2 hours")
         self.assertEqual((result.latitude, result.longitude), (48.114598, 11.480513))
         self.assertIn(("input", "tap", "600", "803"), calls)
+
+    def test_location_read_recomputes_marker_candidates_after_recenter(self):
+        # Re-centering after closing a POI card can move the map, so marker
+        # candidates must come from the fresh centered-map dump, not from
+        # coordinates computed against the previous one.
+        start = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Your vehicle: Example Vehicle. Just synced."/>
+            <node content-desc="Navigation Tab" bounds="[10,10][110,110]"/>
+            </hierarchy>"""
+        )
+        map_root = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Car Locate Button" bounds="[20,20][120,120]"/>
+            </hierarchy>"""
+        )
+        centered_first = ET.fromstring(
+            """<hierarchy>
+            <node class="android.view.TextureView" bounds="[0,0][1080,2148]"/>
+            </hierarchy>"""
+        )
+        poi_card = ET.fromstring(
+            """<hierarchy>
+            <node text="Public charger"/>
+            <node text="Route" bounds="[502,1987][622,2042]"/>
+            </hierarchy>"""
+        )
+        centered_second = ET.fromstring(
+            """<hierarchy>
+            <node class="android.view.TextureView" bounds="[0,0][1080,1984]"/>
+            <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]"/>
+            <node class="android.view.View" clickable="true" bounds="[519,787][561,838]"/>
+            </hierarchy>"""
+        )
+        details = ET.fromstring(
+            """<hierarchy>
+            <node text="Example Vehicle"/>
+            <node text="Example Street 1&#10;Parked since 2 hours"
+                bounds="[55,1565][1025,1631]"/>
+            <node text="Route" bounds="[502,1987][622,2042]"/>
+            </hierarchy>"""
+        )
+        calls: list[tuple[str, ...]] = []
+
+        def shell(*args: str, **_kwargs: object) -> str:
+            calls.append(args)
+            if args[:3] == ("dumpsys", "activity", "activities"):
+                return "dat=google.navigation:q=48.114598%2C11.480513&mode=w"
+            if args[:3] == ("dumpsys", "window", "windows"):
+                return "mCurrentFocus=com.volkswagen.weconnect/.SingleActivity"
+            return ""
+
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb-serial", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "launch"),
+                    patch.object(
+                        reader,
+                        "dump_ui_with_overlay_recovery",
+                        side_effect=(start, map_root, map_root),
+                    ),
+                    patch.object(
+                        reader,
+                        "dump_ui",
+                        side_effect=(centered_first, poi_card, centered_second, details),
+                    ),
+                    patch.object(reader, "shell", side_effect=shell),
+                    patch("time.sleep"),
+                ):
+                    result = reader._read_location()
+
+        self.assertEqual(result.address, "Example Street 1")
+        # First attempt uses the first dump's calculated label position.
+        self.assertIn(("input", "tap", "540", "913"), calls)
+        # Second attempt must tap the marker exposed by the re-centered map,
+        # not a coordinate calculated against the first dump.
+        self.assertIn(("input", "tap", "540", "812"), calls)
 
     def test_location_map_notice_is_dismissed(self):
         notice = ET.fromstring(
