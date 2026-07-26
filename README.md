@@ -171,7 +171,8 @@ Environment variables:
   value or semantic element after navigation or a setting change
 - `SLEEP_AFTER_OPERATION`: default `true`; wake and unlock before UI automation,
   then switch the display off again
-- `API_KEY`: required for `POST /action/*` and administrative cooldown probes
+- `API_KEY`: required for `POST /action/*`, early charge refreshes and
+  administrative cooldown probes
 - `VW_SPIN`: required for lock and unlock actions
 - `MQTT_HOST`: optional broker host; enables read-only MQTT publishing and
   Home Assistant discovery
@@ -258,6 +259,26 @@ from authenticated `GET /actions/JOB_ID`.
 
 Send the API key in the `X-API-Key` header. Keep the environment file readable
 only by root because it contains the Volkswagen S-PIN.
+
+### Event-driven charge refresh
+
+An external charger, evcc or Home Assistant can request one early charge-cache
+refresh when it detects that a vehicle was connected:
+
+```http
+POST /admin/refresh/charge
+X-API-Key: replace-with-the-connector-api-key
+```
+
+The endpoint returns HTTP 202 and queues the refresh asynchronously. Concurrent
+or repeated requests are coalesced. The read costs one normal background-budget
+unit and preserves the background minimum interval, daily limit, Volkswagen
+rate-limit cooldown, shared transient backoff and action priority. It only
+advances the charge cache; `GET /charge` remains a cache-only read.
+
+This trigger avoids reducing the parked polling interval for the whole day.
+Call it on the charger's disconnected-to-connected transition, not on every
+Home Assistant or evcc status update.
 
 ### Cooldown recovery probe
 

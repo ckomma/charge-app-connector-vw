@@ -353,6 +353,42 @@ class ParserTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_http_early_charge_refresh_requires_authentication(self):
+        state = Mock()
+        state.request_charge_refresh.return_value = {
+            "status": "accepted",
+            "state": "queued",
+            "cache": "charge",
+            "budgetCost": 1,
+        }
+        RequestHandler.state = state
+        RequestHandler.api_key = "test-key"
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RequestHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(*server.server_address)
+            connection.request("POST", "/admin/refresh/charge")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 401)
+            response.read()
+            state.request_charge_refresh.assert_not_called()
+
+            connection.request(
+                "POST",
+                "/admin/refresh/charge",
+                headers={"X-API-Key": "test-key"},
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 202)
+            payload = json.loads(response.read())
+            self.assertEqual(payload["state"], "queued")
+            self.assertEqual(payload["budgetCost"], 1)
+            state.request_charge_refresh.assert_called_once_with()
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_capabilities_describe_actions_and_caches_without_refresh(self):
         state = object.__new__(AppState)
         state.verified_app_version = "3.63.2"
@@ -394,6 +430,11 @@ class ParserTests(unittest.TestCase):
             result["administrativeEndpoints"]["cooldownProbe"],
             "/admin/cooldown/probe",
         )
+        self.assertEqual(
+            result["administrativeEndpoints"]["chargeRefresh"],
+            "/admin/refresh/charge",
+        )
+        self.assertTrue(result["features"]["earlyChargeRefresh"])
         self.assertTrue(result["caches"]["charge"]["available"])
         self.assertFalse(result["caches"]["details"]["available"])
 
@@ -589,6 +630,63 @@ class ParserTests(unittest.TestCase):
             )
         cache.refresh()
         self.assertEqual(updates, [("charge", 60)])
+
+    def test_background_cache_early_refresh_preempts_idle_interval(self):
+        with patch("threading.Thread.start"):
+            cache = BackgroundCache(
+                "charge",
+                lambda: VehicleData(status="A", soc=60),
+                lambda _: 900,
+                VehicleData,
+            )
+        cache.set_value(VehicleData(status="A", soc=60))
+        self.assertFalse(cache.refresh_due())
+
+        first = cache.request_early_refresh()
+        duplicate = cache.request_early_refresh()
+
+        self.assertEqual(first["state"], "queued")
+        self.assertEqual(duplicate["state"], "coalesced")
+        self.assertTrue(cache.refresh_due())
+        self.assertTrue(cache.wakeup.is_set())
+        cache.refresh()
+        self.assertFalse(cache.early_refresh_requested)
+        self.assertFalse(cache.refresh_due())
+
+    def test_requested_charge_refresh_preserves_usage_protection(self):
+        state = object.__new__(AppState)
+        state.charge = Mock()
+        state.charge.request_early_refresh.return_value = {
+            "status": "accepted",
+            "state": "queued",
+            "cache": "charge",
+        }
+
+        result = state.request_charge_refresh()
+
+        self.assertEqual(result["budgetCost"], 1)
+        self.assertTrue(result["minimumIntervalPreserved"])
+        self.assertTrue(result["cooldownPreserved"])
+        self.assertTrue(result["backgroundBackoffPreserved"])
+
+    def test_background_worker_executes_requested_early_refresh(self):
+        reads = []
+        with patch("threading.Thread.start"):
+            cache = BackgroundCache(
+                "charge",
+                lambda: reads.append("read") or VehicleData(status="A", soc=60),
+                lambda _: 900,
+                VehicleData,
+            )
+        cache.set_value(VehicleData(status="A", soc=60))
+        cache.request_early_refresh()
+        cache.wakeup.wait = Mock(side_effect=RuntimeError("stop worker"))
+
+        with self.assertRaisesRegex(RuntimeError, "stop worker"):
+            cache._worker()
+
+        self.assertEqual(reads, ["read"])
+        self.assertFalse(cache.early_refresh_requested)
 
     def test_charge_refresh_interval_schedules_one_connected_follow_up(self):
         interval = ChargeRefreshInterval(300, 900)

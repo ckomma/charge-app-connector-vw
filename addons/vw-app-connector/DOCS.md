@@ -6,8 +6,8 @@ Required options:
   USB ADB device. Keep an explicit serial when multiple Android devices can be
   visible. Required even when `adb_mode` is `wifi` or `auto`.
 - `adb_mode`: `usb`, `wifi`, or `auto`.
-- `api_key`: random secret required for authenticated write-action and
-  administrative cooldown-probe endpoints.
+- `api_key`: random secret required for authenticated write-action, early
+  charge-refresh and administrative cooldown-probe endpoints.
 
 Optional but common:
 
@@ -44,6 +44,12 @@ available during either pause.
 
 `/details` and `/location` perform slower multi-page reads and spend background
 budget. Use them only when you intentionally want to refresh those caches.
+
+When a wallbox, evcc or Home Assistant detects a newly connected vehicle, it
+can call authenticated `POST /admin/refresh/charge`. The request queues one
+asynchronous charge read and coalesces duplicates while preserving the normal
+background minimum interval, daily budget, cooldown and transient backoff.
+This is preferable to reducing the parked polling interval all day.
 
 An explicit Volkswagen rate limit is preserved across restarts. After fixing a
 local phone or ADB problem, use the authenticated `POST /admin/cooldown/probe`

@@ -242,6 +242,27 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## Verification
 
+- On 2026-07-26, the authenticated event-driven
+  `POST /admin/refresh/charge` endpoint was deployed and live-verified on the
+  production USB runtime with Volkswagen app `4.1.1`. An unauthenticated call
+  returned HTTP 401 and authenticated calls returned HTTP 202 while preserving
+  the background minimum interval, daily budget, shared transient backoff and
+  action priority. Proxmox maintenance rebooted the connector LXC twice and
+  therefore discarded the original in-memory request; the persisted
+  `SOURCE_DATA_STALE` backoff and usage counters survived. After the backoff
+  expired, a natural read detected the connected-idle transition from `A` to
+  `B`, cleared the backoff and advanced the background counter by one. The
+  endpoint was then requested again after the reboot and completed one
+  background-budgeted charge read after the minimum interval; a simultaneously
+  due priority location read accounted for the second observed counter
+  increment. The vehicle remained connected and idle, evcc remained in its
+  original `pv` mode, and no vehicle action was needed. The exact production
+  limits of 180 background operations and 20 actions were restored without
+  resetting counters; `/health` and `/charge` were healthy, no cooldown or
+  backoff remained, the phone display returned to sleep, the deployed file
+  matched the locally tested SHA-256, and all temporary root-only test and
+  rollback files were removed.
+
 - On 2026-07-22, the shared ADB-unavailable background backoff fix for GitHub
   issue #21 was deployed to the production USB runtime. A natural due charge
   refresh exercised the new ADB preflight and succeeded, advancing the cache

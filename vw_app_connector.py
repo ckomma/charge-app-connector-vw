@@ -3132,6 +3132,7 @@ class BackgroundCache(Generic[T]):
         self.last_error = ""
         self.last_error_category = ""
         self.refreshing = False
+        self.early_refresh_requested = False
         self.next_attempt_monotonic = 0.0
         self.wakeup = threading.Event()
         self.initial_delay = initial_delay
@@ -3192,11 +3193,13 @@ class BackgroundCache(Generic[T]):
                 retry_wait = max(0.0, self.next_attempt_monotonic - now)
             if self.shared_backoff is not None:
                 retry_wait = max(retry_wait, self.shared_backoff.retry_in_seconds())
-            due = self.value is None or self.age() >= self.interval(self.value)
+            due = self.refresh_due()
             if due and retry_wait <= 0:
                 self.refresh()
             if retry_wait > 0:
                 delay = max(5.0, retry_wait)
+            elif self.early_refresh_requested:
+                delay = 5.0
             else:
                 delay = max(5.0, self.interval(self.value) - self.age())
             self.wakeup.wait(delay)
@@ -3207,8 +3210,32 @@ class BackgroundCache(Generic[T]):
             return float("inf")
         return time.monotonic() - self.last_success_monotonic
 
+    def refresh_due(self) -> bool:
+        with self.lock:
+            early_refresh_requested = self.early_refresh_requested
+            value = self.value
+        return (
+            early_refresh_requested
+            or value is None
+            or self.age() >= self.interval(value)
+        )
+
     def trigger(self) -> None:
         self.wakeup.set()
+
+    def request_early_refresh(self) -> dict[str, object]:
+        with self.lock:
+            if self.early_refresh_requested or self.refreshing:
+                request_state = "coalesced"
+            else:
+                self.early_refresh_requested = True
+                request_state = "queued"
+        self.wakeup.set()
+        return {
+            "status": "accepted",
+            "state": request_state,
+            "cache": self.name,
+        }
 
     def shared_backoff_value(self) -> T | None:
         if self.shared_backoff is None:
@@ -3255,6 +3282,7 @@ class BackgroundCache(Generic[T]):
             if self.refreshing:
                 return self.value or self.empty_factory()
             self.refreshing = True
+        clear_early_refresh = True
         started = time.monotonic()
         try:
             value = self.loader()
@@ -3281,6 +3309,7 @@ class BackgroundCache(Generic[T]):
                 self.on_update(self.name, value)
             return value
         except ActionPriority:
+            clear_early_refresh = False
             LOG.info("%s refresh yielded to a pending action", self.name)
             self.trigger()
             with self.lock:
@@ -3315,6 +3344,8 @@ class BackgroundCache(Generic[T]):
         finally:
             with self.lock:
                 self.refreshing = False
+                if clear_early_refresh:
+                    self.early_refresh_requested = False
 
     def get(self) -> T:
         with self.lock:
@@ -3794,6 +3825,7 @@ class AppState:
             },
             "administrativeEndpoints": {
                 "cooldownProbe": "/admin/cooldown/probe",
+                "chargeRefresh": "/admin/refresh/charge",
             },
             "features": {
                 "adbMode": health.adbMode,
@@ -3808,6 +3840,7 @@ class AppState:
                 "adaptiveTransientBackoff": True,
                 "asyncActions": True,
                 "cooldownProbe": True,
+                "earlyChargeRefresh": True,
                 "diagnosticsIndex": True,
                 "germanLocalization": True,
                 "englishLocalization": True,
@@ -4203,6 +4236,14 @@ class AppState:
             "charge": asdict(value),
         }
 
+    def request_charge_refresh(self) -> dict[str, object]:
+        result = self.charge.request_early_refresh()
+        result["budgetCost"] = 1
+        result["minimumIntervalPreserved"] = True
+        result["cooldownPreserved"] = True
+        result["backgroundBackoffPreserved"] = True
+        return result
+
     def health(self) -> HealthData:
         value = self.reader.phone_health()
         value.verifiedAppVersion = self.verified_app_version
@@ -4330,6 +4371,13 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         prefix = "/action/"
+        if parsed.path == "/admin/refresh/charge":
+            if not self.authenticated():
+                self.send_error(401)
+                return
+            LOG.info("Early charge refresh requested")
+            self.send_json(self.state.request_charge_refresh(), 202)
+            return
         if parsed.path == "/admin/cooldown/probe":
             if not self.authenticated():
                 self.send_error(401)

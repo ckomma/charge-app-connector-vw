@@ -130,6 +130,13 @@ rest:
           - refreshDurationSeconds
 
 rest_command:
+  volkswagen_app_charge_refresh:
+    url: "http://CONNECTOR_HOST:9920/admin/refresh/charge"
+    method: post
+    timeout: 10
+    headers:
+      X-API-Key: !secret vw_app_connector_api_key
+
   volkswagen_app_lock:
     url: "http://CONNECTOR_HOST:9920/action/lock"
     method: post
@@ -178,6 +185,20 @@ rest_command:
     timeout: 180
     headers:
       X-API-Key: !secret vw_app_connector_api_key
+
+# Add an automation using the connected state exposed by your wallbox or evcc
+# integration. Replace the example entity and state below with the actual
+# disconnected-to-connected transition; do not trigger on every status update.
+#
+# automation:
+#   - alias: "Refresh Volkswagen data when vehicle connects"
+#     triggers:
+#       - trigger: state
+#         entity_id: sensor.wallbox_status
+#         from: "disconnected"
+#         to: "connected"
+#     actions:
+#       - action: rest_command.volkswagen_app_charge_refresh
 
 template:
   - binary_sensor:
