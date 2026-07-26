@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.19
+
+- Add Volkswagen app `4.2.1` support and make it the guarded write-action
+  baseline after German and English real-device verification on Redmi and
+  Pixel phones.
+- Support the Volkswagen `4.2.1` location card and centered vehicle-marker
+  layout.
+- Scroll charging switches that are semantically exposed but still clipped
+  behind the persistent bottom navigation before tapping them.
+
 ## 0.1.18
 
 - Keep successfully read but old Volkswagen source data as a separate data

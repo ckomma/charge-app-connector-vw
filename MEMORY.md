@@ -285,6 +285,20 @@ coordinates, screenshots, raw UI dumps, and private network details.
   cooldown was active, the display returned to sleep and temporary root-only
   test artifacts were removed.
 
+- On 2026-07-26, Volkswagen app `4.2.1` was live-verified in German and English
+  on the Redmi Note 9S and Pixel 10 (Android 17). Charge, details, location,
+  charging settings, climate, temperature, lock/unlock and charging actions
+  were exercised. The current German sync-age variants parsed successfully on
+  both phones. A 4.2.1 Compose switch exposed behind the persistent bottom
+  navigation was fixed by scrolling it into the safe viewport before tapping;
+  the auto-release setting then toggled and restored successfully on both
+  phones and in both languages. Pixel app locale and stay-awake state were
+  restored, the production target returned to the Redmi with `ADB_MODE=auto`
+  and `SLEEP_AFTER_OPERATION=true`, evcc returned to `pv`, and exact production
+  limits were restored without resetting counters. This makes `4.2.1` the
+  guarded write-action baseline and is published as Home Assistant App
+  `0.1.19`.
+
 - On 2026-07-20, Volkswagen app `4.1.1` was live-verified on Redmi and Pixel
   phones in German and English. Charge, details, location and localized
   settings reads succeeded, as did the exercised vehicle actions. The original

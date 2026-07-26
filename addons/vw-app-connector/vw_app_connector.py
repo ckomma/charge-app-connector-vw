@@ -2705,16 +2705,26 @@ class VolkswagenReader:
     ) -> tuple[ET.Element, ET.Element]:
         for attempt in range(3):
             try:
-                return root, self.checked_node_near_labels(root, labels)
+                option = self.checked_node_near_labels(root, labels)
+                width, height = self.viewport_size(root)
+                center = self.node_center(option)
+                # VW 4.2.1 can expose the last Compose switch while it is
+                # still clipped behind the persistent bottom navigation.
+                # Tapping that semantic node opens the navigation tab instead
+                # of changing the option, so scroll it into the safe viewport.
+                if center and center[1] < round(height * 0.85):
+                    return root, option
             except RuntimeError:
                 if attempt == 2:
                     raise
                 width, height = self.viewport_size(root)
-                self.shell(
-                    "input", "swipe", str(width // 2), str(round(height * 0.8)),
-                    str(width // 2), str(round(height * 0.45)), "300",
-                )
-                root = self.dump_ui_with_overlay_recovery(remote_name)
+            if attempt == 2:
+                raise RuntimeError("Volkswagen charging option not safely visible")
+            self.shell(
+                "input", "swipe", str(width // 2), str(round(height * 0.8)),
+                str(width // 2), str(round(height * 0.45)), "300",
+            )
+            root = self.dump_ui_with_overlay_recovery(remote_name)
         raise RuntimeError("Volkswagen charging option not found")
 
     def read_charging_settings(self, root: ET.Element) -> ChargingSettingsData:
@@ -3761,7 +3771,7 @@ class AppState:
         self.reader = VolkswagenReader()
         self.usage = UsageLimiter()
         self.verified_app_version = os.getenv(
-            "VERIFIED_APP_VERSION", "4.1.1"
+            "VERIFIED_APP_VERSION", "4.2.1"
         ).strip()
         self.priority_lock = threading.Lock()
         self.priority_waiters = 0
