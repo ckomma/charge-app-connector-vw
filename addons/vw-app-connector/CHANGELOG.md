@@ -1,11 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.1.18
 
 - Keep successfully read but old Volkswagen source data as a separate data
   warning instead of degrading an otherwise healthy connector.
 - Expose machine-readable health reasons and dedicated MQTT entities for
   vehicle source age, stale source data and background backoff.
+- Add an authenticated, event-driven charge refresh for wallbox, evcc and Home
+  Assistant connection events while preserving usage limits, cooldowns,
+  transient backoff and action priority.
 
 ## 0.1.17
 
