@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.20
+
+- Fix the Home Assistant MQTT vehicle-lock entity so a connector value of
+  `locked: true` is displayed as locked instead of unlocked.
+- Preserve the existing MQTT discovery unique ID so current Home Assistant
+  entity IDs, automations and history continue to work.
+
 ## 0.1.19
 
 - Add Volkswagen app `4.2.1` support and make it the guarded write-action

@@ -441,6 +441,9 @@ entities, so parked vehicle data can become old without falsely reporting a
 connector failure. No HA YAML is required. MQTT publishes retained copies of
 existing cache updates and never causes an additional Volkswagen app operation.
 REST remains enabled for evcc and existing clients.
+The vehicle lock entity follows Home Assistant's lock convention:
+`locked: true` is binary-sensor `OFF` (locked), while `locked: false` is `ON`
+(unlocked).
 
 The MQTT location tracker publishes GPS attributes only. Home Assistant uses
 its configured zones to derive `home`, `not_home` or a zone name; the
