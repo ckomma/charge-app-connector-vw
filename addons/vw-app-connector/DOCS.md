@@ -69,6 +69,8 @@ authenticated `/action/*` endpoints. Home Assistant receives separate entities
 for vehicle source age, stale source data, background-backoff reason and
 remaining backoff time instead of folding old parked-vehicle data into connector
 health.
+The vehicle lock entity follows Home Assistant's lock convention: `OFF` means
+locked and `ON` means unlocked.
 
 ## USB ADB
 

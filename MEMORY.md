@@ -242,6 +242,18 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## Verification
 
+- On 2026-07-28, the Home Assistant MQTT lock-state fix for GitHub issue #26
+  was deployed and verified end to end through the production broker and Home
+  Assistant entity registry. A temporary non-retained `locked: true` charge
+  payload produced binary-sensor `OFF` (locked), and `locked: false` produced
+  `ON` (unlocked), while the existing discovery unique ID and entity ID were
+  preserved. The original retained charge payload was restored byte-for-byte.
+  The exact production limits of 180 background operations and 20 actions were
+  restored without resetting counters; `/health` was healthy, USB ADB remained
+  selected, no cooldown was active, the deployed file matched the locally
+  tested SHA-256, and all temporary root-only test and rollback files were
+  removed. The fix is published as Home Assistant App `0.1.20`.
+
 - On 2026-07-26, the authenticated event-driven
   `POST /admin/refresh/charge` endpoint was deployed and live-verified on the
   production USB runtime with Volkswagen app `4.1.1`. An unauthenticated call

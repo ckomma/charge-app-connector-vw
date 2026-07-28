@@ -134,12 +134,17 @@ class MqttPublisher:
             ("binary_sensor", "phone_powered", "Phone powered", "health", "phonePowered", None, "power", None, None),
         ]
         for component, object_id, name, state_name, key, unit, device_class, state_class, icon in entities:
+            binary_value_template = (
+                "{{ 'OFF' if value_json.%s else 'ON' }}" % key
+                if device_class == "lock"
+                else "{{ 'ON' if value_json.%s else 'OFF' }}" % key
+            )
             config = {
                 "name": name,
                 "unique_id": f"{self.client_id}_{object_id}",
                 "state_topic": f"{self.topic_prefix}/{state_name}",
                 "value_template": (
-                    "{{ 'ON' if value_json.%s else 'OFF' }}" % key
+                    binary_value_template
                     if component == "binary_sensor" else "{{ value_json.%s }}" % key
                 ),
                 "availability_topic": self.availability_topic,

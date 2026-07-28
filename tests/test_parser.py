@@ -700,6 +700,11 @@ class ParserTests(unittest.TestCase):
         locked_config = json.loads(locked_config_call[0][1])
         self.assertEqual(locked_config["name"], "Vehicle locked")
         self.assertEqual(locked_config["unique_id"], "vw-app-connector_locked")
+        self.assertEqual(locked_config["device_class"], "lock")
+        self.assertEqual(
+            locked_config["value_template"],
+            "{{ 'OFF' if value_json.locked else 'ON' }}",
+        )
         self.assertEqual(mqtt.client.username, "connector")
         self.assertEqual(mqtt.client.password, "secret")
 
