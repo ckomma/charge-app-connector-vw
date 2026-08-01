@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.21
+
+- Treat Volkswagen `Limited Services` and not-logged-into-vehicle location
+  states as endpoint-local availability conditions instead of a global app
+  outage.
+- Retry those expected states at the normal location interval without delaying
+  charge or detail refreshes, and expose precise degraded-health reasons.
+- Reduce repeated warning noise while preserving the last successful location
+  and usage accounting.
+
 ## 0.1.20
 
 - Fix the Home Assistant MQTT vehicle-lock entity so a connector value of

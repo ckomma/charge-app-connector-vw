@@ -61,6 +61,14 @@ class TransientTransportState(TransientBackgroundState):
     pass
 
 
+class TransientEndpointState(UsageLimit):
+    """Expected endpoint-local Volkswagen state that must not pause other caches."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class CooldownProbeRejected(RuntimeError):
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
@@ -411,6 +419,7 @@ class HealthData:
     detailAgeSeconds: int | None = None
     locationLastSuccessfulAt: str = ""
     locationAgeSeconds: int | None = None
+    locationErrorCategory: str = ""
     vehicleSourceAgeMinutes: int | None = None
     vehicleSourceFreshnessKnown: bool = False
     vehicleSourceStale: bool = False
@@ -1936,7 +1945,11 @@ class VolkswagenReader:
         for attempt in range(2):
             try:
                 return operation()
-            except (VolkswagenRateLimit, TransientVolkswagenState):
+            except (
+                VolkswagenRateLimit,
+                TransientVolkswagenState,
+                TransientEndpointState,
+            ):
                 # These are already meaningful Volkswagen responses. Reopening
                 # the app immediately cannot repair them and can create another
                 # avoidable backend/vehicle request.
@@ -1958,7 +1971,7 @@ class VolkswagenReader:
 
     @staticmethod
     def error_category(exc: Exception) -> str:
-        if isinstance(exc, TransientBackgroundState):
+        if isinstance(exc, (TransientBackgroundState, TransientEndpointState)):
             return exc.reason
         if isinstance(exc, UsageLimit):
             return "RATE_LIMIT"
@@ -2143,15 +2156,21 @@ class VolkswagenReader:
         )
         root_text = "\n".join(self.strings(root)).casefold()
         if (
-            "limited services" in root_text
-            or "not logged into the vehicle" in root_text
-            or "eingeschränkte dienste" in root_text
-            or "eingeschraenkte dienste" in root_text
+            "not logged into the vehicle" in root_text
             or "nicht im fahrzeug angemeldet" in root_text
         ):
-            raise TransientVolkswagenState(
-                "APP_UNAVAILABLE",
-                "Volkswagen app reports limited services; not logged into the vehicle"
+            raise TransientEndpointState(
+                "LOCATION_USER_CONTEXT_UNAVAILABLE",
+                "Volkswagen app reports that the account is not logged into the vehicle",
+            )
+        if (
+            "limited services" in root_text
+            or "eingeschränkte dienste" in root_text
+            or "eingeschraenkte dienste" in root_text
+        ):
+            raise TransientEndpointState(
+                "LOCATION_SERVICES_UNAVAILABLE",
+                "Volkswagen app reports limited location services",
             )
         vehicle_name = self.parse_vehicle_name(root)
         x, y = self.described_node_center(root, "Navigation Tab")
@@ -3215,6 +3234,7 @@ class BackgroundCache(Generic[T]):
         shared_backoff: BackgroundTransientBackoff | None = None,
         shared_backoff_reason: Callable[[T], str] | None = None,
         clears_shared_backoff: Callable[[T], bool] | None = None,
+        error_retry_intervals: dict[str, float] | None = None,
     ) -> None:
         self.name = name
         self.loader = loader
@@ -3238,6 +3258,7 @@ class BackgroundCache(Generic[T]):
         self.shared_backoff = shared_backoff
         self.shared_backoff_reason = shared_backoff_reason
         self.clears_shared_backoff = clears_shared_backoff
+        self.error_retry_intervals = error_retry_intervals or {}
         self._load_persisted()
         threading.Thread(target=self._worker, name=f"{name}-refresh", daemon=True).start()
 
@@ -3416,16 +3437,24 @@ class BackgroundCache(Generic[T]):
                 and isinstance(exc, TransientBackgroundState)
             ):
                 self.shared_backoff.record_failure_unless_active(exc.reason)
-            if isinstance(exc, UsageLimit):
+            with self.lock:
+                repeated_endpoint_state = (
+                    isinstance(exc, TransientEndpointState)
+                    and self.last_error_category == category
+                )
+            if repeated_endpoint_state:
+                LOG.info("%s refresh still unavailable: %s", self.name, exc)
+            elif isinstance(exc, UsageLimit):
                 LOG.warning("%s refresh skipped: %s", self.name, exc)
             else:
                 LOG.exception("%s refresh failed", self.name)
             with self.lock:
                 self.last_error = str(exc)
                 self.last_error_category = category
-                self.next_attempt_monotonic = (
-                    time.monotonic() + self.error_retry_interval
+                retry_interval = self.error_retry_intervals.get(
+                    category, self.error_retry_interval
                 )
+                self.next_attempt_monotonic = time.monotonic() + retry_interval
                 value = self.value or self.empty_factory()
                 setattr(value, "error", str(exc))
                 setattr(value, "errorCategory", category)
@@ -3855,6 +3884,10 @@ class AppState:
             state_path=cache_dir / "location.json",
             on_update=self._cache_updated,
             shared_backoff=self.background_backoff,
+            error_retry_intervals={
+                "LOCATION_USER_CONTEXT_UNAVAILABLE": location_interval,
+                "LOCATION_SERVICES_UNAVAILABLE": location_interval,
+            },
         )
 
         self.mqtt = MqttPublisher.from_environment(self.mqtt_state)
@@ -4359,6 +4392,9 @@ class AppState:
         value.locationAgeSeconds = (
             round(self.location.age()) if self.location.last_success_at else None
         )
+        value.locationErrorCategory = str(
+            getattr(self.location, "last_error_category", "")
+        )
         charge_value = self.charge.value
         if isinstance(charge_value, VehicleData):
             value.vehicleSourceAgeMinutes = charge_value.sourceAgeMinutes
@@ -4430,6 +4466,11 @@ class AppState:
                 add_status_reason(
                     value.actionBlockedReason or "ACTIONS_UNAVAILABLE"
                 )
+            if value.locationErrorCategory in (
+                "LOCATION_USER_CONTEXT_UNAVAILABLE",
+                "LOCATION_SERVICES_UNAVAILABLE",
+            ):
+                add_status_reason(value.locationErrorCategory)
             if status_reasons:
                 value.status = "degraded"
         value.statusReasons = tuple(status_reasons)

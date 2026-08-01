@@ -27,6 +27,7 @@ from vw_app_connector import (
     IdempotencyConflict,
     LocationData,
     RequestHandler,
+    TransientEndpointState,
     TransientTransportState,
     TransientVolkswagenState,
     UsageLimit,
@@ -226,6 +227,48 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(health.status, "degraded")
             self.assertEqual(health.statusReasons, ("APP_UNAVAILABLE",))
             self.assertEqual(health.dataWarnings, ())
+
+    def test_health_reports_location_user_context_as_degraded(self):
+        state = object.__new__(AppState)
+        state.verified_app_version = "4.2.1"
+        state.reader = Mock()
+        state.reader.phone_health.return_value = HealthData(
+            adbState="device", appVersion="4.2.1"
+        )
+        state.charge = SimpleNamespace(
+            last_success_at="now",
+            refreshing=False,
+            value=VehicleData(status="B"),
+            last_error="",
+            last_error_category="",
+            age=lambda: 1,
+        )
+        state.details = SimpleNamespace(last_success_at="", age=lambda: 0)
+        state.location = SimpleNamespace(
+            last_success_at="earlier",
+            last_error_category="LOCATION_USER_CONTEXT_UNAVAILABLE",
+            age=lambda: 14400,
+        )
+        state.usage = Mock()
+        state.usage.snapshot.return_value = {
+            "backgroundUsed": 1,
+            "backgroundLimit": 180,
+            "actionsUsed": 0,
+            "actionsLimit": 20,
+            "cooldownSeconds": 0,
+        }
+
+        health = state.health()
+
+        self.assertEqual(health.status, "degraded")
+        self.assertEqual(
+            health.statusReasons,
+            ("LOCATION_USER_CONTEXT_UNAVAILABLE",),
+        )
+        self.assertEqual(
+            health.locationErrorCategory,
+            "LOCATION_USER_CONTEXT_UNAVAILABLE",
+        )
 
     def test_action_job_lifecycle(self):
         completed = threading.Event()
@@ -2996,6 +3039,44 @@ class ParserTests(unittest.TestCase):
                 [("charge", "APP_UNAVAILABLE", "APP_UNAVAILABLE")],
             )
 
+    def test_endpoint_state_uses_local_retry_without_shared_backoff(self):
+        with TemporaryDirectory() as directory:
+            backoff = BackgroundTransientBackoff(
+                Path(directory) / "backoff.json", 900, 7200, jitter_ratio=0
+            )
+            with patch("threading.Thread.start"):
+                cache = BackgroundCache(
+                    "location",
+                    lambda: (_ for _ in ()).throw(
+                        TransientEndpointState(
+                            "LOCATION_USER_CONTEXT_UNAVAILABLE",
+                            "account not logged into vehicle",
+                        )
+                    ),
+                    lambda _: 14400,
+                    LocationData,
+                    shared_backoff=backoff,
+                    error_retry_intervals={
+                        "LOCATION_USER_CONTEXT_UNAVAILABLE": 14400
+                    },
+                )
+
+            before = time.monotonic()
+            with self.assertLogs("vw-app-connector", level="WARNING") as first:
+                result = cache.refresh()
+
+            self.assertEqual(
+                result.errorCategory,
+                "LOCATION_USER_CONTEXT_UNAVAILABLE",
+            )
+            self.assertEqual(backoff.snapshot()["reason"], "")
+            self.assertGreaterEqual(cache.next_attempt_monotonic, before + 14399)
+            self.assertIn("refresh skipped", "\n".join(first.output))
+
+            with self.assertLogs("vw-app-connector", level="INFO") as repeated:
+                cache.refresh()
+            self.assertIn("still unavailable", "\n".join(repeated.output))
+
     def test_cache_patch_preserves_success_timestamp_and_shared_backoff(self):
         with TemporaryDirectory() as directory:
             backoff = BackgroundTransientBackoff(
@@ -3599,32 +3680,64 @@ class ParserTests(unittest.TestCase):
                     )
                 shell.assert_not_called()
 
-    def test_location_limited_services_fails_with_app_state_error(self):
-        limited = ET.fromstring(
-            """<hierarchy>
-            <node text="Limited Services"/>
-            <node text="You are currently not logged into the vehicle"/>
-            </hierarchy>"""
-        )
-        with TemporaryDirectory() as directory:
-            with patch.dict(
-                "os.environ",
-                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
-                clear=False,
-            ):
-                reader = VolkswagenReader()
-                with (
-                    patch.object(reader, "launch"),
-                    patch.object(
-                        reader,
-                        "dump_ui_with_overlay_recovery",
-                        return_value=limited,
-                    ),
-                ):
-                    with self.assertRaises(TransientVolkswagenState) as raised:
-                        reader._read_location()
-        self.assertEqual(raised.exception.reason, "APP_UNAVAILABLE")
-        self.assertIn("limited services", str(raised.exception))
+    def test_location_account_context_is_endpoint_local(self):
+        for message in (
+            "You are currently not logged into the vehicle",
+            "Sie sind derzeit nicht im Fahrzeug angemeldet",
+        ):
+            with self.subTest(message=message):
+                root = ET.fromstring(
+                    f'<hierarchy><node text="{message}"/></hierarchy>'
+                )
+                with TemporaryDirectory() as directory:
+                    with patch.dict(
+                        "os.environ",
+                        {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                        clear=False,
+                    ):
+                        reader = VolkswagenReader()
+                        with (
+                            patch.object(reader, "launch"),
+                            patch.object(
+                                reader,
+                                "dump_ui_with_overlay_recovery",
+                                return_value=root,
+                            ),
+                        ):
+                            with self.assertRaises(TransientEndpointState) as raised:
+                                reader._read_location()
+                self.assertEqual(
+                    raised.exception.reason,
+                    "LOCATION_USER_CONTEXT_UNAVAILABLE",
+                )
+
+    def test_location_limited_services_is_endpoint_local(self):
+        for message in ("Limited Services", "Eingeschränkte Dienste"):
+            with self.subTest(message=message):
+                root = ET.fromstring(
+                    f'<hierarchy><node text="{message}"/></hierarchy>'
+                )
+                with TemporaryDirectory() as directory:
+                    with patch.dict(
+                        "os.environ",
+                        {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                        clear=False,
+                    ):
+                        reader = VolkswagenReader()
+                        with (
+                            patch.object(reader, "launch"),
+                            patch.object(
+                                reader,
+                                "dump_ui_with_overlay_recovery",
+                                return_value=root,
+                            ),
+                        ):
+                            with self.assertRaises(TransientEndpointState) as raised:
+                                reader._read_location()
+                self.assertEqual(
+                    raised.exception.reason,
+                    "LOCATION_SERVICES_UNAVAILABLE",
+                )
 
     def test_location_wait_dismisses_map_notice_before_car_locate(self):
         notice = ET.fromstring(

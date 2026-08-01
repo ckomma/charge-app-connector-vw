@@ -88,8 +88,11 @@ coordinates, screenshots, raw UI dumps, and private network details.
   background unit. Any later successful cache refresh clears that transport
   pause. App operations that begin after a successful preflight retain their
   normal weighted cost even if ADB fails later during the operation.
-- The localized `Limited Services` / not-logged-into-vehicle location state is
-  classified as shared `APP_UNAVAILABLE` instead of a generic per-cache retry.
+- The localized `Limited Services` and not-logged-into-vehicle location states
+  are separate endpoint-local categories. They do not start or clear the
+  shared charge/details/location backoff, retry at `LOCATION_INTERVAL_SECONDS`,
+  preserve the last successful location and expose a precise degraded-health
+  reason. Repeated observations of the same state are logged at info level.
 - A charging-to-connected-idle (`C` to `B`) transition schedules exactly one
   follow-up at the charging interval before returning to the idle interval.
   This narrows short PV-pause and target-SoC gaps without creating continuous
@@ -241,6 +244,19 @@ coordinates, screenshots, raw UI dumps, and private network details.
   restored the original temperature.
 
 ## Verification
+
+- On 2026-08-01, endpoint-local handling for Volkswagen `Limited Services` and
+  not-logged-into-vehicle location states was deployed to the production Redmi
+  runtime with Volkswagen app `4.2.1`. A real, background-budgeted location read
+  using the deployed runtime completed through address and navigation-coordinate
+  parsing while the main user was active. The vehicle remained connected and
+  idle, climate stayed off, lock state and evcc `pv` mode were unchanged, and no
+  vehicle write action was needed. The exact production limits of 180 background
+  operations and 20 actions were restored without resetting counters; `/health`
+  and `/charge` were healthy, USB ADB remained selected, no cooldown or shared
+  backoff was active, the display returned to sleep and the deployed file matched
+  the locally tested SHA-256. The change is published as Home Assistant App
+  `0.1.21`.
 
 - On 2026-07-28, the Home Assistant MQTT lock-state fix for GitHub issue #26
   was deployed and verified end to end through the production broker and Home
