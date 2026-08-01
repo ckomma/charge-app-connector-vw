@@ -80,6 +80,10 @@ unavailable` and explicit rate limits are not retried immediately as UI
 failures. Transient stale/unavailable states and successfully read source data
 above the stale-age threshold start one shared, persisted exponential
 background pause across charge, details and location refreshes.
+Location-only `Limited Services` and not-logged-into-vehicle states are kept
+separate from that shared pause. They mark connector health as degraded with a
+precise location category, preserve the last successful location and retry at
+the normal location interval without delaying charge or detail refreshes.
 An unavailable ADB transport starts the same shared pause before background
 budget is consumed, so independent charge, details and location retries cannot
 inflate usage while no phone can be reached. A successful cache refresh clears
@@ -144,7 +148,8 @@ Environment variables:
 - `CHARGING_INTERVAL_SECONDS`: default `300`
 - `IDLE_INTERVAL_SECONDS`: default `900`
 - `DETAIL_INTERVAL_SECONDS`: default `43200`
-- `LOCATION_INTERVAL_SECONDS`: default `14400`
+- `LOCATION_INTERVAL_SECONDS`: default `14400`; also used before retrying a
+  location-only user-context or limited-services state
 - `BACKGROUND_MIN_INTERVAL_SECONDS`: default `300`
 - `BACKGROUND_ERROR_RETRY_SECONDS`: default `900`; failed cache refreshes wait
   before retrying and provides the initial shared backoff interval for transient

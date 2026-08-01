@@ -43,6 +43,9 @@ the last observed intelligent power-saving notice. Cached API responses remain
 available during either pause. `statusReasons` explains operational connector
 degradation, while `dataWarnings` reports old Volkswagen source data separately;
 a `SOURCE_DATA_STALE` warning alone leaves connector health at `ok`.
+Location-only `Limited Services` and not-logged-into-vehicle states expose a
+precise degraded-health reason, preserve the last successful location and
+retry at the configured location interval without pausing charge or details.
 
 `/details` and `/location` perform slower multi-page reads and spend background
 budget. Use them only when you intentionally want to refresh those caches.
