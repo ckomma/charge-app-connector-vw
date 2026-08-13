@@ -245,6 +245,18 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## Verification
 
+- On 2026-08-13, Volkswagen app `4.3.2` was live-verified in German and English
+  on the production Redmi and a Pixel 10 over USB. Charge, details, location,
+  charging settings and the exercised vehicle actions succeeded; every changed
+  vehicle, charging, climate and evcc state was restored. A sporadically ignored
+  battery-range tile tap on the Pixel was fixed with one bounded semantic retap
+  only when the unchanged overview remains detectable after timeout. The exact
+  production limits of 180 background operations and 20 actions were restored
+  without resetting persisted counters, USB and display sleep were restored on
+  the production Redmi, and no cooldown or shared backoff remained. This makes
+  `4.3.2` the guarded write-action baseline and is published as Home Assistant
+  App `0.1.22`.
+
 - On 2026-08-01, endpoint-local handling for Volkswagen `Limited Services` and
   not-logged-into-vehicle location states was deployed to the production Redmi
   runtime with Volkswagen app `4.2.1`. A real, background-budgeted location read

@@ -128,7 +128,7 @@ against a live Volkswagen app installation, including read operations and
 vehicle actions. Volkswagen may still vary UI wording between app versions and
 vehicle capabilities. Other app languages are not supported.
 
-The latest real-device verification used Volkswagen app `4.2.1` in German and
+The latest real-device verification used Volkswagen app `4.3.2` in German and
 English on Redmi and Pixel phones. It covered reads and vehicle actions. This
 is a tested baseline, not an exact version pin; newer app versions must be
 reverified because UI labels and accessibility metadata can change
@@ -172,7 +172,7 @@ Environment variables:
 - `MAPS_PACKAGE`: default `com.google.android.apps.maps`; package stopped before
   opening the location Route intent so Google Maps does not reuse stale
   navigation state
-- `VERIFIED_APP_VERSION`: default `4.2.1`; write actions are quarantined when
+- `VERIFIED_APP_VERSION`: default `4.3.2`; write actions are quarantined when
   the installed Volkswagen app version differs
 - `APP_START_WAIT_SECONDS`: default `8`
 - `DETAIL_WAIT_SECONDS`: default `3`
