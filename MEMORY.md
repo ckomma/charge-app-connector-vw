@@ -245,6 +245,14 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## Verification
 
+- On 2026-08-13, the project README was reduced from 550 to 125 lines and the
+  detailed API, configuration, operations and integration guidance was moved
+  into focused files below `docs/`. All local documentation links, the complete
+  177-test suite, Python compilation, packaging and packaged-runtime hash were
+  verified. This documentation-only release is published as Home Assistant App
+  `0.1.23`; connector runtime behavior and the verified Volkswagen app `4.3.2`
+  baseline are unchanged.
+
 - On 2026-08-13, Volkswagen app `4.3.2` was live-verified in German and English
   on the production Redmi and a Pixel 10 over USB. Charge, details, location,
   charging settings and the exercised vehicle actions succeeded; every changed

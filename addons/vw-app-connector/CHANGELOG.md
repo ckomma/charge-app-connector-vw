@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.23
+
+- Restructure the project documentation into a concise entry-point README and
+  focused API, configuration, operations and integration guides.
+
 ## 0.1.22
 
 - Add Volkswagen app `4.3.2` support and make it the guarded write-action
