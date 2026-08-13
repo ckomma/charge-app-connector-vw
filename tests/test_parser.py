@@ -1608,6 +1608,48 @@ class ParserTests(unittest.TestCase):
                     self.assertIs(reader.wait_for_charge_detail("vw-detail.xml"), ready)
                 shell.assert_called_once_with("input", "tap", "540", "1830")
 
+    def test_charge_detail_retaps_range_tile_once_when_overview_remains_open(self):
+        ready = ET.fromstring(
+            """<hierarchy>
+            <node resource-id="rangeArcBatterySoc"
+                  content-desc="Ladestatus. Batterieladung: 96 Prozent."/>
+            </hierarchy>"""
+        )
+        descriptions = (
+            "Übersicht Reichweite. Batteriereichweite: 424 Kilometer. Details öffnen",
+            "Range overview. Battery range: 424 kilometres. Open details",
+        )
+        for description in descriptions:
+            with self.subTest(description=description):
+                overview = ET.fromstring(
+                    f"""<hierarchy>
+                    <node resource-id="rangeTile" bounds="[53,931][508,1377]"/>
+                    <node content-desc="{description}"
+                          bounds="[53,931][508,1377]"/>
+                    </hierarchy>"""
+                )
+                with TemporaryDirectory() as directory:
+                    with patch.dict(
+                        "os.environ",
+                        {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                        clear=False,
+                    ):
+                        reader = VolkswagenReader()
+                        with (
+                            patch.object(reader, "shell") as shell,
+                            patch.object(
+                                reader,
+                                "dump_ui_with_overlay_recovery",
+                                side_effect=(overview, ready),
+                            ),
+                            patch("time.monotonic", side_effect=(0, 9, 10)),
+                            patch("time.sleep"),
+                        ):
+                            self.assertIs(
+                                reader.wait_for_charge_detail("vw-detail.xml"), ready
+                            )
+                        shell.assert_called_once_with("input", "tap", "280", "1154")
+
     def test_start_charging_fails_clearly_when_target_soc_already_reached(self):
         overview = ET.fromstring(
             """<hierarchy>

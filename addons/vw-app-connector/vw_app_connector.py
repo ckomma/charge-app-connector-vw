@@ -1375,12 +1375,39 @@ class VolkswagenReader:
 
     def wait_for_charge_detail(self, remote_name: str) -> ET.Element:
         deadline = time.monotonic() + self.ui_update_timeout
+        overview_retapped = False
         while True:
             root = self.dump_ui_with_overlay_recovery(remote_name)
             root = self.dismiss_charge_notice(root, remote_name)
             if self.is_charge_detail_page(root):
                 return root
             if time.monotonic() >= deadline:
+                still_on_overview = any(
+                    (
+                        node.attrib.get("resource-id", "").endswith("rangeTile")
+                        or re.search(
+                            r"(?:Details öffnen|Open details)",
+                            node.attrib.get("content-desc", ""),
+                            re.IGNORECASE,
+                        )
+                    )
+                    and re.search(
+                        r"Batteriereichweite|Battery range|Electric range",
+                        " ".join(
+                            node.attrib.get(key, "")
+                            for key in ("text", "content-desc")
+                        ),
+                        re.IGNORECASE,
+                    )
+                    for node in root.iter()
+                )
+                if still_on_overview and not overview_retapped:
+                    x, y = self.range_tile_center(root)
+                    self.shell("input", "tap", str(x), str(y))
+                    time.sleep(self.detail_wait)
+                    deadline = time.monotonic() + self.ui_update_timeout
+                    overview_retapped = True
+                    continue
                 raise RuntimeError("Volkswagen charge details did not open")
             time.sleep(0.5)
 
@@ -3800,7 +3827,7 @@ class AppState:
         self.reader = VolkswagenReader()
         self.usage = UsageLimiter()
         self.verified_app_version = os.getenv(
-            "VERIFIED_APP_VERSION", "4.2.1"
+            "VERIFIED_APP_VERSION", "4.3.2"
         ).strip()
         self.priority_lock = threading.Lock()
         self.priority_waiters = 0

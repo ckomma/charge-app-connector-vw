@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.22
+
+- Add Volkswagen app `4.3.2` support and make it the guarded write-action
+  baseline after German and English real-device verification on Redmi and
+  Pixel phones.
+- Retry the semantic battery-range tile tap once when the charge overview is
+  still visible after the detail-navigation timeout.
+
 ## 0.1.21
 
 - Treat Volkswagen `Limited Services` and not-logged-into-vehicle location
