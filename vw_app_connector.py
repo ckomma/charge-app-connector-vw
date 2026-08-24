@@ -671,9 +671,12 @@ class VolkswagenReader:
     def adb_transport_ready(self) -> bool:
         try:
             serial = self.select_serial()
+            return self.adb_state(serial) == "device"
+        except subprocess.TimeoutExpired:
+            self.adb_last_connect_error = "ADB transport probe timed out"
+            return False
         except RuntimeError:
             return False
-        return self.adb_state(serial) == "device"
 
     def require_background_adb_transport(self) -> None:
         """Reject background work before budget use when ADB is unavailable."""

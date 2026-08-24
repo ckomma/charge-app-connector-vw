@@ -2946,6 +2946,28 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(raised.exception.reason, "ADB_UNAVAILABLE")
         recover.assert_called_once_with()
 
+    def test_background_adb_preflight_recovers_after_transport_probe_timeout(self):
+        reader = object.__new__(VolkswagenReader)
+        reader.serial = "USB-SERIAL-SECRET"
+        reader.usb_serial = "USB-SERIAL-SECRET"
+        reader.wifi_address = ""
+        reader.adb_last_connect_error = ""
+        reader.select_serial = Mock(return_value=reader.serial)
+        reader.adb_state = Mock(
+            side_effect=subprocess.TimeoutExpired(
+                ["adb", "-s", reader.serial, "get-state"], 5
+            )
+        )
+
+        with patch.object(reader, "recover_adb_transport") as recover:
+            with self.assertRaises(TransientTransportState) as raised:
+                reader.require_background_adb_transport()
+
+        self.assertEqual(raised.exception.reason, "ADB_UNAVAILABLE")
+        self.assertEqual(reader.adb_last_connect_error, "ADB transport probe timed out")
+        self.assertNotIn(reader.serial, reader.adb_last_connect_error)
+        recover.assert_called_once_with()
+
     def test_transient_background_backoff_escalates_and_persists(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "background-backoff.json"
