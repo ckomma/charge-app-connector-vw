@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.24
+
+- Treat ADB transport-probe timeouts as transient transport unavailability so
+  background refreshes use bounded recovery and the shared `ADB_UNAVAILABLE`
+  backoff instead of emitting an uncaught traceback.
+- Keep API-visible ADB timeout details free of device identifiers.
+
 ## 0.1.23
 
 - Restructure the project documentation into a concise entry-point README and

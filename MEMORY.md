@@ -245,6 +245,14 @@ coordinates, screenshots, raw UI dumps, and private network details.
 
 ## Verification
 
+- On 2026-08-24, ADB transport-probe timeouts were made part of the existing
+  bounded background transport recovery. A timed-out `adb get-state` probe now
+  becomes `ADB_UNAVAILABLE` with a redacted health error and shared background
+  backoff instead of escaping as an uncaught traceback. The regression test,
+  complete 178-test suite, Python compilation, diff check, Home Assistant App
+  packaging and root/add-on/package runtime hashes passed. The prepared Home
+  Assistant App version is `0.1.24`.
+
 - On 2026-08-13, the project README was reduced from 550 to 125 lines and the
   detailed API, configuration, operations and integration guidance was moved
   into focused files below `docs/`. All local documentation links, the complete
