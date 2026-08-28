@@ -9,7 +9,7 @@ Based on [janphkre/charge-app-connector](https://github.com/janphkre/charge-app-
 ## Features
 
 - Cached charge, structured vehicle-detail and location data through a REST API.
-- Authenticated charging, climate, lock and departure-time activation actions.
+- Authenticated charging, climate, lock and primitive departure-time actions.
 - Vehicle-observed capabilities with explicit unavailable and unknown states.
 - German and English Volkswagen app UI support.
 - USB ADB with optional Wi-Fi fallback.

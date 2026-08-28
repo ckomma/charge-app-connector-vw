@@ -6,9 +6,13 @@
   capabilities v2 response while preserving the existing capability lists.
 - Expose structured service, oil-service, warning, report-item and departure-time
   details without adding history, schedules or automation state.
-- Add an authenticated primitive action for departure-time activation with
-  semantic UI verification. Time, weekday and repetition editor writes remain
-  unexposed because Volkswagen app 4.3.2 does not persist them reliably.
+- Add authenticated primitive actions for departure-time activation, time,
+  weekdays and repetition with semantic UI and persistence verification.
+- Select the localized editor action `Speichern` / `Save`; Back and
+  `Abbrechen` / `Cancel` intentionally discard editor changes in Volkswagen
+  app 4.3.2.
+- Treat already-matching editor values as successful no-ops because the app
+  only exposes `Speichern` / `Save` after an actual change.
 
 ## 0.1.24
 
