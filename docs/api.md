@@ -128,16 +128,22 @@ Volkswagen `LO` and `HI` variants map to the lower and upper boundaries.
 ### Departure times
 
 - `POST /action/departure-time/enabled?index=1&value=true`
+- `POST /action/departure-time/time?index=1&value=07:30`
+- `POST /action/departure-time/weekdays?index=1&value=monday,wednesday`
+- `POST /action/departure-time/repeat?index=1&value=true`
 
 Indices come from cached `GET /details` departure entries and are one-based.
-The connector exposes only the activation switch as a write. Volkswagen app
-4.3.2 displays editor changes for time, weekdays and repetition but does not
-persist them after leaving the editor on the verified production vehicle; those
-controls therefore remain read-only. Scheduling policy, PV decisions and
-profiles remain the responsibility of evcc or Home Assistant.
+Time uses 24-hour `HH:MM` values in five-minute increments. Weekdays use one or
+more comma-separated English weekday identifiers. The connector explicitly
+selects the localized editor action `Speichern` / `Save`; Back and
+`Abbrechen` / `Cancel` discard editor changes. Scheduling policy, PV decisions
+and profiles remain the responsibility of evcc or Home Assistant.
+Volkswagen app 4.3.2 automatically enables repetition when an additional
+weekday is selected; the action response reports that resulting app state.
 
-The connector verifies displayed values after writes and fails safely when the
-app exposes no stable control.
+The connector verifies displayed values before saving, waits for the save
+operation to finish and then reopens the editor to verify persistence. It fails
+safely when the app exposes no stable control or save action.
 
 ## Asynchronous Actions
 

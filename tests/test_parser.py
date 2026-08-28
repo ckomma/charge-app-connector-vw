@@ -608,8 +608,16 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(
             result["actions"]["byName"]["departure-time/enabled"]["available"]
         )
-        self.assertNotIn("departure-time/time", result["actions"]["byName"])
-        self.assertFalse(
+        self.assertTrue(
+            result["actions"]["byName"]["departure-time/time"]["available"]
+        )
+        self.assertTrue(
+            result["actions"]["byName"]["departure-time/weekdays"]["available"]
+        )
+        self.assertTrue(
+            result["actions"]["byName"]["departure-time/repeat"]["available"]
+        )
+        self.assertTrue(
             result["vehicle"]["features"]["departure-times.editor-write"]
         )
         self.assertTrue(
@@ -2805,6 +2813,89 @@ class ParserTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "five-minute increments"):
             reader.set_departure_time_value(1, "time", "07:31")
+
+    def test_departure_editor_save_uses_localized_right_toolbar_action(self):
+        for label in ("Speichern", "Save"):
+            with self.subTest(label=label):
+                root = ET.fromstring(
+                    f"""<hierarchy>
+                    <node resource-id="com.volkswagen.weconnect:id/toolbar"
+                          bounds="[0,0][1080,140]">
+                      <node clickable="true" text="Abbrechen"
+                            bounds="[20,20][220,120]"/>
+                      <node clickable="true" text="{label}"
+                            bounds="[850,20][1060,120]"/>
+                    </node></hierarchy>"""
+                )
+                self.assertEqual(
+                    VolkswagenReader.departure_editor_save_center(root),
+                    (955, 70),
+                )
+
+    def test_departure_editor_save_rejects_cancel_and_back_only_toolbar(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node resource-id="com.volkswagen.weconnect:id/toolbar"
+                  bounds="[0,0][1080,140]">
+              <node clickable="true" text="Abbrechen"
+                    bounds="[20,20][220,120]"/>
+            </node></hierarchy>"""
+        )
+        with self.assertRaisesRegex(RuntimeError, "save action not found"):
+            VolkswagenReader.departure_editor_save_center(root)
+
+    def test_departure_editor_noop_does_not_wait_for_save_action(self):
+        current = {
+            "index": 1,
+            "time": "06:15",
+            "weekdays": ["tuesday"],
+            "repeat": False,
+        }
+        for kind, value in (
+            ("time", "06:15"),
+            ("weekdays", "tuesday"),
+            ("repeat", "false"),
+        ):
+            with self.subTest(kind=kind):
+                reader = object.__new__(VolkswagenReader)
+                reader.screen_session = Mock(return_value=nullcontext())
+                reader.launch = Mock()
+                reader.open_departure_time_editor = Mock(return_value=object())
+                reader.read_departure_time_editor = Mock(return_value=current)
+                reader.wait_for_departure_save_action = Mock()
+
+                self.assertIs(reader.set_departure_time_value(1, kind, value), current)
+                reader.wait_for_departure_save_action.assert_not_called()
+
+    def test_departure_save_completion_submits_optional_spin_once(self):
+        pin = ET.fromstring(
+            """<hierarchy><node text="S-PIN"/>
+            <node class="android.widget.EditText" bounds="[100,200][900,300]"/>
+            </hierarchy>"""
+        )
+        rows = ET.fromstring(
+            """<hierarchy><node clickable="true" bounds="[0,100][1000,300]">
+            <node text="07:30"/><node text="Tuesday"/>
+            <node clickable="true" checkable="true" checked="false"
+                  bounds="[800,120][950,250]"/>
+            </node></hierarchy>"""
+        )
+        reader = object.__new__(VolkswagenReader)
+        reader.spin = "1234"
+        reader.dump_ui_with_overlay_recovery = Mock(side_effect=(pin, rows))
+        reader.shell = Mock()
+
+        with patch("time.sleep"):
+            result = reader.wait_for_departure_save_completion("save.xml")
+
+        self.assertIs(result, rows)
+        self.assertEqual(
+            reader.shell.call_args_list,
+            [
+                call("input", "tap", "500", "250"),
+                call("input", "text", "1234"),
+            ],
+        )
 
     def test_departure_time_enable_uses_semantic_row_switch(self):
         disabled = ET.fromstring(

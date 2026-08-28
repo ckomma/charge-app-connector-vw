@@ -516,6 +516,7 @@ class VolkswagenReader:
         "saturday": "/cta_saturday",
         "sunday": "/cta_sunday",
     }
+    DEPARTURE_SAVE_LABELS = ("Speichern", "Save")
 
     def __init__(self) -> None:
         self.usb_serial = required_env("ADB_SERIAL")
@@ -2828,7 +2829,9 @@ class VolkswagenReader:
         result.capabilities["departure-times.enabled-write"] = bool(
             result.departureTimes
         )
-        result.capabilities["departure-times.editor-write"] = False
+        result.capabilities["departure-times.editor-write"] = bool(
+            result.departureTimes
+        )
         result.capabilities["departure-times.charging-locations"] = not bool(
             re.search(
                 r"Legen Sie zuerst.*Ladeorte|first.*charging locations?",
@@ -2932,6 +2935,73 @@ class VolkswagenReader:
                 return root
             if time.monotonic() >= deadline:
                 raise RuntimeError("Volkswagen departure-time editor did not finish")
+            time.sleep(0.5)
+
+    @classmethod
+    def departure_editor_save_center(
+        cls, root: ET.Element
+    ) -> tuple[int, int]:
+        save_labels = {label.casefold() for label in cls.DEPARTURE_SAVE_LABELS}
+        for toolbar in cls.resource_nodes(root, "/toolbar"):
+            candidates: list[tuple[int, int]] = []
+            for node in toolbar.iter():
+                values = (
+                    node.attrib.get("text", "").strip(),
+                    node.attrib.get("content-desc", "").strip(),
+                )
+                if not any(value.casefold() in save_labels for value in values):
+                    continue
+                center = cls.node_center(node)
+                if center is not None:
+                    candidates.append(center)
+            if candidates:
+                return max(candidates, key=lambda center: center[0])
+        raise RuntimeError("Volkswagen departure-time save action not found")
+
+    def wait_for_departure_save_action(
+        self, remote_name: str
+    ) -> tuple[ET.Element, tuple[int, int]]:
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            root = self.dump_ui_with_overlay_recovery(remote_name)
+            try:
+                return root, self.departure_editor_save_center(root)
+            except RuntimeError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "Volkswagen departure-time save action did not appear"
+                    )
+                time.sleep(0.5)
+
+    def wait_for_departure_save_completion(
+        self, remote_name: str, timeout: float = 45
+    ) -> ET.Element:
+        deadline = time.monotonic() + timeout
+        pin_submitted = False
+        while True:
+            root = self.dump_ui_with_overlay_recovery(remote_name)
+            self.raise_for_lockout_state(root)
+            if self.departure_time_rows(root):
+                return root
+            text = "\n".join(self.strings(root))
+            if re.search(r"S-?PIN", text, re.IGNORECASE):
+                if not self.spin:
+                    raise RuntimeError(
+                        "VW_SPIN is required to save this departure time"
+                    )
+                if not pin_submitted:
+                    try:
+                        x, y = self.editable_node_center(root)
+                    except RuntimeError:
+                        pass
+                    else:
+                        self.shell("input", "tap", str(x), str(y))
+                        self.shell("input", "text", self.spin)
+                        pin_submitted = True
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "Volkswagen departure-time save did not finish"
+                )
             time.sleep(0.5)
 
     def set_departure_time_enabled(
@@ -3046,6 +3116,15 @@ class VolkswagenReader:
             self.launch()
             root = self.open_departure_time_editor(index)
             current = self.read_departure_time_editor(index, root)
+            if (
+                (kind == "time" and current["time"] == value)
+                or (
+                    kind == "weekdays"
+                    and set(current["weekdays"]) == requested_weekdays
+                )
+                or (kind == "repeat" and current["repeat"] is desired_repeat)
+            ):
+                return current
             if kind == "time" and current["time"] != value:
                 desired_hour, desired_minute = (int(part) for part in value.split(":"))
                 root = self.adjust_number_picker_value(root, 0, desired_hour, 24)
@@ -3092,32 +3171,20 @@ class VolkswagenReader:
             if actual != expected:
                 raise RuntimeError(f"Volkswagen departure-time {kind} verification failed")
 
-            toolbar_nodes = self.resource_nodes(root, "/toolbar")
-            toolbar_button = next(
-                (
-                    node
-                    for toolbar in toolbar_nodes
-                    for node in toolbar.iter()
-                    if node.attrib.get("clickable") == "true"
-                    and self.node_center(node) is not None
-                ),
-                None,
+            # Volkswagen 4.3.2 changes the toolbar from Back to Cancel/Save only
+            # after the editor state becomes dirty. The first clickable toolbar
+            # item is then Cancel, so select the localized Save action explicitly.
+            _save_root, save_center = self.wait_for_departure_save_action(
+                "vw-departure-save-action.xml"
             )
-            if toolbar_button is None:
-                raise RuntimeError("Volkswagen departure-time toolbar back button not found")
-            toolbar_center = self.node_center(toolbar_button)
-            assert toolbar_center is not None
-            # The editor commits through its toolbar navigation handler. Android's
-            # generic back key only discards the edited values on current app builds.
-            self.shell("input", "tap", str(toolbar_center[0]), str(toolbar_center[1]))
-            # The editor persists asynchronously when leaving the page. Reopening it
-            # immediately can interrupt that write and expose the previous value.
-            time.sleep(self.detail_wait)
+            self.shell("input", "tap", str(save_center[0]), str(save_center[1]))
             try:
-                saved = self.wait_for_departure_times(
+                saved = self.wait_for_departure_save_completion(
                     "vw-departure-saved.xml", max(self.ui_update_timeout, 45)
                 )
-            except RuntimeError:
+            except RuntimeError as exc:
+                if str(exc) != "Volkswagen departure-time save did not finish":
+                    raise
                 LOG.warning(
                     "Volkswagen departure-time list stayed empty after save; "
                     "restarting app once before persistence verification"
@@ -4287,6 +4354,9 @@ class AppState:
         "climate/option/zone-front-left",
         "climate/option/zone-front-right",
         "departure-time/enabled",
+        "departure-time/time",
+        "departure-time/weekdays",
+        "departure-time/repeat",
     )
 
     @staticmethod
@@ -4570,7 +4640,9 @@ class AppState:
                 detail_capabilities["departure-times.enabled-write"] = bool(
                     legacy_departure_write
                 )
-        detail_capabilities["departure-times.editor-write"] = False
+        detail_capabilities["departure-times.editor-write"] = bool(
+            detail_capabilities.get("departure-times.write")
+        )
         evidence: dict[str, bool | None] = {
             "lock": charge_capabilities.get("vehicle.lock"),
             "unlock": charge_capabilities.get("vehicle.lock"),
@@ -4597,6 +4669,14 @@ class AppState:
             "departure-times.enabled-write",
             detail_capabilities.get("departure-times.write"),
         )
+        for name in (
+            "departure-time/time",
+            "departure-time/weekdays",
+            "departure-time/repeat",
+        ):
+            evidence[name] = detail_capabilities.get(
+                "departure-times.editor-write"
+            )
 
         constraints: dict[str, dict[str, object]] = {
             "charging/target-soc": {
@@ -4611,6 +4691,17 @@ class AppState:
                 ]
             },
             "climate/temperature": {"minimum": 15.5, "maximum": 30.0, "step": 0.5},
+            "departure-time/time": {
+                "format": "HH:MM",
+                "minuteStep": 5,
+            },
+            "departure-time/weekdays": {
+                "allowedValues": list(VolkswagenReader.DEPARTURE_WEEKDAYS),
+                "minimumItems": 1,
+            },
+            "departure-time/repeat": {
+                "allowedValues": [False, True],
+            },
         }
         dynamic_actions: dict[str, dict[str, object]] = {}
         for name in supported:
@@ -5054,6 +5145,8 @@ class AppState:
             capabilities = dict(current.capabilities or {})
             capabilities["departure-times.read"] = True
             capabilities["departure-times.write"] = True
+            capabilities["departure-times.enabled-write"] = True
+            capabilities["departure-times.editor-write"] = True
             details = replace(
                 current,
                 departureTimes=departures,
