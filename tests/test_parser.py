@@ -4175,7 +4175,7 @@ class ParserTests(unittest.TestCase):
                 ):
                     self.assertFalse(reader.app_in_foreground())
 
-    def test_launch_uses_direct_activity_start_first(self):
+    def test_launch_uses_vehicle_route_first(self):
         with TemporaryDirectory() as directory:
             environment = {
                 "ADB_SERIAL": "usb-serial",
@@ -4202,14 +4202,50 @@ class ParserTests(unittest.TestCase):
                     (
                         "am",
                         "start",
-                        "-n",
-                        "com.volkswagen.weconnect/.SingleActivity",
+                        "-W",
+                        "-a",
+                        "android.intent.action.VIEW",
+                        "-d",
+                        "weconnect://app/vehicle",
+                        "com.volkswagen.weconnect",
                     ),
                     ("cmd", "statusbar", "collapse"),
                 ],
             )
 
-    def test_launch_falls_back_to_monkey_when_activity_start_misses(self):
+    def test_launch_falls_back_to_activity_when_vehicle_route_fails(self):
+        with TemporaryDirectory() as directory:
+            environment = {
+                "ADB_SERIAL": "usb-serial",
+                "DIAGNOSTICS_DIR": directory,
+            }
+            calls: list[tuple[str, ...]] = []
+
+            def shell(*args, **_kwargs):
+                calls.append(args)
+                if "weconnect://app/vehicle" in args:
+                    raise RuntimeError("route unavailable")
+                return ""
+
+            with patch.dict("os.environ", environment, clear=False):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "shell", side_effect=shell),
+                    patch.object(reader, "app_in_foreground", return_value=True),
+                    patch("time.sleep"),
+                ):
+                    reader.launch()
+            self.assertIn(
+                (
+                    "am",
+                    "start",
+                    "-n",
+                    "com.volkswagen.weconnect/.SingleActivity",
+                ),
+                calls,
+            )
+
+    def test_launch_falls_back_to_monkey_when_route_and_activity_miss(self):
         with TemporaryDirectory() as directory:
             environment = {
                 "ADB_SERIAL": "usb-serial",
@@ -4227,7 +4263,7 @@ class ParserTests(unittest.TestCase):
                     patch.object(
                         reader,
                         "app_in_foreground",
-                        side_effect=(False, True),
+                        side_effect=(False, False, True),
                     ),
                     patch("time.sleep"),
                 ):
@@ -4239,12 +4275,25 @@ class ParserTests(unittest.TestCase):
                 (
                     "am",
                     "start",
+                    "-W",
+                    "-a",
+                    "android.intent.action.VIEW",
+                    "-d",
+                    "weconnect://app/vehicle",
+                    "com.volkswagen.weconnect",
+                ),
+            )
+            self.assertEqual(
+                calls[5],
+                (
+                    "am",
+                    "start",
                     "-n",
                     "com.volkswagen.weconnect/.SingleActivity",
                 ),
             )
             self.assertEqual(
-                calls[5],
+                calls[8],
                 (
                     "monkey",
                     "-p",
