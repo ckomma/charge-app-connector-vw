@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.25
 
 - Add observed, vehicle-specific data and action availability to the additive
   capabilities v2 response while preserving the existing capability lists.
@@ -13,6 +13,18 @@
   app 4.3.2.
 - Treat already-matching editor values as successful no-ops because the app
   only exposes `Speichern` / `Save` after an actual change.
+- Expose a read-only departure-editor settings action, control its charging
+  and climate switches, and report preferred-time state without attempting the
+  infotainment-only edit.
+- Recognize an explicit departure-time save failure without blind retry.
+- Add vehicle-specific maximum-current and solar, bidirectional and discharge
+  charging-mode primitives using Volkswagen app 4.3.2 semantic labels.
+- Open the map route directly with a guarded vehicle-overview fallback and
+  distinguish map/GPS errors from global connector failures.
+- Distinguish request-limit, offline, active-user and optimized-battery-use
+  states; never activate optimized battery use automatically.
+- Queue one usage-protected charge refresh on connector startup and expose
+  health status reasons and data warnings through MQTT discovery.
 
 ## 0.1.24
 

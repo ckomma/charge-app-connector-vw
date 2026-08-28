@@ -122,6 +122,8 @@ class MqttPublisher:
             ("sensor", "address", "Vehicle address", "location", "address", None, None, None, "mdi:map-marker"),
             ("sensor", "parked_duration", "Parked duration", "location", "parkedDuration", None, None, None, "mdi:timer-outline"),
             ("sensor", "connector_status", "Connector health", "health", "status", None, None, None, "mdi:connection"),
+            ("sensor", "status_reasons", "Connector status reasons", "health", "statusReasons", None, None, None, "mdi:alert-circle-outline"),
+            ("sensor", "data_warnings", "Vehicle data warnings", "health", "dataWarnings", None, None, None, "mdi:database-alert-outline"),
             ("sensor", "vehicle_source_age", "Vehicle source age", "health", "vehicleSourceAgeMinutes", "min", "duration", "measurement", None),
             ("binary_sensor", "vehicle_source_stale", "Vehicle source data stale", "health", "vehicleSourceStale", None, "problem", None, None),
             ("sensor", "background_backoff_reason", "Background backoff reason", "health", "backgroundBackoffReason", None, None, None, "mdi:timer-alert-outline"),

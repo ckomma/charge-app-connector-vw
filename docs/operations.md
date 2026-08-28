@@ -82,6 +82,18 @@ An endpoint-local location state is not evidence that charge or details are
 broken. Likewise, old Volkswagen source data is a data-quality warning rather
 than automatically a connector software error.
 
+The connector distinguishes Volkswagen's general request limit from the
+vehicle-specific too-many-requests response. It also reports vehicle offline,
+another active vehicle user, map unavailability and GPS unavailability as
+machine-readable reasons. An optimized-battery-use prompt is never activated
+automatically; the connector selects only `Nicht jetzt` / `Not now` and reports
+`VEHICLE_ENERGY_UNAVAILABLE`.
+
+On service startup the charge worker queues one protected early refresh so a
+phone connection event missed during downtime does not wait for the parked
+interval. Usage limits, minimum intervals, cooldown and shared backoff remain
+authoritative and may still suppress that refresh.
+
 ## Diagnostics
 
 Failed UI reads retry once and store an error summary, UI dump and screenshot

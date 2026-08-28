@@ -338,6 +338,7 @@ class VehicleData:
 @dataclass
 class ChargingSettingsData:
     targetSoc: int | None = None
+    maxChargingCurrentA: int | None = None
     batteryCare: bool | None = None
     reducedAc: bool | None = None
     autoReleaseAcConnector: bool | None = None
@@ -517,6 +518,31 @@ class VolkswagenReader:
         "sunday": "/cta_sunday",
     }
     DEPARTURE_SAVE_LABELS = ("Speichern", "Save")
+    DEPARTURE_SAVE_FAILURE_LABELS = (
+        "Abfahrtszeit speichern fehlgeschlagen",
+        "Error saving departure time",
+    )
+    CHARGING_MODES = {
+        "immediate": ("Sofortladen", "Immediate charging"),
+        "preferred-times": (
+            "Laden zu bevorzugten Zeiten",
+            "Zu bevorzugten Zeiten laden",
+            "Charge at preferred times",
+        ),
+        "departure": (
+            "Laden zur Abfahrtszeit",
+            "Zur Abfahrtszeit laden",
+            "Charge for departure time",
+        ),
+        "departure-climate": (
+            "Laden & Klima zur Abfahrt",
+            "Zur Abfahrtszeit laden und klimatisieren",
+            "Charge/air condition for departure",
+        ),
+        "solar": ("Laden mit Solarstrom", "Charge using solar power"),
+        "bidirectional": ("Bidirektionales Laden", "Bidirectional charging"),
+        "discharge": ("Entladen", "Discharge"),
+    }
 
     def __init__(self) -> None:
         self.usb_serial = required_env("ADB_SERIAL")
@@ -896,15 +922,7 @@ class VolkswagenReader:
                         self.launch()
                     time.sleep(1)
                     continue
-                overview_text = "\n".join(self.strings(overview)).casefold()
-                if (
-                    "too many requests" in overview_text
-                    or "zu viele anfragen" in overview_text
-                ):
-                    raise VolkswagenRateLimit(
-                        "TOO_MANY_REQUESTS",
-                        "Volkswagen app reports too many requests",
-                    )
+                self.raise_for_rate_limit_state(overview)
                 self.raise_for_lockout_state(overview)
                 try:
                     self.range_tile_center(overview)
@@ -949,6 +967,30 @@ class VolkswagenReader:
         self, root: ET.Element, remote_name: str
     ) -> ET.Element:
         text = "\n".join(self.strings(root)).casefold()
+        optimized_energy_notice = any(
+            value in text
+            for value in (
+                "activate optimised battery use",
+                "activate optimized battery use",
+                "optimierte batterienutzung aktivieren",
+                "aktivieren sie optimierte batterienutzung",
+            )
+        )
+        if optimized_energy_notice:
+            self.record_energy_protection_notice()
+            try:
+                x, y = self.described_node_center_any(
+                    root, ("Nicht jetzt", "Not now")
+                )
+            except RuntimeError:
+                pass
+            else:
+                self.shell("input", "tap", str(x), str(y))
+                time.sleep(1)
+            raise TransientVolkswagenState(
+                "VEHICLE_ENERGY_UNAVAILABLE",
+                "Volkswagen app reports insufficient vehicle energy for app operation",
+            )
         german_notice = "intelligentes stromsparen" in text or (
             "stromsparen" in text and "batterie" in text and "schon" in text
         )
@@ -957,10 +999,7 @@ class VolkswagenReader:
         )
         if not german_notice and not english_notice:
             return root
-        now = datetime.now().astimezone().isoformat(timespec="seconds")
-        with self.telemetry_lock:
-            self.energy_protection_last_seen_at = now
-            self.energy_protection_notice_count += 1
+        self.record_energy_protection_notice()
         try:
             x, y = self.described_node_center_any(
                 root, ("Alles klar", "Got it", "Understood", "OK", "Okay")
@@ -970,6 +1009,12 @@ class VolkswagenReader:
         self.shell("input", "tap", str(x), str(y))
         time.sleep(1)
         return self.dump_ui_with_compose_fallback(remote_name)
+
+    def record_energy_protection_notice(self) -> None:
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        with self.telemetry_lock:
+            self.energy_protection_last_seen_at = now
+            self.energy_protection_notice_count += 1
 
     def energy_protection_telemetry(self) -> tuple[str, int]:
         with self.telemetry_lock:
@@ -989,8 +1034,50 @@ class VolkswagenReader:
         return values
 
     @classmethod
+    def raise_for_rate_limit_state(cls, root: ET.Element) -> None:
+        text = "\n".join(cls.strings(root)).casefold()
+        if "request limit reached" in text or "anfragelimit erreicht" in text:
+            raise VolkswagenRateLimit(
+                "REQUEST_LIMIT_REACHED",
+                "Volkswagen app reports request limit reached",
+            )
+        if "too many requests" in text or "zu viele anfragen" in text:
+            raise VolkswagenRateLimit(
+                "TOO_MANY_REQUESTS",
+                "Volkswagen app reports too many requests",
+            )
+
+    @classmethod
     def raise_for_lockout_state(cls, root: ET.Element) -> None:
         text = "\n".join(cls.strings(root)).casefold()
+        if any(
+            value in text
+            for value in (
+                "vehicle is offline",
+                "vehicle is in offline mode",
+                "fahrzeug ist offline",
+                "fahrzeug ist im offline-modus",
+                "fahrzeug befindet sich im offline-modus",
+            )
+        ):
+            raise TransientVolkswagenState(
+                "VEHICLE_OFFLINE",
+                "Volkswagen app reports that the vehicle is offline",
+            )
+        if any(
+            value in text
+            for value in (
+                "another user is logged into the vehicle",
+                "another user is currently logged into the vehicle",
+                "ein anderer benutzer ist im fahrzeug angemeldet",
+                "eine andere person ist im fahrzeug angemeldet",
+                "anderer nutzer im fahrzeug angemeldet",
+            )
+        ):
+            raise TransientVolkswagenState(
+                "VEHICLE_USER_CONFLICT",
+                "Volkswagen app reports another active vehicle user",
+            )
         if any(
             value in text
             for value in (
@@ -1014,6 +1101,38 @@ class VolkswagenReader:
             raise TransientVolkswagenState(
                 "APP_UNAVAILABLE",
                 "Volkswagen app reports data currently unavailable",
+            )
+
+    @classmethod
+    def raise_for_location_state(cls, root: ET.Element) -> None:
+        text = "\n".join(cls.strings(root)).casefold()
+        if any(
+            value in text
+            for value in (
+                "maps unavailable",
+                "maps is unavailable",
+                "map unavailable",
+                "karten nicht verfügbar",
+                "karte nicht verfügbar",
+            )
+        ):
+            raise TransientEndpointState(
+                "LOCATION_MAPS_UNAVAILABLE",
+                "Volkswagen app reports maps unavailable",
+            )
+        if any(
+            value in text
+            for value in (
+                "gps unavailable",
+                "gps is unavailable",
+                "gps nicht verfügbar",
+                "location unavailable",
+                "standort nicht verfügbar",
+            )
+        ):
+            raise TransientEndpointState(
+                "LOCATION_GPS_UNAVAILABLE",
+                "Volkswagen app reports GPS unavailable",
             )
 
     @staticmethod
@@ -1207,7 +1326,7 @@ class VolkswagenReader:
     @classmethod
     def vehicle_marker_is_selected(cls, root: ET.Element, vehicle_name: str) -> bool:
         values = cls.strings(root)
-        if not vehicle_name or any(
+        if vehicle_name and any(
             vehicle_name.casefold() in value.casefold() for value in values
         ):
             return True
@@ -1452,6 +1571,7 @@ class VolkswagenReader:
             root = self.dismiss_map_notice(
                 self.dump_ui_with_overlay_recovery(remote_name)
             )
+            self.raise_for_location_state(root)
             try:
                 self.described_node_center_any(
                     root, ("Car Locate Button", "Find vehicle")
@@ -1985,10 +2105,12 @@ class VolkswagenReader:
         latitude, longitude = matches[-1]
         return (float(latitude), float(longitude))
 
-    def launch(self) -> None:
+    def launch(self, route: str = "vehicle") -> None:
+        if route not in ("vehicle", "map"):
+            raise ValueError("Volkswagen app route must be vehicle or map")
         self.close_system_overlays()
         self.shell("am", "force-stop", self.package)
-        used_vehicle_route = True
+        used_deep_link = True
         try:
             self.shell(
                 "am",
@@ -1997,14 +2119,14 @@ class VolkswagenReader:
                 "-a",
                 "android.intent.action.VIEW",
                 "-d",
-                "weconnect://app/vehicle",
+                f"weconnect://app/{route}",
                 self.package,
                 timeout=15,
             )
         except RuntimeError:
-            used_vehicle_route = False
+            used_deep_link = False
             LOG.info(
-                "Volkswagen vehicle route unavailable; using direct activity"
+                "Volkswagen %s route unavailable; using direct activity", route
             )
             self.shell(
                 "am",
@@ -2016,7 +2138,7 @@ class VolkswagenReader:
         time.sleep(self.start_wait)
         self.close_system_overlays()
         foreground = self.app_in_foreground()
-        if used_vehicle_route and not foreground:
+        if used_deep_link and not foreground:
             self.close_system_overlays()
             self.shell(
                 "am",
@@ -2357,11 +2479,12 @@ class VolkswagenReader:
             return self.with_retries(self._read, "ACTION_VERIFY")
 
     def _read_location(self) -> LocationData:
-        self.launch()
+        self.launch("map")
         root = self.dismiss_app_notice(
             self.dump_ui_with_overlay_recovery("vw-location-start.xml"),
             "vw-location-start-notice-dismissed.xml",
         )
+        self.raise_for_location_state(root)
         root_text = "\n".join(self.strings(root)).casefold()
         if (
             "not logged into the vehicle" in root_text
@@ -2381,11 +2504,24 @@ class VolkswagenReader:
                 "Volkswagen app reports limited location services",
             )
         vehicle_name = self.parse_vehicle_name(root)
-        x, y = self.described_node_center(root, "Navigation Tab")
-        self.shell("input", "tap", str(x), str(y))
-        time.sleep(self.detail_wait)
-
-        map_root = self.wait_for_car_locate_button("vw-location-map.xml")
+        try:
+            map_root = self.wait_for_car_locate_button("vw-location-map.xml")
+        except TransientEndpointState:
+            raise
+        except RuntimeError:
+            # Older or remotely configured variants may ignore the map route.
+            # Preserve the established vehicle-overview navigation as fallback.
+            self.launch()
+            root = self.dismiss_app_notice(
+                self.dump_ui_with_overlay_recovery("vw-location-fallback.xml"),
+                "vw-location-fallback-notice-dismissed.xml",
+            )
+            self.raise_for_location_state(root)
+            vehicle_name = self.parse_vehicle_name(root)
+            x, y = self.described_node_center(root, "Navigation Tab")
+            self.shell("input", "tap", str(x), str(y))
+            time.sleep(self.detail_wait)
+            map_root = self.wait_for_car_locate_button("vw-location-map.xml")
         x, y = self.described_node_center_any(
             map_root, ("Car Locate Button", "Find vehicle")
         )
@@ -2753,6 +2889,12 @@ class VolkswagenReader:
             )
         ]
         repeat_nodes = cls.resource_nodes(root, "/cta_repeat")
+        charging_nodes = cls.resource_nodes(root, "/cta_charging")
+        climate_nodes = cls.resource_nodes(root, "/cta_clima")
+        preferred_nodes = cls.resource_nodes(root, "/layout_preferred_times")
+        preferred_active_nodes = cls.resource_nodes(
+            root, "/preferred_times_active_label"
+        )
         return {
             "index": index,
             "time": f"{hour:02d}:{minute:02d}",
@@ -2760,6 +2902,22 @@ class VolkswagenReader:
             "repeat": (
                 repeat_nodes[0].attrib.get("checked") == "true"
                 if repeat_nodes
+                else None
+            ),
+            "charging": (
+                charging_nodes[0].attrib.get("checked") == "true"
+                if charging_nodes
+                else None
+            ),
+            "climate": (
+                climate_nodes[0].attrib.get("checked") == "true"
+                if climate_nodes
+                else None
+            ),
+            "preferredTimesAvailable": bool(preferred_nodes),
+            "preferredTimesActive": (
+                preferred_active_nodes[0].attrib.get("visible-to-user") == "true"
+                if preferred_active_nodes
                 else None
             ),
         }
@@ -2844,6 +3002,11 @@ class VolkswagenReader:
     def read_details(self) -> DetailData:
         with self.screen_session():
             return self.with_retries(self._read_details, "DETAILS")
+
+    def get_departure_time_settings(self, index: int) -> dict[str, object]:
+        with self.screen_session():
+            root = self.open_departure_time_editor(index)
+            return self.read_departure_time_editor(index, root)
 
     def set_target_temperature(self, desired: float) -> float:
         desired = round(desired * 2) / 2
@@ -2984,6 +3147,11 @@ class VolkswagenReader:
             if self.departure_time_rows(root):
                 return root
             text = "\n".join(self.strings(root))
+            if any(
+                label.casefold() in text.casefold()
+                for label in self.DEPARTURE_SAVE_FAILURE_LABELS
+            ):
+                raise RuntimeError("Volkswagen departure-time save failed")
             if re.search(r"S-?PIN", text, re.IGNORECASE):
                 if not self.spin:
                     raise RuntimeError(
@@ -3107,8 +3275,8 @@ class VolkswagenReader:
                     "weekdays must contain one or more of "
                     f"{list(self.DEPARTURE_WEEKDAYS)}"
                 )
-        elif kind == "repeat":
-            desired_repeat = value.casefold() in ("1", "true", "on")
+        elif kind in ("repeat", "charging", "climate"):
+            desired_boolean = value.casefold() in ("1", "true", "on")
         else:
             raise KeyError(kind)
 
@@ -3122,7 +3290,10 @@ class VolkswagenReader:
                     kind == "weekdays"
                     and set(current["weekdays"]) == requested_weekdays
                 )
-                or (kind == "repeat" and current["repeat"] is desired_repeat)
+                or (
+                    kind in ("repeat", "charging", "climate")
+                    and current[kind] is desired_boolean
+                )
             ):
                 return current
             if kind == "time" and current["time"] != value:
@@ -3148,13 +3319,25 @@ class VolkswagenReader:
                                 "Volkswagen departure weekday has no geometry"
                             )
                         self.shell("input", "tap", str(center[0]), str(center[1]))
-            elif kind == "repeat" and current["repeat"] is not desired_repeat:
-                repeat_nodes = self.resource_nodes(root, "/cta_repeat")
-                if not repeat_nodes:
-                    raise RuntimeError("Volkswagen departure repeat switch not found")
-                center = self.node_center(repeat_nodes[0])
+            elif (
+                kind in ("repeat", "charging", "climate")
+                and current[kind] is not desired_boolean
+            ):
+                resource = {
+                    "repeat": "/cta_repeat",
+                    "charging": "/cta_charging",
+                    "climate": "/cta_clima",
+                }[kind]
+                nodes = self.resource_nodes(root, resource)
+                if not nodes:
+                    raise RuntimeError(
+                        f"Volkswagen departure {kind} switch not found"
+                    )
+                center = self.node_center(nodes[0])
                 if center is None:
-                    raise RuntimeError("Volkswagen departure repeat switch has no geometry")
+                    raise RuntimeError(
+                        f"Volkswagen departure {kind} switch has no geometry"
+                    )
                 self.shell("input", "tap", str(center[0]), str(center[1]))
 
             root = self.wait_for_departure_editor("vw-departure-edit-verify.xml")
@@ -3420,6 +3603,13 @@ class VolkswagenReader:
     def read_charging_settings(self, root: ET.Element) -> ChargingSettingsData:
         values = self.setting_values(root)
         result = ChargingSettingsData(targetSoc=values[0][1] if values else None)
+        ampere_values = [
+            int(match.group(1))
+            for value in self.strings(root)
+            if (match := re.fullmatch(r"\s*(\d{1,2})\s*A\s*", value))
+        ]
+        if ampere_values:
+            result.maxChargingCurrentA = ampere_values[0]
         for attribute, labels in (
             ("batteryCare", self.BATTERY_CARE_LABELS),
             ("reducedAc", self.REDUCED_AC_LABELS),
@@ -3519,16 +3709,38 @@ class VolkswagenReader:
             setattr(result, attribute, desired)
             return result
 
+    def set_max_charging_current(self, desired: int) -> ChargingSettingsData:
+        if not 1 <= desired <= 80:
+            raise ValueError("maximum charging current must be between 1 and 80 A")
+        with self.screen_session():
+            self.launch()
+            root = self.open_charging_settings()
+            result = self.read_charging_settings(root)
+            if result.maxChargingCurrentA == desired:
+                return result
+            x, y = self.described_node_center_any(
+                root,
+                ("Max. Ladestrom", "Maximaler Ladestrom", "Max. charging current"),
+            )
+            self.shell("input", "tap", str(x), str(y))
+            _choices, (x, y) = self.wait_for_described_node(
+                "vw-max-charging-current.xml", (f"{desired} A",)
+            )
+            self.shell("input", "tap", str(x), str(y))
+            time.sleep(self.detail_wait)
+            verify = self.dump_ui_with_overlay_recovery(
+                "vw-max-charging-current-verify.xml"
+            )
+            verify_text = "\n".join(self.strings(verify))
+            if not re.search(rf"(?<!\d){desired}\s*A(?!\d)", verify_text):
+                raise RuntimeError(
+                    "Volkswagen maximum charging current verification failed"
+                )
+            result.maxChargingCurrentA = desired
+            return result
+
     def set_charging_mode(self, mode: str) -> str:
-        modes = {
-            "immediate": ("Sofortladen", "Immediate charging"),
-            "preferred-times": ("Zu bevorzugten Zeiten laden", "Charge at preferred times"),
-            "departure": ("Zur Abfahrtszeit laden", "Charge for departure time"),
-            "departure-climate": (
-                "Zur Abfahrtszeit laden und klimatisieren",
-                "Charge/air condition for departure",
-            ),
-        }
+        modes = self.CHARGING_MODES
         if mode not in modes:
             raise ValueError(f"mode must be one of {list(modes)}")
         with self.screen_session():
@@ -4329,6 +4541,7 @@ class AppState:
         "charging/settings",
         "charging-location/settings",
         "charging-locations",
+        "departure-time/settings",
     }
     SUPPORTED_ACTIONS = (
         "lock",
@@ -4336,6 +4549,7 @@ class AppState:
         "charging/start",
         "charging/stop",
         "charging/target-soc",
+        "charging/max-current",
         "charging/mode",
         "charging/settings",
         "charging/option/battery-care",
@@ -4357,6 +4571,9 @@ class AppState:
         "departure-time/time",
         "departure-time/weekdays",
         "departure-time/repeat",
+        "departure-time/charging",
+        "departure-time/climate",
+        "departure-time/settings",
     )
 
     @staticmethod
@@ -4410,6 +4627,17 @@ class AppState:
                 else ""
             )
         )
+        if isinstance(previous, VehicleData):
+            value.capabilities = dict(value.capabilities or {})
+            previous_capabilities = previous.capabilities or {}
+            for capability in ("charging.max-current",):
+                if (
+                    capability not in value.capabilities
+                    and capability in previous_capabilities
+                ):
+                    value.capabilities[capability] = previous_capabilities[
+                        capability
+                    ]
         return value
 
     def priority_pending(self) -> bool:
@@ -4562,8 +4790,17 @@ class AppState:
             error_retry_intervals={
                 "LOCATION_USER_CONTEXT_UNAVAILABLE": location_interval,
                 "LOCATION_SERVICES_UNAVAILABLE": location_interval,
+                "LOCATION_MAPS_UNAVAILABLE": location_interval,
+                "LOCATION_GPS_UNAVAILABLE": location_interval,
             },
         )
+
+        # A persisted charge cache can still be younger than the parked
+        # interval when the service starts. Queue one protected refresh so a
+        # connection event missed while the connector was stopped does not
+        # wait for the full idle interval. Existing usage protection remains
+        # authoritative inside the background worker.
+        self.charge.request_early_refresh()
 
         self.mqtt = MqttPublisher.from_environment(self.mqtt_state)
         if self.mqtt is not None:
@@ -4649,6 +4886,9 @@ class AppState:
             "charging/start": charge_capabilities.get("charging.start-stop"),
             "charging/stop": charge_capabilities.get("charging.start-stop"),
             "charging/target-soc": charge_capabilities.get("charging.target-soc"),
+            "charging/max-current": charge_capabilities.get(
+                "charging.max-current"
+            ),
             "charging/mode": charge_capabilities.get("charging.mode"),
             "climate/start": charge_capabilities.get("climate.start-stop"),
             "climate/stop": charge_capabilities.get("climate.start-stop"),
@@ -4673,10 +4913,17 @@ class AppState:
             "departure-time/time",
             "departure-time/weekdays",
             "departure-time/repeat",
+            "departure-time/settings",
         ):
             evidence[name] = detail_capabilities.get(
                 "departure-times.editor-write"
             )
+        evidence["departure-time/charging"] = detail_capabilities.get(
+            "departure-times.charging-write"
+        )
+        evidence["departure-time/climate"] = detail_capabilities.get(
+            "departure-times.climate-write"
+        )
 
         constraints: dict[str, dict[str, object]] = {
             "charging/target-soc": {
@@ -4688,6 +4935,9 @@ class AppState:
                     "preferred-times",
                     "departure",
                     "departure-climate",
+                    "solar",
+                    "bidirectional",
+                    "discharge",
                 ]
             },
             "climate/temperature": {"minimum": 15.5, "maximum": 30.0, "step": 0.5},
@@ -4700,6 +4950,12 @@ class AppState:
                 "minimumItems": 1,
             },
             "departure-time/repeat": {
+                "allowedValues": [False, True],
+            },
+            "departure-time/charging": {
+                "allowedValues": [False, True],
+            },
+            "departure-time/climate": {
                 "allowedValues": [False, True],
             },
         }
@@ -5129,6 +5385,37 @@ class AppState:
         if name.startswith("departure-time/"):
             index = int(query["index"][0])
             kind = name.removeprefix("departure-time/")
+            if kind == "settings":
+                result = self.reader.get_departure_time_settings(index)
+                with self.details.lock:
+                    current = self.details.value or DetailData()
+                departures = [
+                    dict(item) for item in (current.departureTimes or [])
+                ]
+                while len(departures) < index:
+                    departures.append({"index": len(departures) + 1})
+                departures[index - 1].update(result)
+                capabilities = dict(current.capabilities or {})
+                capabilities["departure-times.charging-write"] = (
+                    result.get("charging") is not None
+                )
+                capabilities["departure-times.climate-write"] = (
+                    result.get("climate") is not None
+                )
+                capabilities["departure-times.preferred-times-read"] = bool(
+                    result.get("preferredTimesAvailable")
+                )
+                self.details.patch_value(
+                    replace(
+                        current,
+                        departureTimes=departures,
+                        capabilities=capabilities,
+                        observedAt=datetime.now()
+                        .astimezone()
+                        .isoformat(timespec="seconds"),
+                    )
+                )
+                return result
             if kind == "enabled":
                 desired = query["value"][0].casefold() in ("1", "true", "on")
                 result = self.reader.set_departure_time_enabled(index, desired)
@@ -5164,11 +5451,27 @@ class AppState:
                     replace(current, targetSoc=settings.targetSoc)
                 )
             return settings
+        if name == "charging/max-current":
+            return self.reader.set_max_charging_current(int(query["value"][0]))
         if name == "charging/mode":
             self.reader.set_charging_mode(query["value"][0])
             return self.charge.set_value(self.reader.read())
         if name == "charging/settings":
-            return self.reader.get_charging_settings()
+            settings = self.reader.get_charging_settings()
+            with self.charge.lock:
+                current = self.charge.value or VehicleData()
+            capabilities = dict(current.capabilities or {})
+            capabilities["charging.max-current"] = (
+                settings.maxChargingCurrentA is not None
+            )
+            self.charge.patch_value(
+                replace(
+                    current,
+                    targetSoc=settings.targetSoc,
+                    capabilities=capabilities,
+                )
+            )
+            return settings
         if name.startswith("charging/option/"):
             desired = query["value"][0].casefold() in ("1", "true", "on")
             option = name.removeprefix("charging/option/")
@@ -5335,6 +5638,8 @@ class AppState:
             if value.locationErrorCategory in (
                 "LOCATION_USER_CONTEXT_UNAVAILABLE",
                 "LOCATION_SERVICES_UNAVAILABLE",
+                "LOCATION_MAPS_UNAVAILABLE",
+                "LOCATION_GPS_UNAVAILABLE",
             ):
                 add_status_reason(value.locationErrorCategory)
             if status_reasons:

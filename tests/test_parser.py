@@ -583,6 +583,8 @@ class ParserTests(unittest.TestCase):
                     "vehicle-report.service": True,
                     "departure-times.read": True,
                     "departure-times.write": True,
+                    "departure-times.charging-write": False,
+                    "departure-times.climate-write": True,
                 }
             )
         )
@@ -592,6 +594,7 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(result["features"]["mqtt"])
         self.assertIn("charging/target-soc", result["actions"]["write"])
         self.assertIn("charging/settings", result["actions"]["readOnly"])
+        self.assertIn("departure-time/settings", result["actions"]["readOnly"])
         self.assertEqual(
             result["administrativeEndpoints"]["cooldownProbe"],
             "/admin/cooldown/probe",
@@ -616,6 +619,12 @@ class ParserTests(unittest.TestCase):
         )
         self.assertTrue(
             result["actions"]["byName"]["departure-time/repeat"]["available"]
+        )
+        self.assertFalse(
+            result["actions"]["byName"]["departure-time/charging"]["available"]
+        )
+        self.assertTrue(
+            result["actions"]["byName"]["departure-time/climate"]["available"]
         )
         self.assertTrue(
             result["vehicle"]["features"]["departure-times.editor-write"]
@@ -750,6 +759,14 @@ class ParserTests(unittest.TestCase):
         )
         self.assertIn(
             "homeassistant/sensor/vw-app-connector/connector_status/config",
+            topics,
+        )
+        self.assertIn(
+            "homeassistant/sensor/vw-app-connector/status_reasons/config",
+            topics,
+        )
+        self.assertIn(
+            "homeassistant/sensor/vw-app-connector/data_warnings/config",
             topics,
         )
         self.assertIn(
@@ -2805,6 +2822,10 @@ class ParserTests(unittest.TestCase):
                 "time": "07:30",
                 "weekdays": ["monday"],
                 "repeat": True,
+                "charging": None,
+                "climate": None,
+                "preferredTimesAvailable": False,
+                "preferredTimesActive": None,
             },
         )
 
@@ -3557,6 +3578,14 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(
             unknown.lastFreshVehicleDataAt, fresh.lastFreshVehicleDataAt
         )
+
+    def test_charge_refresh_preserves_settings_capability_observation(self):
+        current = VehicleData(capabilities={"charging.start-stop": True})
+        previous = VehicleData(capabilities={"charging.max-current": False})
+
+        result = AppState.annotate_vehicle_source(current, previous, 60)
+
+        self.assertFalse(result.capabilities["charging.max-current"])
 
     def test_usage_limit_cache_refresh_logs_without_traceback(self):
         with patch("threading.Thread.start"):
@@ -4695,6 +4724,193 @@ second device usb:1-2
                 ):
                     with self.assertRaisesRegex(RuntimeError, "Multiple USB"):
                         reader.select_serial()
+
+    def test_decompiled_rate_limit_variants_remain_distinct(self):
+        for message, reason in (
+            ("Request limit reached", "REQUEST_LIMIT_REACHED"),
+            ("Anfragelimit erreicht", "REQUEST_LIMIT_REACHED"),
+            ("Too many requests sent to the vehicle", "TOO_MANY_REQUESTS"),
+            ("Zu viele Anfragen ans Fahrzeug gesendet", "TOO_MANY_REQUESTS"),
+        ):
+            with self.subTest(message=message):
+                root = ET.fromstring(
+                    f'<hierarchy><node text="{message}"/></hierarchy>'
+                )
+                with self.assertRaises(VolkswagenRateLimit) as raised:
+                    VolkswagenReader.raise_for_rate_limit_state(root)
+                self.assertEqual(raised.exception.reason, reason)
+
+    def test_optimised_battery_use_is_never_activated_automatically(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node text="Activate optimised battery use"/>
+            <node text="Activate" bounds="[100,1500][500,1600]"/>
+            <node text="Not now" bounds="[500,1500][900,1600]"/>
+            </hierarchy>"""
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with patch.object(reader, "shell") as shell, patch("time.sleep"):
+                    with self.assertRaises(TransientVolkswagenState) as raised:
+                        reader.dismiss_overview_notice(root, "unused.xml")
+        self.assertEqual(raised.exception.reason, "VEHICLE_ENERGY_UNAVAILABLE")
+        shell.assert_called_once_with("input", "tap", "700", "1550")
+        self.assertEqual(reader.energy_protection_telemetry()[1], 1)
+
+    def test_decompiled_vehicle_states_are_semantic(self):
+        for message, reason in (
+            ("Your vehicle is in offline mode", "VEHICLE_OFFLINE"),
+            ("Ihr Fahrzeug befindet sich im Offline-Modus", "VEHICLE_OFFLINE"),
+            (
+                "Function currently unavailable, as another user is logged into the vehicle.",
+                "VEHICLE_USER_CONFLICT",
+            ),
+            (
+                "Funktion momentan nicht verfügbar, da ein anderer Nutzer im Fahrzeug angemeldet ist.",
+                "VEHICLE_USER_CONFLICT",
+            ),
+        ):
+            with self.subTest(message=message):
+                root = ET.fromstring(
+                    f'<hierarchy><node text="{message}"/></hierarchy>'
+                )
+                with self.assertRaises(TransientVolkswagenState) as raised:
+                    VolkswagenReader.raise_for_lockout_state(root)
+                self.assertEqual(raised.exception.reason, reason)
+
+    def test_location_maps_and_gps_states_are_endpoint_local(self):
+        for message, reason in (
+            ("Maps unavailable", "LOCATION_MAPS_UNAVAILABLE"),
+            ("Karten nicht verfügbar", "LOCATION_MAPS_UNAVAILABLE"),
+            ("GPS unavailable", "LOCATION_GPS_UNAVAILABLE"),
+            ("GPS nicht verfügbar", "LOCATION_GPS_UNAVAILABLE"),
+        ):
+            with self.subTest(message=message):
+                root = ET.fromstring(
+                    f'<hierarchy><node text="{message}"/></hierarchy>'
+                )
+                with self.assertRaises(TransientEndpointState) as raised:
+                    VolkswagenReader.raise_for_location_state(root)
+                self.assertEqual(raised.exception.reason, reason)
+
+    def test_departure_save_error_is_reported_without_timeout_retry(self):
+        root = ET.fromstring(
+            '<hierarchy><node text="Error saving departure time"/></hierarchy>'
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with patch.object(
+                    reader, "dump_ui_with_overlay_recovery", return_value=root
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "departure-time save failed"
+                    ):
+                        reader.wait_for_departure_save_completion("save.xml")
+
+    def test_departure_editor_exposes_charging_climate_and_preferred_times(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node resource-id="com.volkswagen.weconnect:id/numberpicker_input"
+                  text="06" bounds="[10,10][60,60]"/>
+            <node resource-id="com.volkswagen.weconnect:id/numberpicker_input"
+                  text="15" bounds="[70,10][120,60]"/>
+            <node resource-id="com.volkswagen.weconnect:id/cta_repeat"
+                  checked="false" bounds="[10,70][120,120]"/>
+            <node resource-id="com.volkswagen.weconnect:id/cta_charging"
+                  checked="true" bounds="[10,130][120,180]"/>
+            <node resource-id="com.volkswagen.weconnect:id/cta_clima"
+                  checked="false" bounds="[10,190][120,240]"/>
+            <node resource-id="com.volkswagen.weconnect:id/layout_preferred_times"
+                  bounds="[10,250][120,300]"/>
+            <node resource-id="com.volkswagen.weconnect:id/preferred_times_active_label"
+                  visible-to-user="true"
+                  bounds="[10,310][120,360]"/>
+            </hierarchy>"""
+        )
+        result = VolkswagenReader.read_departure_time_editor(1, root)
+        self.assertTrue(result["charging"])
+        self.assertFalse(result["climate"])
+        self.assertTrue(result["preferredTimesAvailable"])
+        self.assertTrue(result["preferredTimesActive"])
+
+    def test_decompiled_charging_modes_include_current_german_labels(self):
+        modes = VolkswagenReader.CHARGING_MODES
+        self.assertIn("Laden zu bevorzugten Zeiten", modes["preferred-times"])
+        self.assertIn("Laden zur Abfahrtszeit", modes["departure"])
+        self.assertIn("Laden & Klima zur Abfahrt", modes["departure-climate"])
+        self.assertIn("Laden mit Solarstrom", modes["solar"])
+        self.assertIn("Bidirektionales Laden", modes["bidirectional"])
+        self.assertIn("Entladen", modes["discharge"])
+
+    def test_maximum_charging_current_is_parsed_from_settings(self):
+        root = ET.fromstring(
+            '<hierarchy><node text="Max. charging current"/><node text="13 A"/></hierarchy>'
+        )
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                result = VolkswagenReader().read_charging_settings(root)
+        self.assertEqual(result.maxChargingCurrentA, 13)
+
+    def test_map_route_is_used_directly(self):
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "shell") as shell,
+                    patch.object(reader, "close_system_overlays"),
+                    patch.object(reader, "app_in_foreground", return_value=True),
+                    patch("time.sleep"),
+                ):
+                    reader.launch("map")
+        self.assertTrue(
+            any("weconnect://app/map" in invocation.args for invocation in shell.call_args_list)
+        )
+
+    def test_marker_without_vehicle_name_still_requires_vehicle_sheet(self):
+        poi = ET.fromstring(
+            '<hierarchy><node text="Nearby charging station"/><node text="Route"/></hierarchy>'
+        )
+        vehicle = ET.fromstring(
+            '<hierarchy><node text="Parked since 10 minutes"/><node text="Route"/></hierarchy>'
+        )
+        self.assertFalse(VolkswagenReader.vehicle_marker_is_selected(poi, ""))
+        self.assertTrue(VolkswagenReader.vehicle_marker_is_selected(vehicle, ""))
+
+    def test_app_state_queues_startup_charge_refresh(self):
+        charge = Mock()
+        details = Mock()
+        location = Mock()
+        with (
+            patch("vw_app_connector.VolkswagenReader"),
+            patch("vw_app_connector.UsageLimiter"),
+            patch("vw_app_connector.BackgroundTransientBackoff"),
+            patch(
+                "vw_app_connector.BackgroundCache",
+                side_effect=(charge, details, location),
+            ),
+            patch("vw_app_connector.MqttPublisher.from_environment", return_value=None),
+            patch("vw_app_connector.ActionJobManager"),
+        ):
+            AppState()
+        charge.request_early_refresh.assert_called_once_with()
 
 
 if __name__ == "__main__":
