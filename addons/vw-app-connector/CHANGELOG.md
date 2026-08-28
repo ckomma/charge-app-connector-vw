@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.25
+## Unreleased
 
 - Add observed, vehicle-specific data and action availability to the additive
   capabilities v2 response while preserving the existing capability lists.
