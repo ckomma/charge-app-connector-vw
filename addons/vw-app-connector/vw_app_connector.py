@@ -1987,16 +1987,47 @@ class VolkswagenReader:
     def launch(self) -> None:
         self.close_system_overlays()
         self.shell("am", "force-stop", self.package)
-        self.shell(
-            "am",
-            "start",
-            "-n",
-            f"{self.package}/.SingleActivity",
-            timeout=15,
-        )
+        used_vehicle_route = True
+        try:
+            self.shell(
+                "am",
+                "start",
+                "-W",
+                "-a",
+                "android.intent.action.VIEW",
+                "-d",
+                "weconnect://app/vehicle",
+                self.package,
+                timeout=15,
+            )
+        except RuntimeError:
+            used_vehicle_route = False
+            LOG.info(
+                "Volkswagen vehicle route unavailable; using direct activity"
+            )
+            self.shell(
+                "am",
+                "start",
+                "-n",
+                f"{self.package}/.SingleActivity",
+                timeout=15,
+            )
         time.sleep(self.start_wait)
         self.close_system_overlays()
-        if not self.app_in_foreground():
+        foreground = self.app_in_foreground()
+        if used_vehicle_route and not foreground:
+            self.close_system_overlays()
+            self.shell(
+                "am",
+                "start",
+                "-n",
+                f"{self.package}/.SingleActivity",
+                timeout=15,
+            )
+            time.sleep(self.start_wait)
+            self.close_system_overlays()
+            foreground = self.app_in_foreground()
+        if not foreground:
             self.close_system_overlays()
             self.shell(
                 "monkey",
@@ -2009,7 +2040,8 @@ class VolkswagenReader:
             )
             time.sleep(self.start_wait)
             self.close_system_overlays()
-        if not self.app_in_foreground():
+            foreground = self.app_in_foreground()
+        if not foreground:
             raise RuntimeError("Volkswagen app did not reach the foreground")
         if (
             getattr(self.context, "background", False)
