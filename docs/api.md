@@ -92,15 +92,18 @@ Send `X-API-Key` with every action request.
 - `POST /action/charging/start`
 - `POST /action/charging/stop`
 - `POST /action/charging/target-soc?value=80`
+- `POST /action/charging/max-current?value=13`
 - `POST /action/charging/mode?value=immediate`
 - `POST /action/charging/settings`
 - `POST /action/charging/option/battery-care?value=true`
 - `POST /action/charging/option/reduced-ac?value=true`
 - `POST /action/charging/option/auto-release-ac?value=true`
 
-Target state of charge supports 50, 60, 70, 80, 90 and 100 percent. Charging
-modes are `immediate`, `preferred-times`, `departure` and
-`departure-climate`.
+Target state of charge supports 50, 60, 70, 80, 90 and 100 percent. Maximum
+charging current is accepted only when the vehicle exposes that setting.
+Charging modes are `immediate`, `preferred-times`, `departure`,
+`departure-climate`, `solar`, `bidirectional` and `discharge`; availability is
+vehicle-specific and reported by `GET /capabilities`.
 
 ### Charging locations
 
@@ -127,13 +130,20 @@ Volkswagen `LO` and `HI` variants map to the lower and upper boundaries.
 
 ### Departure times
 
+- `POST /action/departure-time/settings?index=1`
 - `POST /action/departure-time/enabled?index=1&value=true`
 - `POST /action/departure-time/time?index=1&value=07:30`
 - `POST /action/departure-time/weekdays?index=1&value=monday,wednesday`
 - `POST /action/departure-time/repeat?index=1&value=true`
+- `POST /action/departure-time/charging?index=1&value=true`
+- `POST /action/departure-time/climate?index=1&value=true`
 
 Indices come from cached `GET /details` departure entries and are one-based.
-Time uses 24-hour `HH:MM` values in five-minute increments. Weekdays use one or
+The read-only `settings` action reports the editor's `charging`, `climate`,
+`preferredTimesAvailable` and `preferredTimesActive` state. Preferred times
+remain read-only because Volkswagen app 4.3.2 directs their configuration to
+the vehicle infotainment system. Time uses 24-hour `HH:MM` values in
+five-minute increments. Weekdays use one or
 more comma-separated English weekday identifiers. The connector explicitly
 selects the localized editor action `Speichern` / `Save`; Back and
 `Abbrechen` / `Cancel` discard editor changes. Scheduling policy, PV decisions
@@ -143,7 +153,9 @@ weekday is selected; the action response reports that resulting app state.
 
 The connector verifies displayed values before saving, waits for the save
 operation to finish and then reopens the editor to verify persistence. It fails
-safely when the app exposes no stable control or save action.
+safely when the app exposes no stable control or save action. Volkswagen's
+explicit `Abfahrtszeit speichern fehlgeschlagen` / `Error saving departure
+time` result is returned immediately and is not blindly retried.
 
 ## Asynchronous Actions
 

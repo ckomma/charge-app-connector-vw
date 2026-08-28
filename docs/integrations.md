@@ -14,7 +14,10 @@ It never triggers a Volkswagen app operation and is intentionally read-only.
 Vehicle actions remain authenticated REST calls.
 
 Connector health, Volkswagen source age/staleness and background backoff are
-separate entities. The lock entity follows Home Assistant convention:
+separate entities. MQTT discovery also exposes connector `statusReasons` and
+vehicle `dataWarnings` as distinct diagnostic sensors, so transport or service
+failures are not conflated with stale vehicle source data. The lock entity
+follows Home Assistant convention:
 `locked: true` maps to binary-sensor `OFF`, while `locked: false` maps to `ON`.
 The GPS tracker lets Home Assistant derive its zone state. Do not enable
 location publishing on an untrusted broker.
