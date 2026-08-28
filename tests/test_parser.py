@@ -405,6 +405,19 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual(json.loads(response.read())["targetSoc"], 80)
 
+            state.action.return_value = {
+                "index": 1,
+                "time": "07:30",
+                "day": "Tuesday",
+                "enabled": True,
+            }
+            connection.request(
+                "POST", "/action/departure-time/enabled?index=1&value=true", headers=headers
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertTrue(json.loads(response.read())["enabled"])
+
             async_headers = {**headers, "Prefer": "respond-async"}
             connection.request(
                 "POST",
@@ -549,12 +562,30 @@ class ParserTests(unittest.TestCase):
                 "charge", VehicleData, lambda _: 900, VehicleData
             )
             state.details = BackgroundCache(
-                "details", ChargingSettingsData, lambda _: 900, ChargingSettingsData
+                "details", DetailData, lambda _: 900, DetailData
             )
             state.location = BackgroundCache(
                 "location", LocationData, lambda _: 900, LocationData
             )
-        state.charge.set_value(VehicleData(status="B", soc=55))
+        state.charge.set_value(
+            VehicleData(
+                status="B",
+                soc=55,
+                capabilities={
+                    "vehicle.lock": True,
+                    "charging.start-stop": True,
+                },
+            )
+        )
+        state.details.set_value(
+            DetailData(
+                capabilities={
+                    "vehicle-report.service": True,
+                    "departure-times.read": True,
+                    "departure-times.write": True,
+                }
+            )
+        )
 
         result = state.capabilities()
 
@@ -571,7 +602,26 @@ class ParserTests(unittest.TestCase):
         )
         self.assertTrue(result["features"]["earlyChargeRefresh"])
         self.assertTrue(result["caches"]["charge"]["available"])
-        self.assertFalse(result["caches"]["details"]["available"])
+        self.assertTrue(result["caches"]["details"]["available"])
+        self.assertEqual(result["version"], 2)
+        self.assertTrue(result["actions"]["byName"]["lock"]["available"])
+        self.assertTrue(
+            result["actions"]["byName"]["departure-time/enabled"]["available"]
+        )
+        self.assertNotIn("departure-time/time", result["actions"]["byName"])
+        self.assertFalse(
+            result["vehicle"]["features"]["departure-times.editor-write"]
+        )
+        self.assertTrue(
+            result["vehicle"]["features"]["departure-times.enabled-write"]
+        )
+        self.assertEqual(
+            result["actions"]["byName"]["charging/target-soc"]["reason"],
+            "NOT_OBSERVED",
+        )
+        self.assertTrue(
+            result["vehicle"]["data"]["vehicle-report.service"]["available"]
+        )
 
     def test_metrics_report_usage_cache_and_version_labels(self):
         state = object.__new__(AppState)
@@ -1197,6 +1247,35 @@ class ParserTests(unittest.TestCase):
         patched = state.charge.patch_value.call_args.args[0]
         self.assertEqual(patched.status, "C")
         self.assertEqual(patched.targetSoc, 90)
+
+    def test_departure_action_patches_detail_cache(self):
+        state = object.__new__(AppState)
+        state.reader = Mock()
+        state.reader.set_departure_time_enabled.return_value = {
+            "index": 1,
+            "time": "07:30",
+            "day": "Tuesday",
+            "enabled": True,
+        }
+        state.details = SimpleNamespace(
+            lock=threading.Lock(),
+            value=DetailData(
+                departureTimes=[
+                    {"index": 1, "time": "07:30", "day": "Tuesday", "enabled": False}
+                ],
+                capabilities={"departure-times.write": True},
+            ),
+            patch_value=Mock(),
+        )
+
+        result = state._action(
+            "departure-time/enabled", {"index": ["1"], "value": ["true"]}
+        )
+
+        self.assertTrue(result["enabled"])
+        patched = state.details.patch_value.call_args.args[0]
+        self.assertTrue(patched.departureTimes[0]["enabled"])
+        self.assertTrue(patched.capabilities["departure-times.write"])
 
     def test_action_pending_stays_set_until_all_actions_finish(self):
         state = object.__new__(AppState)
@@ -2589,8 +2668,170 @@ class ParserTests(unittest.TestCase):
         VolkswagenReader.parse_vehicle_report(root, result)
         self.assertEqual(result.odometerKm, 12345)
         self.assertEqual(result.serviceDays, 151)
+        self.assertEqual(result.serviceDistanceKm, 12300)
+        self.assertIsNone(result.oilServiceDays)
         self.assertEqual(result.warningStatus, "Keine Meldungen")
+        self.assertEqual(result.warnings, [])
+        self.assertTrue(result.capabilities["vehicle-report.service"])
+        self.assertFalse(result.capabilities["vehicle-report.oil-service"])
         self.assertEqual(result.reportSyncAge, "3 h 42 min ago")
+
+    def test_german_vehicle_report_exposes_service_oil_and_warnings(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node text="Fahrzeugzustandsbericht"/>
+            <node text="Gesamtstrecke"/><node text="27 886 km"/>
+            <node text="Nächster Service"/><node text="71 Tage / 12.100 km"/>
+            <node text="Nächster Ölwechsel"/><node text="120 Tage / 15.000 km"/>
+            <node text="Bremsen"/><node text="Bremsbeläge prüfen"/>
+            <node text="Synchronisiert: vor 2 Stunden"/>
+            </hierarchy>"""
+        )
+        result = DetailData()
+        VolkswagenReader.parse_vehicle_report(root, result)
+        self.assertEqual(result.serviceDays, 71)
+        self.assertEqual(result.serviceDistanceKm, 12100)
+        self.assertEqual(result.oilServiceDays, 120)
+        self.assertEqual(result.oilServiceDistanceKm, 15000)
+        self.assertEqual(
+            result.warnings,
+            [{"label": "Bremsen", "value": "Bremsbeläge prüfen"}],
+        )
+        self.assertEqual(result.warningStatus, "Meldungen vorhanden")
+
+    def test_departure_time_parser_handles_localized_rows_and_duplicate_switches(self):
+        for day in ("Dienstag", "Tuesday"):
+            with self.subTest(day=day):
+                root = ET.fromstring(
+                    f"""<hierarchy>
+                    <node clickable="true" bounds="[0,100][1000,300]">
+                      <node text="07:30"/>
+                      <node text="{day}"/>
+                      <node clickable="true" checkable="true" checked="true"
+                            bounds="[800,120][950,250]">
+                        <node clickable="true" checkable="true" checked="true"
+                              bounds="[800,120][950,250]"/>
+                      </node>
+                    </node>
+                    </hierarchy>"""
+                )
+                self.assertEqual(
+                    VolkswagenReader.parse_departure_times(root),
+                    [{"index": 1, "time": "07:30", "day": day, "enabled": True}],
+                )
+
+    def test_departure_times_waits_past_header_until_rows_appear(self):
+        header = ET.fromstring(
+            '<hierarchy><node text="Departure times"/></hierarchy>'
+        )
+        rows = ET.fromstring(
+            """<hierarchy><node clickable="true" bounds="[0,100][1000,300]">
+            <node text="07:30"/><node text="Tuesday"/>
+            <node clickable="true" checkable="true" checked="false"
+                  bounds="[800,120][950,250]"/>
+            </node></hierarchy>"""
+        )
+        reader = object.__new__(VolkswagenReader)
+        reader.ui_update_timeout = 8
+        reader.package = "com.volkswagen.weconnect"
+        reader.open_overview = Mock(return_value=ET.Element("overview"))
+        reader.find_overview_element = Mock(return_value=(ET.Element("node"), (10, 20)))
+        reader.shell = Mock()
+        reader.dump_ui_with_overlay_recovery = Mock(side_effect=(header, rows))
+
+        with patch("time.monotonic", return_value=0), patch("time.sleep"):
+            result = reader.open_departure_times(require_rows=True)
+
+        self.assertIs(result, rows)
+        self.assertEqual(reader.dump_ui_with_overlay_recovery.call_count, 2)
+
+    def test_departure_times_restarts_app_once_when_rows_stay_missing(self):
+        header = ET.fromstring(
+            '<hierarchy><node text="Abfahrtszeiten"/></hierarchy>'
+        )
+        rows = ET.fromstring(
+            """<hierarchy><node clickable="true" bounds="[0,100][1000,300]">
+            <node text="07:30"/><node text="Dienstag"/>
+            <node clickable="true" checkable="true" checked="false"
+                  bounds="[800,120][950,250]"/>
+            </node></hierarchy>"""
+        )
+        reader = object.__new__(VolkswagenReader)
+        reader.ui_update_timeout = 0
+        reader.package = "com.volkswagen.weconnect"
+        reader.open_overview = Mock(return_value=ET.Element("overview"))
+        reader.find_overview_element = Mock(return_value=(ET.Element("node"), (10, 20)))
+        reader.shell = Mock()
+        reader.dump_ui_with_overlay_recovery = Mock(side_effect=(header, rows))
+
+        with patch("time.monotonic", return_value=0), patch("time.sleep"):
+            result = reader.open_departure_times(
+                require_rows=True, recover_once=True
+            )
+
+        self.assertIs(result, rows)
+        self.assertIn(
+            call("am", "force-stop", "com.volkswagen.weconnect"),
+            reader.shell.call_args_list,
+        )
+
+    def test_departure_time_editor_parses_time_weekdays_and_repeat(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node resource-id="com.volkswagen.weconnect:id/numberpicker_input"
+                  text="7" bounds="[100,100][200,200]"/>
+            <node resource-id="com.volkswagen.weconnect:id/numberpicker_input"
+                  text="30" bounds="[300,100][400,200]"/>
+            <node resource-id="com.volkswagen.weconnect:id/cta_monday"
+                  selected="true" bounds="[100,300][200,400]"/>
+            <node resource-id="com.volkswagen.weconnect:id/cta_tuesday"
+                  selected="false" bounds="[200,300][300,400]"/>
+            <node resource-id="com.volkswagen.weconnect:id/cta_repeat"
+                  checkable="true" checked="true" bounds="[800,500][950,600]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(
+            VolkswagenReader.read_departure_time_editor(1, root),
+            {
+                "index": 1,
+                "time": "07:30",
+                "weekdays": ["monday"],
+                "repeat": True,
+            },
+        )
+
+    def test_departure_time_rejects_minutes_outside_picker_increment(self):
+        reader = object.__new__(VolkswagenReader)
+
+        with self.assertRaisesRegex(ValueError, "five-minute increments"):
+            reader.set_departure_time_value(1, "time", "07:31")
+
+    def test_departure_time_enable_uses_semantic_row_switch(self):
+        disabled = ET.fromstring(
+            """<hierarchy><node clickable="true" bounds="[0,100][1000,300]">
+            <node text="07:30"/><node text="Tuesday"/>
+            <node clickable="true" checkable="true" checked="false"
+                  bounds="[800,120][950,250]"/>
+            </node></hierarchy>"""
+        )
+        enabled = ET.fromstring(
+            """<hierarchy><node clickable="true" bounds="[0,100][1000,300]">
+            <node text="07:30"/><node text="Tuesday"/>
+            <node clickable="true" checkable="true" checked="true"
+                  bounds="[800,120][950,250]"/>
+            </node></hierarchy>"""
+        )
+        reader = object.__new__(VolkswagenReader)
+        reader.screen_session = Mock(return_value=nullcontext())
+        reader.launch = Mock()
+        reader.open_departure_times = Mock(return_value=disabled)
+        reader.wait_for_departure_times = Mock(return_value=enabled)
+        reader.shell = Mock()
+
+        result = reader.set_departure_time_enabled(1, True)
+
+        self.assertTrue(result["enabled"])
+        reader.shell.assert_called_once_with("input", "tap", "875", "185")
 
     def test_vehicle_report_parses_space_grouped_odometer_values(self):
         for distance in ("27 886 km", "27\u00a0886 km", "27\u202f886 km"):

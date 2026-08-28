@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.25
+
+- Add observed, vehicle-specific data and action availability to the additive
+  capabilities v2 response while preserving the existing capability lists.
+- Expose structured service, oil-service, warning, report-item and departure-time
+  details without adding history, schedules or automation state.
+- Add an authenticated primitive action for departure-time activation with
+  semantic UI verification. Time, weekday and repetition editor writes remain
+  unexposed because Volkswagen app 4.3.2 does not persist them reliably.
+
 ## 0.1.24
 
 - Treat ADB transport-probe timeouts as transient transport unavailability so
