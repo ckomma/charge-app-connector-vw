@@ -28,6 +28,19 @@ truth across Windows, Linux, Termux/mobile, and Codex Cloud.
   the test without resetting persisted counters, keep cooldowns and minimum
   intervals active, and restore the exact production limits afterward.
 
+## Private Operations Context
+
+For installation-specific operations, private topology or cross-agent
+coordination, look for a sibling repository named `charge-app-vw-ops` below
+the current device's projects root. If it exists, read its `AGENTS.md` and
+`SECURITY.md` before using its content. Its absence must not block public
+development, and it never replaces this repository as the source of truth for
+code, tests, portable documentation or releases.
+
+Do not add the private repository as a submodule, copy its private context into
+this public repository, or use the historical
+`charge-app-connector-vw-private-archive` as a source or destination.
+
 ## Verification
 
 For Python changes, run:
