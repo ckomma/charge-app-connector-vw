@@ -332,6 +332,7 @@ class VehicleData:
     stale: bool = False
     lastSuccessfulAt: str = ""
     refreshDurationSeconds: float | None = None
+    capabilities: dict[str, bool] | None = None
 
 
 @dataclass
@@ -380,7 +381,12 @@ class DetailData:
     climateZoneFrontRight: bool | None = None
     odometerKm: int | None = None
     serviceDays: int | None = None
+    serviceDistanceKm: int | None = None
+    oilServiceDays: int | None = None
+    oilServiceDistanceKm: int | None = None
     warningStatus: str = ""
+    warnings: list[dict[str, str]] | None = None
+    reportItems: list[dict[str, str]] | None = None
     reportSyncAge: str = ""
     departureTimes: list[dict[str, object]] | None = None
     observedAt: str = ""
@@ -389,6 +395,7 @@ class DetailData:
     stale: bool = False
     lastSuccessfulAt: str = ""
     refreshDurationSeconds: float | None = None
+    capabilities: dict[str, bool] | None = None
 
 
 @dataclass
@@ -479,12 +486,36 @@ class VolkswagenReader:
         "NÃ¤chster Service",
         "NÃƒÂ¤chster Service",
         "Next service",
+        "Nächster Ölwechsel",
+        "Next oil service",
         "Keine Meldungen",
         "No issues found",
         "Synchronisiert:",
         "Synchronised:",
         "Synced:",
     )
+    VEHICLE_REPORT_ITEM_LABELS = (
+        r"Gesamtstrecke|Gesamtkilometer|Total distance|Odometer",
+        r"Nächster Service|NÃ¤chster Service|Next service",
+        r"Nächster Ölwechsel|NÃ¤chster Ã–lwechsel|Next oil service",
+        r"Fahrerassistenzsysteme|Driver assistance systems?",
+        r"Elektrik|Elektrisches System|Electrical system",
+        r"Bremsen|Brakes?",
+        r"Motor(?: und Getriebe)?|Engine(?: and transmission)?",
+        r"Reifen|Tyres?|Tires?",
+        r"Beleuchtung|Lights?",
+        r"Flüssigkeiten|Fluids?",
+        r"Warnungen|Warnings?|Meldungen|Messages|Issues?",
+    )
+    DEPARTURE_WEEKDAYS = {
+        "monday": "/cta_monday",
+        "tuesday": "/cta_tuesday",
+        "wednesday": "/cta_wednesday",
+        "thursday": "/cta_thursday",
+        "friday": "/cta_friday",
+        "saturday": "/cta_saturday",
+        "sunday": "/cta_sunday",
+    }
 
     def __init__(self) -> None:
         self.usb_serial = required_env("ADB_SERIAL")
@@ -1763,6 +1794,75 @@ class VolkswagenReader:
             result.chargingMode = mode_match.group(1).strip()
 
     @classmethod
+    def report_interval(
+        cls, values: list[str], labels: str
+    ) -> tuple[int | None, int | None]:
+        label = re.compile(rf"(?:{labels})", re.IGNORECASE)
+        any_label = re.compile(
+            rf"(?:{'|'.join(cls.VEHICLE_REPORT_ITEM_LABELS)})",
+            re.IGNORECASE,
+        )
+        for index, value in enumerate(values):
+            inline = label.search(value)
+            candidates = [value]
+            if inline or label.fullmatch(value.strip()):
+                for candidate in values[index + 1:index + 4]:
+                    if any_label.fullmatch(candidate.strip()):
+                        break
+                    candidates.append(candidate)
+            else:
+                continue
+            combined = "\n".join(candidates)
+            days = re.search(
+                r"(\d{1,4})\s*(?:Tage?n?|days?)\b", combined, re.IGNORECASE
+            )
+            distance = re.search(
+                r"([\d.,\s\u00a0\u202f]+)\s*(?:km|kilomet(?:er|re)s?)\b",
+                combined,
+                re.IGNORECASE,
+            )
+            distance_value = (
+                int(re.sub(r"[\s.,]", "", distance.group(1)))
+                if distance
+                else None
+            )
+            return (int(days.group(1)) if days else None, distance_value)
+        return (None, None)
+
+    @classmethod
+    def vehicle_report_items(cls, values: list[str]) -> list[dict[str, str]]:
+        labels = re.compile(
+            rf"(?:{'|'.join(cls.VEHICLE_REPORT_ITEM_LABELS)})",
+            re.IGNORECASE,
+        )
+        items: list[dict[str, str]] = []
+        for index, value in enumerate(values):
+            if not labels.fullmatch(value.strip()):
+                continue
+            item_value = ""
+            for candidate in values[index + 1:index + 4]:
+                if labels.fullmatch(candidate.strip()):
+                    break
+                if candidate.strip():
+                    item_value = candidate.strip()
+                    break
+            if item_value:
+                items.append({"label": value.strip(), "value": item_value})
+        return items
+
+    @staticmethod
+    def report_item_is_healthy(value: str) -> bool:
+        return bool(
+            re.search(
+                r"Keine Meldungen|Keine Warnungen|Alles in Ordnung|"
+                r"No issues(?: found)?|No messages|No warnings|No problems|"
+                r"No defects|^OK$",
+                value,
+                re.IGNORECASE,
+            )
+        )
+
+    @classmethod
     def parse_vehicle_report(cls, root: ET.Element, result: DetailData) -> None:
         values = cls.strings(root)
         report_text = "\n".join(values)
@@ -1792,30 +1892,13 @@ class VolkswagenReader:
                 if odometer:
                     break
 
-        service = re.search(
-            r"(?:Nächster Service|NÃ¤chster Service|Next service)\s*"
-            r"(?:in\s*)?(\d+)\s*(?:Tage|days)",
-            report_text,
-            re.IGNORECASE,
+        service_days, service_distance = cls.report_interval(
+            values, r"Nächster Service|NÃ¤chster Service|Next service"
         )
-        if not service:
-            for index, value in enumerate(values):
-                if not re.fullmatch(
-                    r"Nächster Service|NÃ¤chster Service|Next service",
-                    value,
-                    re.IGNORECASE,
-                ):
-                    continue
-                for candidate in values[index + 1:index + 4]:
-                    service = re.search(
-                        r"(\d+)\s*(?:Tage|days)",
-                        candidate,
-                        re.IGNORECASE,
-                    )
-                    if service:
-                        break
-                if service:
-                    break
+        oil_days, oil_distance = cls.report_interval(
+            values,
+            r"Nächster Ölwechsel|NÃ¤chster Ã–lwechsel|Next oil service",
+        )
 
         report_sync = re.search(
             r"(?:Synchronisiert|Synchronised|Synced):\s*([^\n]+)",
@@ -1823,23 +1906,70 @@ class VolkswagenReader:
             re.IGNORECASE,
         )
 
-        if not (odometer or service or report_sync or cls.is_vehicle_report_page(root)):
+        if not (
+            odometer
+            or service_days is not None
+            or service_distance is not None
+            or oil_days is not None
+            or oil_distance is not None
+            or report_sync
+            or cls.is_vehicle_report_page(root)
+        ):
             raise RuntimeError("Volkswagen vehicle health report did not open")
 
         result.odometerKm = (
             int(re.sub(r"[\s.,]", "", odometer.group(1))) if odometer else None
         )
-        result.serviceDays = int(service.group(1)) if service else None
-        result.warningStatus = (
-            "Keine Meldungen"
-            if re.search(
+        result.serviceDays = service_days
+        result.serviceDistanceKm = service_distance
+        result.oilServiceDays = oil_days
+        result.oilServiceDistanceKm = oil_distance
+        result.reportItems = cls.vehicle_report_items(values)
+        overall_healthy = bool(
+            re.search(
                 r"Keine Meldungen|No messages|No warnings|No issues found",
                 report_text,
                 re.IGNORECASE,
             )
+        )
+        result.warnings = (
+            []
+            if overall_healthy
+            else [
+                item
+                for item in result.reportItems
+                if re.search(
+                    r"Fahrerassistenz|Driver assistance|Elektr|Electrical|"
+                    r"Brems|Brake|Motor|Engine|Reifen|Tyre|Tire|Beleuchtung|"
+                    r"Light|Flüss|Fluid|Warnung|Warning|Meldung|Message|Issue",
+                    item["label"],
+                    re.IGNORECASE,
+                )
+                and not cls.report_item_is_healthy(item["value"])
+            ]
+        )
+        result.warningStatus = (
+            "Keine Meldungen"
+            if overall_healthy
             else "Meldungen vorhanden"
         )
         result.reportSyncAge = report_sync.group(1).strip() if report_sync else ""
+        if result.capabilities is None:
+            result.capabilities = {}
+        result.capabilities.update(
+            {
+                "vehicle-report.odometer": result.odometerKm is not None,
+                "vehicle-report.service": (
+                    result.serviceDays is not None
+                    or result.serviceDistanceKm is not None
+                ),
+                "vehicle-report.oil-service": (
+                    result.oilServiceDays is not None
+                    or result.oilServiceDistanceKm is not None
+                ),
+                "vehicle-report.warnings": True,
+            }
+        )
 
     @staticmethod
     def parse_navigation_coordinates(text: str) -> tuple[float, float]:
@@ -2083,6 +2213,7 @@ class VolkswagenReader:
         overview = self.open_overview()
         overview_text = "\n".join(self.strings(overview))
         result = VehicleData(
+            capabilities={},
             observedAt=datetime.now().astimezone().isoformat(timespec="seconds")
         )
 
@@ -2098,6 +2229,13 @@ class VolkswagenReader:
         result.syncAgeMinutes = self.parse_sync_age(overview_text)
         result.climater = self.parse_climater(overview_text)
         result.locked = self.parse_locked(overview_text)
+        result.capabilities.update(
+            {
+                "vehicle.lock": result.locked is not None,
+                "climate.start-stop": result.climater is not None,
+                "charging.read": True,
+            }
+        )
         overview_soc = self.parse_soc(overview_text)
 
         x, y = self.range_tile_center(overview)
@@ -2112,6 +2250,13 @@ class VolkswagenReader:
         if result.soc is None:
             raise RuntimeError("Volkswagen state of charge not found")
         self.parse_charging_details(detail_text, result)
+        result.capabilities.update(
+            {
+                "charging.start-stop": True,
+                "charging.target-soc": result.targetSoc is not None,
+                "charging.mode": bool(result.chargingMode),
+            }
+        )
 
         lowered = detail_text.casefold()
         if self.text_reports_disconnected(detail_text):
@@ -2442,29 +2587,194 @@ class VolkswagenReader:
                     )
                 time.sleep(0.5)
 
+    @classmethod
+    def departure_time_rows(
+        cls, root: ET.Element
+    ) -> list[tuple[ET.Element, dict[str, object]]]:
+        rows: list[tuple[ET.Element, dict[str, object]]] = []
+        weekday = re.compile(
+            r"Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag|"
+            r"Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday",
+            re.IGNORECASE,
+        )
+        for row in root.iter():
+            if row.attrib.get("clickable") != "true":
+                continue
+            values = cls.strings(row)
+            time_value = next(
+                (value for value in values if re.fullmatch(r"\d{1,2}:\d{2}", value)),
+                "",
+            )
+            if not time_value:
+                continue
+            day_value = next((value for value in values if weekday.fullmatch(value)), "")
+            switches: list[ET.Element] = []
+            switch_bounds: set[str] = set()
+            for switch in cls.checked_nodes(row):
+                bounds = switch.attrib.get("bounds", "")
+                if bounds and bounds in switch_bounds:
+                    continue
+                switch_bounds.add(bounds)
+                switches.append(switch)
+            rows.append(
+                (
+                    row,
+                    {
+                        "index": len(rows) + 1,
+                        "time": time_value,
+                        "day": day_value,
+                        "enabled": (
+                            switches[0].attrib.get("checked") == "true"
+                            if switches
+                            else None
+                        ),
+                    },
+                )
+            )
+        return rows
+
+    @classmethod
+    def parse_departure_times(cls, root: ET.Element) -> list[dict[str, object]]:
+        return [value for _row, value in cls.departure_time_rows(root)]
+
+    def open_departure_times(
+        self, require_rows: bool = False, recover_once: bool = False
+    ) -> ET.Element:
+        attempts = 2 if recover_once else 1
+        for attempt in range(attempts):
+            overview = self.open_overview(("Abfahrtszeiten.", "Departure times."))
+            _overview, (x, y) = self.find_overview_element(
+                overview,
+                ("Abfahrtszeiten.", "Departure times."),
+                "departureTimesTile",
+            )
+            self.shell("input", "tap", str(x), str(y))
+            deadline = time.monotonic() + self.ui_update_timeout
+            last_root: ET.Element | None = None
+            header_visible = False
+            while True:
+                last_root = self.dump_ui_with_overlay_recovery("vw-departures.xml")
+                if self.departure_time_rows(last_root):
+                    return last_root
+                text = "\n".join(self.strings(last_root))
+                header_visible = bool(
+                    re.search(r"Abfahrtszeiten|Departure times", text, re.IGNORECASE)
+                )
+                if time.monotonic() >= deadline:
+                    if header_visible and not require_rows:
+                        return last_root
+                    break
+                time.sleep(0.5)
+            if attempt + 1 < attempts:
+                LOG.warning(
+                    "Volkswagen departure-time rows missing; restarting app once"
+                )
+                self.shell("am", "force-stop", self.package)
+                time.sleep(1)
+        raise RuntimeError("Volkswagen departure-times page did not expose rows")
+
+    def open_departure_time_editor(self, index: int) -> ET.Element:
+        root = self.open_departure_times(require_rows=True, recover_once=True)
+        return self.open_departure_time_editor_from_list(root, index)
+
+    def open_departure_time_editor_from_list(
+        self, root: ET.Element, index: int
+    ) -> ET.Element:
+        rows = self.departure_time_rows(root)
+        if not 1 <= index <= len(rows):
+            raise ValueError(f"departure-time index must be between 1 and {len(rows)}")
+        center = self.node_center(rows[index - 1][0])
+        if center is None:
+            raise RuntimeError("Volkswagen departure-time row has no geometry")
+        self.shell("input", "tap", str(center[0]), str(center[1]))
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            editor = self.dump_ui_with_overlay_recovery("vw-departure-editor.xml")
+            if self.resource_nodes(editor, "/time_picker"):
+                return editor
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Volkswagen departure-time editor did not open")
+            time.sleep(0.5)
+
+    @classmethod
+    def read_departure_time_editor(
+        cls, index: int, root: ET.Element
+    ) -> dict[str, object]:
+        inputs = sorted(
+            cls.resource_nodes(root, "/numberpicker_input"),
+            key=lambda node: (cls.node_center(node) or (0, 0))[0],
+        )
+        if len(inputs) < 2:
+            raise RuntimeError("Volkswagen departure-time picker not found")
+        try:
+            hour = int(inputs[0].attrib.get("text", ""))
+            minute = int(inputs[1].attrib.get("text", ""))
+        except ValueError as exc:
+            raise RuntimeError("Volkswagen departure-time value not readable") from exc
+        weekdays = [
+            name
+            for name, suffix in cls.DEPARTURE_WEEKDAYS.items()
+            if (
+                (nodes := cls.resource_nodes(root, suffix))
+                and nodes[0].attrib.get("selected") == "true"
+            )
+        ]
+        repeat_nodes = cls.resource_nodes(root, "/cta_repeat")
+        return {
+            "index": index,
+            "time": f"{hour:02d}:{minute:02d}",
+            "weekdays": weekdays,
+            "repeat": (
+                repeat_nodes[0].attrib.get("checked") == "true"
+                if repeat_nodes
+                else None
+            ),
+        }
+
     def _read_details(self) -> DetailData:
         result = DetailData(
             departureTimes=[],
+            warnings=[],
+            reportItems=[],
+            capabilities={},
             observedAt=datetime.now().astimezone().isoformat(timespec="seconds"),
         )
 
         self.launch()
         climate = self.open_climate()
         result.targetTemperatureC = self.parse_target_temperature(climate)
+        result.capabilities["climate.target-temperature"] = True
         x, y = self.described_node_center_any(climate, ("Einstellungen", "Settings"))
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
         settings = self.dump_ui("vw-climate-settings.xml")
-        switches = self.checked_nodes(settings)
-        if len(switches) >= 2:
-            result.automaticWindowHeating = switches[1].attrib.get("checked") == "true"
+        try:
+            result.automaticWindowHeating = self.option_state(
+                settings,
+                ("Automatische Scheibenheizung", "Automatic window heating"),
+            )
+        except RuntimeError:
+            switches = self.checked_nodes(settings)
+            if len(switches) >= 2:
+                result.automaticWindowHeating = (
+                    switches[1].attrib.get("checked") == "true"
+                )
+        result.capabilities["climate.automatic-window-heating"] = (
+            result.automaticWindowHeating is not None
+        )
         x, y = self.described_node_center_any(settings, ("Zonen", "Zones"))
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
-        zones = self.checked_nodes(self.dump_ui("vw-climate-zones.xml"))
-        if len(zones) >= 2:
-            result.climateZoneFrontLeft = zones[0].attrib.get("checked") == "true"
-            result.climateZoneFrontRight = zones[1].attrib.get("checked") == "true"
+        zones = self.dump_ui("vw-climate-zones.xml")
+        for attribute, capability, labels in (
+            ("climateZoneFrontLeft", "climate.zone-front-left", ("Vorne links", "Front left")),
+            ("climateZoneFrontRight", "climate.zone-front-right", ("Vorne rechts", "Front right")),
+        ):
+            try:
+                setattr(result, attribute, self.option_state(zones, labels))
+            except RuntimeError:
+                pass
+            result.capabilities[capability] = getattr(result, attribute) is not None
 
         self.launch()
         overview = self.open_overview(self.VEHICLE_REPORT_LABELS)
@@ -2478,19 +2788,22 @@ class VolkswagenReader:
         self.parse_vehicle_report(report, result)
 
         self.launch()
-        overview = self.open_overview(("Abfahrtszeiten.", "Departure times."))
-        x, y = self.described_node_center_any(
-            overview, ("Abfahrtszeiten.", "Departure times.")
+        departure = self.open_departure_times()
+        result.departureTimes = self.parse_departure_times(departure)
+        departure_text = "\n".join(self.strings(departure))
+        result.capabilities["departure-times.read"] = True
+        result.capabilities["departure-times.write"] = bool(result.departureTimes)
+        result.capabilities["departure-times.enabled-write"] = bool(
+            result.departureTimes
         )
-        self.shell("input", "tap", str(x), str(y))
-        time.sleep(self.detail_wait)
-        departure = self.dump_ui("vw-departures.xml")
-        departure_values = self.strings(departure)
-        for index, value in enumerate(departure_values):
-            if not re.fullmatch(r"\d{2}:\d{2}", value):
-                continue
-            day = departure_values[index + 1] if index + 1 < len(departure_values) else ""
-            result.departureTimes.append({"time": value, "day": day})
+        result.capabilities["departure-times.editor-write"] = False
+        result.capabilities["departure-times.charging-locations"] = not bool(
+            re.search(
+                r"Legen Sie zuerst.*Ladeorte|first.*charging locations?",
+                departure_text,
+                re.IGNORECASE | re.DOTALL,
+            )
+        )
         return result
 
     def read_details(self) -> DetailData:
@@ -2564,6 +2877,235 @@ class VolkswagenReader:
                     "vw-option-verify.xml", labels, desired
                 )
             return desired
+
+    def wait_for_departure_times(
+        self, remote_name: str, timeout: float | None = None
+    ) -> ET.Element:
+        deadline = time.monotonic() + (
+            self.ui_update_timeout if timeout is None else timeout
+        )
+        while True:
+            root = self.dump_ui_with_overlay_recovery(remote_name)
+            if self.departure_time_rows(root):
+                return root
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Volkswagen departure-times update did not finish")
+            time.sleep(0.5)
+
+    def wait_for_departure_editor(self, remote_name: str) -> ET.Element:
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            root = self.dump_ui_with_overlay_recovery(remote_name)
+            if len(self.resource_nodes(root, "/numberpicker_input")) >= 2:
+                return root
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Volkswagen departure-time editor did not finish")
+            time.sleep(0.5)
+
+    def set_departure_time_enabled(
+        self, index: int, desired: bool
+    ) -> dict[str, object]:
+        with self.screen_session():
+            self.launch()
+            root = self.open_departure_times(require_rows=True, recover_once=True)
+            rows = self.departure_time_rows(root)
+            if not 1 <= index <= len(rows):
+                raise ValueError(
+                    f"departure-time index must be between 1 and {len(rows)}"
+                )
+            row, current = rows[index - 1]
+            switches = self.checked_nodes(row)
+            if not switches:
+                raise RuntimeError("Volkswagen departure-time switch not found")
+            switch = switches[0]
+            if current["enabled"] is not desired:
+                center = self.node_center(switch)
+                if center is None:
+                    raise RuntimeError("Volkswagen departure-time switch has no geometry")
+                self.shell("input", "tap", str(center[0]), str(center[1]))
+                root = self.wait_for_departure_times("vw-departure-enabled-verify.xml")
+                current = self.departure_time_rows(root)[index - 1][1]
+            if current["enabled"] is not desired:
+                raise RuntimeError("Volkswagen departure-time enable verification failed")
+            return current
+
+    def adjust_number_picker_value(
+        self,
+        root: ET.Element,
+        input_index: int,
+        desired: int,
+        modulus: int,
+        step: int = 1,
+    ) -> ET.Element:
+        if desired % step:
+            raise ValueError(f"picker value must use increments of {step}")
+        for attempt in range(modulus // step + 2):
+            inputs = sorted(
+                self.resource_nodes(root, "/numberpicker_input"),
+                key=lambda node: (self.node_center(node) or (0, 0))[0],
+            )
+            if input_index >= len(inputs):
+                raise RuntimeError("Volkswagen departure-time picker not found")
+            input_node = inputs[input_index]
+            try:
+                current = int(input_node.attrib.get("text", ""))
+            except ValueError as exc:
+                raise RuntimeError(
+                    "Volkswagen departure-time picker value not readable"
+                ) from exc
+            if current == desired:
+                return root
+            input_center = self.node_center(input_node)
+            if input_center is None:
+                raise RuntimeError("Volkswagen departure-time picker has no geometry")
+            forward = (desired - current) % modulus
+            backward = (current - desired) % modulus
+            desired_direction = 1 if forward <= backward else -1
+            x, y = input_center
+            start_y = y + (120 * desired_direction)
+            end_y = y - (120 * desired_direction)
+            self.shell(
+                "input", "swipe", str(x), str(start_y), str(x), str(end_y), "500"
+            )
+            updated = self.wait_for_departure_editor(
+                f"vw-departure-picker-{input_index}-{attempt}.xml"
+            )
+            updated_inputs = sorted(
+                self.resource_nodes(updated, "/numberpicker_input"),
+                key=lambda node: (self.node_center(node) or (0, 0))[0],
+            )
+            try:
+                new_value = int(updated_inputs[input_index].attrib.get("text", ""))
+            except (IndexError, ValueError) as exc:
+                raise RuntimeError(
+                    "Volkswagen departure-time picker update not readable"
+                ) from exc
+            if new_value != (current + desired_direction * step) % modulus:
+                raise RuntimeError(
+                    f"Volkswagen departure-time picker did not move by {step}"
+                )
+            root = updated
+        raise RuntimeError("Volkswagen departure-time picker adjustment failed")
+
+    def set_departure_time_value(
+        self, index: int, kind: str, value: str
+    ) -> dict[str, object]:
+        if kind == "time":
+            if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+                raise ValueError("time must use HH:MM in 24-hour format")
+            if int(value[-2:]) % 5:
+                raise ValueError("time minutes must use five-minute increments")
+        elif kind == "weekdays":
+            requested_weekdays = {
+                item.strip().casefold() for item in value.split(",") if item.strip()
+            }
+            unknown = requested_weekdays - self.DEPARTURE_WEEKDAYS.keys()
+            if unknown or not requested_weekdays:
+                raise ValueError(
+                    "weekdays must contain one or more of "
+                    f"{list(self.DEPARTURE_WEEKDAYS)}"
+                )
+        elif kind == "repeat":
+            desired_repeat = value.casefold() in ("1", "true", "on")
+        else:
+            raise KeyError(kind)
+
+        with self.screen_session():
+            self.launch()
+            root = self.open_departure_time_editor(index)
+            current = self.read_departure_time_editor(index, root)
+            if kind == "time" and current["time"] != value:
+                desired_hour, desired_minute = (int(part) for part in value.split(":"))
+                root = self.adjust_number_picker_value(root, 0, desired_hour, 24)
+                root = self.adjust_number_picker_value(root, 1, desired_minute, 60, 5)
+            elif kind == "weekdays":
+                for weekday, suffix in self.DEPARTURE_WEEKDAYS.items():
+                    root = self.wait_for_departure_editor(
+                        "vw-departure-weekdays-current.xml"
+                    )
+                    nodes = self.resource_nodes(root, suffix)
+                    if not nodes:
+                        raise RuntimeError(
+                            f"Volkswagen departure weekday control not found: {weekday}"
+                        )
+                    selected = nodes[0].attrib.get("selected") == "true"
+                    desired = weekday in requested_weekdays
+                    if selected != desired:
+                        center = self.node_center(nodes[0])
+                        if center is None:
+                            raise RuntimeError(
+                                "Volkswagen departure weekday has no geometry"
+                            )
+                        self.shell("input", "tap", str(center[0]), str(center[1]))
+            elif kind == "repeat" and current["repeat"] is not desired_repeat:
+                repeat_nodes = self.resource_nodes(root, "/cta_repeat")
+                if not repeat_nodes:
+                    raise RuntimeError("Volkswagen departure repeat switch not found")
+                center = self.node_center(repeat_nodes[0])
+                if center is None:
+                    raise RuntimeError("Volkswagen departure repeat switch has no geometry")
+                self.shell("input", "tap", str(center[0]), str(center[1]))
+
+            root = self.wait_for_departure_editor("vw-departure-edit-verify.xml")
+            result = self.read_departure_time_editor(index, root)
+            if kind == "time":
+                expected: object = value
+            elif kind == "weekdays":
+                expected = sorted(requested_weekdays)
+            else:
+                expected = desired_repeat
+            actual: object = (
+                sorted(result["weekdays"]) if kind == "weekdays" else result[kind]
+            )
+            if actual != expected:
+                raise RuntimeError(f"Volkswagen departure-time {kind} verification failed")
+
+            toolbar_nodes = self.resource_nodes(root, "/toolbar")
+            toolbar_button = next(
+                (
+                    node
+                    for toolbar in toolbar_nodes
+                    for node in toolbar.iter()
+                    if node.attrib.get("clickable") == "true"
+                    and self.node_center(node) is not None
+                ),
+                None,
+            )
+            if toolbar_button is None:
+                raise RuntimeError("Volkswagen departure-time toolbar back button not found")
+            toolbar_center = self.node_center(toolbar_button)
+            assert toolbar_center is not None
+            # The editor commits through its toolbar navigation handler. Android's
+            # generic back key only discards the edited values on current app builds.
+            self.shell("input", "tap", str(toolbar_center[0]), str(toolbar_center[1]))
+            # The editor persists asynchronously when leaving the page. Reopening it
+            # immediately can interrupt that write and expose the previous value.
+            time.sleep(self.detail_wait)
+            try:
+                saved = self.wait_for_departure_times(
+                    "vw-departure-saved.xml", max(self.ui_update_timeout, 45)
+                )
+            except RuntimeError:
+                LOG.warning(
+                    "Volkswagen departure-time list stayed empty after save; "
+                    "restarting app once before persistence verification"
+                )
+                self.shell("am", "force-stop", self.package)
+                time.sleep(1)
+                saved = self.open_departure_times(require_rows=True)
+            # Re-open the editor to verify that the app persisted the change.
+            verify = self.open_departure_time_editor_from_list(saved, index)
+            persisted = self.read_departure_time_editor(index, verify)
+            persisted_actual: object = (
+                sorted(persisted["weekdays"])
+                if kind == "weekdays"
+                else persisted[kind]
+            )
+            if persisted_actual != expected:
+                raise RuntimeError(
+                    f"Volkswagen departure-time {kind} persistence verification failed"
+                )
+            return persisted
 
     @staticmethod
     def percentage_value(node: ET.Element) -> int | None:
@@ -3712,6 +4254,7 @@ class AppState:
         "climate/option/automatic-window-heating",
         "climate/option/zone-front-left",
         "climate/option/zone-front-right",
+        "departure-time/enabled",
     )
 
     @staticmethod
@@ -3969,8 +4512,141 @@ class AppState:
         supported = list(self.SUPPORTED_ACTIONS)
         read_only = [name for name in supported if not self.is_write_action(name)]
         write = [name for name in supported if self.is_write_action(name)]
+        with self.charge.lock:
+            charge_value = self.charge.value
+        with self.details.lock:
+            detail_value = self.details.value
+        charge_capabilities = (
+            charge_value.capabilities
+            if isinstance(charge_value, VehicleData) and charge_value.capabilities
+            else {}
+        )
+        detail_capabilities = dict(
+            detail_value.capabilities
+            if isinstance(detail_value, DetailData) and detail_value.capabilities
+            else {}
+        )
+        # Persisted detail caches from older connector versions only know the
+        # aggregate departure-times.write flag. Normalize them without forcing
+        # a Volkswagen app refresh so /capabilities immediately describes the
+        # narrower, verified write surface.
+        if "departure-times.enabled-write" not in detail_capabilities:
+            legacy_departure_write = detail_capabilities.get(
+                "departure-times.write"
+            )
+            if legacy_departure_write is not None:
+                detail_capabilities["departure-times.enabled-write"] = bool(
+                    legacy_departure_write
+                )
+        detail_capabilities["departure-times.editor-write"] = False
+        evidence: dict[str, bool | None] = {
+            "lock": charge_capabilities.get("vehicle.lock"),
+            "unlock": charge_capabilities.get("vehicle.lock"),
+            "charging/start": charge_capabilities.get("charging.start-stop"),
+            "charging/stop": charge_capabilities.get("charging.start-stop"),
+            "charging/target-soc": charge_capabilities.get("charging.target-soc"),
+            "charging/mode": charge_capabilities.get("charging.mode"),
+            "climate/start": charge_capabilities.get("climate.start-stop"),
+            "climate/stop": charge_capabilities.get("climate.start-stop"),
+            "climate/temperature": detail_capabilities.get(
+                "climate.target-temperature"
+            ),
+            "climate/option/automatic-window-heating": detail_capabilities.get(
+                "climate.automatic-window-heating"
+            ),
+            "climate/option/zone-front-left": detail_capabilities.get(
+                "climate.zone-front-left"
+            ),
+            "climate/option/zone-front-right": detail_capabilities.get(
+                "climate.zone-front-right"
+            ),
+        }
+        evidence["departure-time/enabled"] = detail_capabilities.get(
+            "departure-times.enabled-write",
+            detail_capabilities.get("departure-times.write"),
+        )
+
+        constraints: dict[str, dict[str, object]] = {
+            "charging/target-soc": {
+                "allowedValues": [50, 60, 70, 80, 90, 100]
+            },
+            "charging/mode": {
+                "allowedValues": [
+                    "immediate",
+                    "preferred-times",
+                    "departure",
+                    "departure-climate",
+                ]
+            },
+            "climate/temperature": {"minimum": 15.5, "maximum": 30.0, "step": 0.5},
+        }
+        dynamic_actions: dict[str, dict[str, object]] = {}
+        for name in supported:
+            observed = evidence.get(name)
+            blocked_reason = ""
+            if self.is_write_action(name) and not health.actionAvailable:
+                blocked_reason = health.actionBlockedReason or "ACTION_UNAVAILABLE"
+            elif observed is False:
+                blocked_reason = "NOT_EXPOSED_BY_VEHICLE"
+            elif observed is None and self.is_write_action(name):
+                blocked_reason = "NOT_OBSERVED"
+            dynamic_actions[name] = {
+                "implemented": True,
+                "observed": observed,
+                "available": not blocked_reason,
+                "reason": blocked_reason,
+                **constraints.get(name, {}),
+            }
+
+        data_capabilities: dict[str, dict[str, object]] = {}
+        data_fields = {
+            "charge.state-of-charge": (
+                isinstance(charge_value, VehicleData) and charge_value.soc is not None,
+                "charge",
+            ),
+            "charge.range": (
+                isinstance(charge_value, VehicleData) and charge_value.range is not None,
+                "charge",
+            ),
+            "vehicle.lock": (charge_capabilities.get("vehicle.lock"), "charge"),
+            "vehicle-report.odometer": (
+                detail_capabilities.get("vehicle-report.odometer"),
+                "details",
+            ),
+            "vehicle-report.service": (
+                detail_capabilities.get("vehicle-report.service"),
+                "details",
+            ),
+            "vehicle-report.oil-service": (
+                detail_capabilities.get("vehicle-report.oil-service"),
+                "details",
+            ),
+            "vehicle-report.warnings": (
+                detail_capabilities.get("vehicle-report.warnings"),
+                "details",
+            ),
+            "departure-times": (
+                detail_capabilities.get("departure-times.read"),
+                "details",
+            ),
+            "charging-locations": (
+                detail_capabilities.get("departure-times.charging-locations"),
+                "details",
+            ),
+        }
+        for name, (available, source) in data_fields.items():
+            data_capabilities[name] = {
+                "observed": available,
+                "available": available is True,
+                "reason": (
+                    "" if available is True else
+                    "NOT_EXPOSED_BY_VEHICLE" if available is False else
+                    "NOT_OBSERVED"
+                ),
+                "source": source,
+            }
         return {
-            "version": 1,
+            "version": 2,
             "status": health.status,
             "readEndpoints": {
                 "charge": True,
@@ -4010,6 +4686,14 @@ class AppState:
                 "supported": supported,
                 "readOnly": read_only,
                 "write": write,
+                "byName": dynamic_actions,
+            },
+            "vehicle": {
+                "data": data_capabilities,
+                "features": {
+                    **charge_capabilities,
+                    **detail_capabilities,
+                },
             },
             "caches": {
                 "charge": self._cache_snapshot(self.charge),  # type: ignore[arg-type]
@@ -4319,6 +5003,33 @@ class AppState:
                 },
             )
             return self.details.patch_value(details)
+        if name.startswith("departure-time/"):
+            index = int(query["index"][0])
+            kind = name.removeprefix("departure-time/")
+            if kind == "enabled":
+                desired = query["value"][0].casefold() in ("1", "true", "on")
+                result = self.reader.set_departure_time_enabled(index, desired)
+            else:
+                result = self.reader.set_departure_time_value(
+                    index, kind, query["value"][0]
+                )
+            with self.details.lock:
+                current = self.details.value or DetailData()
+            departures = [dict(item) for item in (current.departureTimes or [])]
+            while len(departures) < index:
+                departures.append({"index": len(departures) + 1})
+            departures[index - 1].update(result)
+            capabilities = dict(current.capabilities or {})
+            capabilities["departure-times.read"] = True
+            capabilities["departure-times.write"] = True
+            details = replace(
+                current,
+                departureTimes=departures,
+                capabilities=capabilities,
+                observedAt=datetime.now().astimezone().isoformat(timespec="seconds"),
+            )
+            self.details.patch_value(details)
+            return result
         if name == "charging/target-soc":
             settings = self.reader.set_target_soc(int(query["value"][0]))
             with self.charge.lock:
@@ -4671,7 +5382,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.send_json({"error": str(exc)}, 503)
             return
-        self.send_json(asdict(value), 200)
+        self.send_json(asdict(value) if is_dataclass(value) else value, 200)
 
     def authenticated(self) -> bool:
         supplied_key = self.headers.get("X-API-Key", "")

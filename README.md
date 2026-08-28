@@ -8,8 +8,9 @@ Based on [janphkre/charge-app-connector](https://github.com/janphkre/charge-app-
 
 ## Features
 
-- Cached charge, vehicle-detail and location data through a REST API.
-- Authenticated charging, climate and lock actions.
+- Cached charge, structured vehicle-detail and location data through a REST API.
+- Authenticated charging, climate, lock and departure-time activation actions.
+- Vehicle-observed capabilities with explicit unavailable and unknown states.
 - German and English Volkswagen app UI support.
 - USB ADB with optional Wi-Fi fallback.
 - Persisted usage budgets, retries, cooldowns and stale-data handling.
@@ -95,7 +96,7 @@ Settings -> Add-ons -> Add-on Store -> Repositories
 
 The app uses the same connector code, stores persistent state below
 Supervisor-managed `/data`, defaults to manual boot and currently reports
-version `0.1.24`. See the [installation guide](deploy/home-assistant/README.md).
+version `0.1.25`. See the [installation guide](deploy/home-assistant/README.md).
 
 ## Integrations
 

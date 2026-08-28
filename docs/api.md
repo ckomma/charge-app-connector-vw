@@ -48,7 +48,11 @@ authoritative.
 ### `GET /details`
 
 Returns target temperature, automatic window heating, front climate zones,
-odometer, service interval, warning status and departure times.
+odometer, service and oil-service intervals, warning status, structured vehicle
+health-report items and departure times. Service intervals expose both days and
+distance when the app provides them. Departure entries keep the existing
+`time` and `day` fields and add a one-based `index` plus `enabled` when the
+switch state is exposed.
 
 ### `GET /location`
 
@@ -67,7 +71,11 @@ without automatically turning a healthy connector into a software failure.
 ### Other reads
 
 - `GET /capabilities`: supported endpoints, actions, ADB transport, MQTT and
-  app-version verification.
+  app-version verification. Capability schema version 2 preserves the existing
+  lists and adds `actions.byName` plus `vehicle.data` and `vehicle.features`.
+  Each dynamic entry distinguishes implemented, observed and currently
+  available functionality. `NOT_OBSERVED` is not the same as unsupported;
+  `NOT_EXPOSED_BY_VEHICLE` records an explicit negative observation.
 - `GET /metrics`: Prometheus text-format health, usage, cache, ADB and version
   gauges.
 - `GET /diagnostics`: safe metadata for diagnostic files, never raw UI dumps,
@@ -116,6 +124,17 @@ Direct-charge limits support 0 through 50 percent in ten-point steps.
 
 Temperatures support 15.5 through 30.0 degrees Celsius in half-degree steps;
 Volkswagen `LO` and `HI` variants map to the lower and upper boundaries.
+
+### Departure times
+
+- `POST /action/departure-time/enabled?index=1&value=true`
+
+Indices come from cached `GET /details` departure entries and are one-based.
+The connector exposes only the activation switch as a write. Volkswagen app
+4.3.2 displays editor changes for time, weekdays and repetition but does not
+persist them after leaving the editor on the verified production vehicle; those
+controls therefore remain read-only. Scheduling policy, PV decisions and
+profiles remain the responsibility of evcc or Home Assistant.
 
 The connector verifies displayed values after writes and fails safely when the
 app exposes no stable control.
