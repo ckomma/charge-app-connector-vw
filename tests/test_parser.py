@@ -270,6 +270,44 @@ class ParserTests(unittest.TestCase):
             "LOCATION_USER_CONTEXT_UNAVAILABLE",
         )
 
+    def test_health_reports_interaction_from_each_cache_and_clears_on_recovery(self):
+        for endpoint in ("charge", "details", "location"):
+            with self.subTest(endpoint=endpoint):
+                state = object.__new__(AppState)
+                state.verified_app_version = "4.3.2"
+                state.reader = Mock()
+                state.reader.phone_health.side_effect = lambda: HealthData(
+                    adbState="device", appVersion="4.3.2"
+                )
+                for name in ("charge", "details", "location"):
+                    setattr(state, name, SimpleNamespace(
+                        last_success_at="now", refreshing=False,
+                        value=VehicleData(status="B"), last_error="",
+                        last_error_category="", age=lambda: 1,
+                    ))
+                affected = getattr(state, endpoint)
+                affected.last_error = "Review data consent manually"
+                affected.last_error_category = "APP_INTERACTION_REQUIRED"
+                state.usage = Mock()
+                state.usage.snapshot.return_value = {
+                    "backgroundUsed": 1, "backgroundLimit": 180,
+                    "actionsUsed": 0, "actionsLimit": 20, "cooldownSeconds": 0,
+                }
+                health = state.health()
+                self.assertEqual(health.status, "degraded")
+                self.assertEqual(health.statusReasons, ("APP_INTERACTION_REQUIRED",))
+                state.charge.value = None
+                health = state.health()
+                self.assertEqual(health.status, "error")
+                self.assertIn("CHARGE_DATA_UNAVAILABLE", health.statusReasons)
+                self.assertIn("APP_INTERACTION_REQUIRED", health.statusReasons)
+                state.charge.value = VehicleData(status="B")
+                affected.last_error = ""
+                affected.last_error_category = ""
+                health = state.health()
+                self.assertEqual(health.status, "ok")
+                self.assertEqual(health.statusReasons, ())
+
     def test_action_job_lifecycle(self):
         completed = threading.Event()
 
@@ -2161,6 +2199,121 @@ class ParserTests(unittest.TestCase):
                     "input", "swipe", "540", "1872", "540", "1152", "300"
                 )
                 sleep.assert_called_once_with(1)
+
+    def test_blocking_data_consent_requires_manual_choice_in_both_languages(self):
+        for message, accept, reject in (
+            ("Help innovation with your data", "Accept", "Reject"),
+            ("Einwilligung zur Nutzung deiner Fahrdaten", "Zustimmen", "Ablehnen"),
+        ):
+            with self.subTest(message=message):
+                root = ET.Element("hierarchy")
+                for label in (message, accept.upper(), reject.lower()):
+                    ET.SubElement(root, "node", {"text": label})
+                reader = object.__new__(VolkswagenReader)
+                reader.ui_update_timeout = 0
+                reader.dump_ui_with_compose_fallback = Mock(return_value=root)
+                reader.app_in_foreground = Mock(return_value=True)
+                reader.shell = Mock()
+                reader.launch = Mock()
+                reader.save_diagnostics = Mock()
+                with self.assertRaises(TransientEndpointState) as raised:
+                    reader.with_retries(reader.open_overview, "CHARGE")
+                self.assertEqual(raised.exception.reason, "APP_INTERACTION_REQUIRED")
+                self.assertIn("manually", str(raised.exception))
+                self.assertEqual(
+                    VolkswagenReader.error_category(raised.exception),
+                    "APP_INTERACTION_REQUIRED",
+                )
+                reader.dump_ui_with_compose_fallback.assert_called_once()
+                reader.shell.assert_not_called()
+                reader.launch.assert_not_called()
+                reader.save_diagnostics.assert_not_called()
+
+    def test_inline_consent_card_does_not_block_accessible_vehicle_tile(self):
+        root = ET.fromstring(
+            '<hierarchy><node text="Help innovation with your data"/>'
+            '<node text="Accept"/><node text="Reject"/>'
+            '<node content-desc="Battery range: 100 kilometres" '
+            'bounds="[10,20][110,120]"/>'
+            '<node content-desc="Vehicle health report. Open" '
+            'bounds="[20,500][300,700]"/></hierarchy>'
+        )
+        reader = object.__new__(VolkswagenReader)
+        reader.ui_update_timeout = 0
+        reader.dump_ui_with_compose_fallback = Mock(return_value=root)
+        reader.app_in_foreground = Mock(return_value=True)
+        reader.shell = Mock()
+        for labels in ((), ("Vehicle health report.",)):
+            self.assertIs(reader.open_overview(labels), root)
+        reader.shell.assert_not_called()
+
+    def test_inline_consent_card_allows_scroll_to_missing_vehicle_tile(self):
+        card = ET.fromstring(
+            '<hierarchy><node bounds="[0,0][1080,2400]"/>'
+            '<node content-desc="Battery range: 100 kilometres" '
+            'bounds="[10,20][110,120]"/>'
+            '<node text="Einwilligung zur Nutzung deiner Fahrdaten"/>'
+            '<node text="Zustimmen"/><node text="Ablehnen"/></hierarchy>'
+        )
+        ready = ET.fromstring(
+            '<hierarchy><node content-desc="Fahrzeugbericht. Öffnen" '
+            'bounds="[20,500][300,700]"/></hierarchy>'
+        )
+        reader = object.__new__(VolkswagenReader)
+        reader.ui_update_timeout = 10
+        reader.dump_ui_with_compose_fallback = Mock(side_effect=(card, ready))
+        reader.app_in_foreground = Mock(return_value=True)
+        reader.shell = Mock()
+        with patch("time.sleep"):
+            self.assertIs(reader.open_overview(("Fahrzeugbericht.",)), ready)
+        reader.shell.assert_called_once_with(
+            "input", "swipe", "540", "1872", "540", "1152", "300"
+        )
+
+    def test_unrelated_or_incomplete_prompts_are_not_data_consent(self):
+        for labels in (
+            ("Select an authorised workshop near you", "Close"),
+            ("Fancy a reminder?", "Don't show again", "Remind me later"),
+            ("Install update", "Accept", "Reject"),
+            ("Your consents", "Improve the user experience"),
+            ("Use your data", "Accept"),
+            ("Use your data", "We accept feedback", "We reject errors"),
+        ):
+            with self.subTest(labels=labels):
+                root = ET.Element("hierarchy")
+                for label in labels:
+                    ET.SubElement(root, "node", {"text": label})
+                VolkswagenReader.raise_for_overview_interaction(root)
+
+    def test_interaction_error_preserves_cache_and_normal_retry_interval(self):
+        with TemporaryDirectory() as directory, patch("threading.Thread.start"):
+            backoff = BackgroundTransientBackoff(
+                Path(directory) / "backoff.json", 900, 7200, jitter_ratio=0
+            )
+            loader = Mock(side_effect=TransientEndpointState(
+                "APP_INTERACTION_REQUIRED", "Choose your preference manually"
+            ))
+            cache = BackgroundCache(
+                "charge", loader, lambda _: 60, VehicleData,
+                error_retry_interval=900, shared_backoff=backoff,
+            )
+            cache.set_value(VehicleData(soc=53, status="B"))
+            previous_success = cache.last_success_at
+            before = time.monotonic()
+            with self.assertLogs("vw-app-connector", level="WARNING"):
+                result = cache.refresh()
+            self.assertEqual(result.soc, 53)
+            self.assertTrue(result.stale)
+            self.assertEqual(result.errorCategory, "APP_INTERACTION_REQUIRED")
+            self.assertEqual(cache.last_success_at, previous_success)
+            self.assertGreaterEqual(cache.next_attempt_monotonic, before + 899)
+            self.assertEqual(backoff.snapshot()["reason"], "")
+            loader.side_effect = None
+            loader.return_value = VehicleData(soc=54, status="B")
+            result = cache.refresh()
+            self.assertEqual(result.errorCategory, "")
+            self.assertFalse(result.stale)
+            self.assertEqual(cache.last_error_category, "")
 
     def test_pin_input_and_viewport_are_semantic(self):
         root = ET.fromstring(

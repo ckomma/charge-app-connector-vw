@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.26
+
+- Report `APP_INTERACTION_REQUIRED` when overview navigation fails with a
+  recognized data-consent choice visible. Preserve cached values and normal
+  retry limits without choosing a preference or immediately relaunching the app.
+- Keep accessible vehicle tiles usable alongside recommendation cards and
+  expose the interaction reason in health for charge, details and location.
+- Verify normal read navigation in German and English on Redmi and Pixel 10,
+  including successful background charge reads on both devices. The specific
+  consent prompt remains covered by synthetic tests, not a live reproduction.
+
 ## 0.1.25
 
 - Add observed, vehicle-specific data and action availability to the additive

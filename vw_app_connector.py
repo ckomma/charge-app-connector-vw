@@ -938,6 +938,7 @@ class VolkswagenReader:
                     except RuntimeError:
                         pass
                 if time.monotonic() >= deadline:
+                    self.raise_for_overview_interaction(overview)
                     break
                 if saw_overview and required_prefixes and not nudged_overview:
                     width, height = self.viewport_size(overview)
@@ -962,6 +963,45 @@ class VolkswagenReader:
                 self.shell("input", "keyevent", "KEYCODE_BACK")
                 time.sleep(2)
         raise RuntimeError("Volkswagen overview not found")
+
+    @classmethod
+    def raise_for_overview_interaction(cls, root: ET.Element) -> None:
+        """Classify a failed overview read without choosing a privacy preference.
+
+        Recommendation cards can coexist with usable vehicle tiles. Only call
+        this after the requested tile remained unavailable through the normal
+        readiness wait and bounded scroll, never merely because a card exists.
+        Button labels alone are not enough to identify a data-consent prompt.
+        """
+        labels = {
+            " ".join(value.casefold().split()).rstrip(".!:")
+            for value in cls.strings(root)
+        }
+        text = "\n".join(labels)
+        accepts = labels.intersection(
+            ("accept", "agree", "i agree", "allow", "akzeptieren",
+             "zustimmen", "ich stimme zu", "erlauben")
+        )
+        rejects = labels.intersection(
+            ("reject", "decline", "i decline", "do not agree", "ablehnen",
+             "nicht zustimmen", "ich lehne ab")
+        )
+        data_consent = any(
+            phrase in text
+            for phrase in (
+                "your consent", "data usage", "use your data", "driving data",
+                "usage data", "data processing", "with your data",
+                "einwilligung", "datennutzung", "fahrdaten", "nutzungsdaten",
+                "datenverarbeitung", "mit deinen daten", "mit ihren daten",
+            )
+        )
+        if accepts and rejects and data_consent:
+            raise TransientEndpointState(
+                "APP_INTERACTION_REQUIRED",
+                "Volkswagen overview is unavailable while a data-consent prompt "
+                "is visible. Open the Volkswagen app on the connector phone, "
+                "review the prompt and choose your preference manually.",
+            )
 
     def dismiss_overview_notice(
         self, root: ET.Element, remote_name: str
@@ -5643,6 +5683,13 @@ class AppState:
             ):
                 add_status_reason(value.locationErrorCategory)
             if status_reasons:
+                value.status = "degraded"
+        if any(
+            getattr(cache, "last_error_category", "") == "APP_INTERACTION_REQUIRED"
+            for cache in (self.charge, self.details, self.location)
+        ):
+            add_status_reason("APP_INTERACTION_REQUIRED")
+            if value.status == "ok":
                 value.status = "degraded"
         value.statusReasons = tuple(status_reasons)
         value.dataWarnings = (
