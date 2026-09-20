@@ -96,6 +96,26 @@ authoritative and may still suppress that refresh.
 
 ## Diagnostics
 
+### Recommendation cards and data-consent prompts
+
+Additional Volkswagen recommendation cards are left untouched when the required
+vehicle tile is accessible. Overview navigation retains its bounded scroll for
+menu entries displaced by cards; it does not select consent or close buttons.
+Closing a workshop recommendation can itself open a reminder dialog.
+
+If overview navigation times out while a recognizable data-consent prompt with
+both accept and reject labels is visible, the affected cache reports
+`APP_INTERACTION_REQUIRED`, also exposed in `/health.statusReasons`. Open the
+Volkswagen app on the connector phone and review the choice manually. The
+connector preserves previous values as stale, skips the immediate app-relaunch
+retry, and retains the normal background error retry interval and usage limits.
+Successful subsequent refreshes clear the affected cache's error.
+
+Detection is deliberately conservative: an inline card alone does not prove
+that it blocks the UI, and unknown wording still uses the normal UI error path.
+German and English label combinations are covered by synthetic tests; the
+specific prompts reported in issue #28 still need real-device UI verification.
+
 Failed UI reads retry once and store an error summary, UI dump and screenshot
 below `DIAGNOSTICS_DIR`. These artifacts can contain sensitive operational
 context and must not be committed or exposed publicly.
