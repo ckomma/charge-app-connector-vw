@@ -28,6 +28,17 @@ truth across Windows, Linux, Termux/mobile, and Codex Cloud.
   the test without resetting persisted counters, keep cooldowns and minimum
   intervals active, and restore the exact production limits afterward.
 
+## Issue Replies And GitHub Comments
+
+- Write like a helpful developer talking to another developer: brief, friendly,
+  direct, and natural. Avoid stock phrases, unnecessary headings, and canned
+  support language.
+- Keep technical statements precise. Distinguish confirmed findings, likely
+  explanations, and proposed fixes; never describe an unverified fix as done.
+- Match the language of the issue or discussion unless the user asks otherwise.
+- When asked to formulate a reply or comment, provide a ready-to-use draft.
+  Publish it only when the user explicitly asks to post it.
+
 ## Private Operations Context
 
 For installation-specific operations, private topology or cross-agent
