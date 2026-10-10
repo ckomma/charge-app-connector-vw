@@ -8,7 +8,8 @@ Based on [janphkre/charge-app-connector](https://github.com/janphkre/charge-app-
 
 ## Features
 
-- Cached charge, structured vehicle-detail and location data through a REST API.
+- Cached charge, structured vehicle-detail, vehicle-software and location data through a REST API.
+- Optional battery health and calculation date from the vehicle health report.
 - Authenticated charging, climate, lock and departure-time editor actions.
 - Vehicle-observed capabilities with explicit unavailable and unknown states.
 - German and English Volkswagen app UI support.
@@ -19,10 +20,17 @@ Based on [janphkre/charge-app-connector](https://github.com/janphkre/charge-app-
 
 ## Compatibility
 
-The current real-device baseline is Volkswagen app `4.3.2`, verified in German
-and English on Redmi and Pixel phones with reads and vehicle actions. This is a
-tested baseline rather than a strict pin: newer app versions must be tested
-before `VERIFIED_APP_VERSION` is raised.
+The prepared write-action baseline is Volkswagen app `4.6.4` (`406040`).
+German and English real-phone tests cover reads, climate start/stop, charging
+stop/start and remote lock/unlock. Lock actions now wait for completed vehicle
+feedback and verify the result; pending labels remain unknown. The corrected
+unlock was physically confirmed by the user in both languages. Existing
+explicit version settings remain unchanged. See the
+[compatibility findings](docs/compatibility-4.6.4.md).
+
+Version `4.6.4` supports the new data-saving recovery wording and German parking
+label. Optional battery-health and vehicle-software fields are available when
+the app exposes them; this test account exposed neither optional feature.
 
 Requirements:
 
@@ -59,7 +67,8 @@ untrusted network.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /charge` | Cached charge state, state of charge, range and freshness |
-| `GET /details` | Climate, odometer, service, warnings and departures |
+| `GET /details` | Climate, odometer, service, battery health, warnings and departures |
+| `GET /software` | Cached vehicle software version and update information |
 | `GET /location` | Cached address, parking duration and coordinates |
 | `GET /health` | ADB, app-version, cache, usage and cooldown health |
 | `GET /capabilities` | Supported endpoints, actions and transports |
@@ -73,6 +82,11 @@ operation per HTTP request.
 
 See [API reference](docs/api.md) for payload behavior, actions, asynchronous
 jobs and administrative endpoints.
+
+`POST /action/software/refresh` requires `X-API-Key` and performs a read-only
+vehicle software query within the existing action budget. Software has no
+background polling; `GET /software` never wakes the phone. Availability depends
+on the vehicle/account and app feature rollout. Missing values remain unknown.
 
 ## Configuration and Operation
 
@@ -96,7 +110,7 @@ Settings -> Add-ons -> Add-on Store -> Repositories
 
 The app uses the same connector code, stores persistent state below
 Supervisor-managed `/data`, defaults to manual boot and currently reports
-version `0.1.26`. See the [installation guide](deploy/home-assistant/README.md).
+version `0.1.27`. See the [installation guide](deploy/home-assistant/README.md).
 
 ## Integrations
 

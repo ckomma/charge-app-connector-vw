@@ -381,6 +381,8 @@ class DetailData:
     climateZoneFrontLeft: bool | None = None
     climateZoneFrontRight: bool | None = None
     odometerKm: int | None = None
+    batteryHealthPercent: float | None = None
+    batteryHealthCalculatedOn: str = ""
     serviceDays: int | None = None
     serviceDistanceKm: int | None = None
     oilServiceDays: int | None = None
@@ -397,6 +399,21 @@ class DetailData:
     lastSuccessfulAt: str = ""
     refreshDurationSeconds: float | None = None
     capabilities: dict[str, bool] | None = None
+
+
+@dataclass
+class SoftwareData:
+    available: bool | None = None
+    installedVersion: str | None = None
+    updateAvailable: bool | None = None
+    updateStatus: str = "unknown"
+    releaseNotesAvailable: bool | None = None
+    observedAt: str = ""
+    error: str = ""
+    errorCategory: str = ""
+    stale: bool = False
+    lastSuccessfulAt: str = ""
+    refreshDurationSeconds: float | None = None
 
 
 @dataclass
@@ -496,6 +513,7 @@ class VolkswagenReader:
         "Synced:",
     )
     VEHICLE_REPORT_ITEM_LABELS = (
+        r"Batteriezustand|Battery health",
         r"Gesamtstrecke|Gesamtkilometer|Total distance|Odometer",
         r"Nächster Service|NÃ¤chster Service|Next service",
         r"Nächster Ölwechsel|NÃ¤chster Ã–lwechsel|Next oil service",
@@ -1090,6 +1108,25 @@ class VolkswagenReader:
     @classmethod
     def raise_for_lockout_state(cls, root: ET.Element) -> None:
         text = "\n".join(cls.strings(root)).casefold()
+        # Volkswagen 4.6.4 presents a data-saving recovery screen while vehicle
+        # data is loading. Identify the recovery wording and mode together;
+        # a settings entry or an unrelated loading indicator is not a lockout.
+        data_saving = "datensparmodus" in text or "data saving mode" in text
+        data_loading = any(
+            phrase in text
+            for phrase in (
+                "ihre daten werden geladen",
+                "your data is loading",
+                "ladedaten werden jetzt aktualisiert",
+                "charging data is now being updated",
+                "vehicle information, such as charging data, is now being updated",
+            )
+        )
+        if data_saving and data_loading:
+            raise TransientVolkswagenState(
+                "APP_DATA_UPDATING",
+                "Volkswagen app is updating vehicle data after data saving mode",
+            )
         if any(
             value in text
             for value in (
@@ -1375,7 +1412,7 @@ class VolkswagenReader:
         # details sheet; nearby POI cards never show one.
         return any(
             re.search(
-                r"(?:Geparkt seit|Parked since|Parked for)\b",
+                r"(?:Geparkt seit|Parkt seit|Parked since|Parked for)\b",
                 value,
                 re.IGNORECASE,
             )
@@ -1626,7 +1663,7 @@ class VolkswagenReader:
     def parse_location_details(cls, root: ET.Element) -> tuple[str, str]:
         for value in cls.strings(root):
             if not re.search(
-                r"\n(?:Geparkt seit|Parked since|Parked for)\s+",
+                r"\n(?:Geparkt seit|Parkt seit|Parked since|Parked for)\s+",
                 value,
                 re.IGNORECASE,
             ):
@@ -1636,7 +1673,7 @@ class VolkswagenReader:
         parked_duration = ""
         for value in cls.strings(root):
             if re.match(
-                r"(?:Geparkt seit|Parked since|Parked for)\b",
+                r"(?:Geparkt seit|Parkt seit|Parked since|Parked for)\b",
                 value,
                 re.IGNORECASE,
             ):
@@ -1683,10 +1720,17 @@ class VolkswagenReader:
 
     @staticmethod
     def parse_locked(text: str) -> bool | None:
-        lowered = text.casefold()
-        if "entriegelt" in lowered or "unlocked" in lowered or "unlocking" in lowered:
+        # Progress labels are not completed vehicle states. In particular,
+        # "Is being unlocked" contains "unlocked" but must remain unknown.
+        if re.search(
+            r"\b(?:wird\s+(?:ent|ver)riegelt|is being (?:un)?locked|"
+            r"(?:un)?locking\s*(?:\.+|…|$)|(?:ent|ver)riegeln\s*(?:\.{2,}|…))",
+            text, re.IGNORECASE | re.MULTILINE,
+        ):
+            return None
+        if re.search(r"\b(?:entriegelt|unlocked)\b", text, re.IGNORECASE):
             return False
-        if "verriegelt" in lowered or "locked" in lowered or "locking" in lowered:
+        if re.search(r"\b(?:verriegelt|locked)\b", text, re.IGNORECASE):
             return True
         return None
 
@@ -2115,6 +2159,7 @@ class VolkswagenReader:
             else "Meldungen vorhanden"
         )
         result.reportSyncAge = report_sync.group(1).strip() if report_sync else ""
+        cls.parse_battery_health(root, result)
         if result.capabilities is None:
             result.capabilities = {}
         result.capabilities.update(
@@ -2131,6 +2176,144 @@ class VolkswagenReader:
                 "vehicle-report.warnings": True,
             }
         )
+
+    @classmethod
+    def parse_battery_health(cls, root: ET.Element, result: DetailData) -> bool:
+        """Read only a labelled state-of-health card, never charge percentages."""
+        values = cls.strings(root)
+        labels = re.compile(r"(?:Batteriezustand|Battery health)(?:[.:]\s*|$)", re.I)
+        boundaries = re.compile(
+            rf"(?:{'|'.join(cls.VEHICLE_REPORT_ITEM_LABELS)}|Ladezustand|State of charge|SoC|Reichweite|Range)(?:[.:]|$)", re.I
+        )
+        for index, value in enumerate(values):
+            match = labels.match(value.strip())
+            if not match:
+                continue
+            candidates = [value.strip()[match.end():]]
+            for candidate in values[index + 1:index + 5]:
+                if boundaries.match(candidate.strip()):
+                    break
+                candidates.append(candidate)
+            card = " ".join(candidates).strip()
+            percent = re.search(r"(?<![\w.,])(\d{1,3}(?:[.,]\d+)?)\s*%(?:\s|[.]|$)", card)
+            result.batteryHealthPercent = (
+                float(percent.group(1).replace(",", ".")) if percent else None
+            )
+            if result.batteryHealthPercent is not None and not (
+                0 <= result.batteryHealthPercent <= 100
+            ):
+                result.batteryHealthPercent = None
+            result.batteryHealthCalculatedOn = ""
+            for position, candidate in enumerate(candidates):
+                date = re.search(
+                    r"(?:Ermittelt am|Calculated on)(?:\s+(.+?))?(?=\s+\d{1,3}(?:[.,]\d+)?\s*%|$)",
+                    candidate.strip(), re.I,
+                )
+                if date:
+                    value = date.group(1) or next(iter(candidates[position + 1:position + 2]), "")
+                    # Keep the localized date's own accessibility node; help
+                    # text from neighbouring nodes is not part of the date.
+                    result.batteryHealthCalculatedOn = value if "%" not in value else ""
+                    break
+            if result.capabilities is None:
+                result.capabilities = {}
+            result.capabilities["vehicle-report.battery-health"] = (
+                result.batteryHealthPercent is not None
+            )
+            return True
+        return False
+
+    def collect_battery_health(self, root: ET.Element, result: DetailData) -> None:
+        # Scroll only within the already opened report; no additional backend
+        # refresh or daily budget acquisition is introduced.
+        for attempt in range(4):
+            self.raise_for_rate_limit_state(root)
+            self.raise_for_lockout_state(root)
+            if self.parse_battery_health(root, result):
+                return
+            if attempt == 3:
+                return
+            width, height = self.viewport_size(root)
+            previous = self.strings(root)
+            self.shell("input", "swipe", str(width // 2), str(round(height * .75)),
+                       str(width // 2), str(round(height * .35)), "400")
+            time.sleep(.5)
+            root = self.dump_ui_with_overlay_recovery("vw-report-battery.xml")
+            self.raise_for_lockout_state(root)
+            if self.strings(root) == previous:
+                return
+
+    @classmethod
+    def parse_software(cls, root: ET.Element) -> SoftwareData:
+        values = [" ".join(v.split()) for v in cls.strings(root)]
+        labels = {v.casefold() for v in values}
+        if any("updates nicht abrufbar" in v or "unable to fetch" in v
+               or "can't retrieve any updates" in v for v in labels):
+            raise TransientEndpointState(
+                "SOFTWARE_SERVICES_UNAVAILABLE",
+                "Volkswagen app cannot retrieve vehicle software updates",
+            )
+        result = SoftwareData(available=True)
+        for index, value in enumerate(values):
+            match = re.match(r"(?:Aktuelle Software|Current software):\s*(.*)$", value, re.I)
+            if not match:
+                continue
+            candidates = [match.group(1)] + values[index + 1:index + 2]
+            for candidate in candidates:
+                if re.fullmatch(r"(?:ID\.?\s*Software\s+)?v?\d{1,5}(?:[.\-]\w+){0,5}", candidate, re.I):
+                    result.installedVersion = candidate
+                    break
+        available = bool(labels.intersection(("update verfügbar", "update available")))
+        current = bool(labels.intersection((
+            "fahrzeug ist up to date", "vehicle is up-to-date", "vehicle is up to date",
+        )))
+        if available != current:
+            result.updateAvailable = available
+            result.updateStatus = "available" if available else "up-to-date"
+        result.releaseNotesAvailable = bool(labels.intersection(("versionshinweise", "release notes")))
+        if not (result.installedVersion or available or current):
+            raise RuntimeError("Volkswagen software page did not finish loading")
+        return result
+
+    def read_software(self) -> SoftwareData:
+        with self.screen_session():
+            return self.with_retries(self._read_software, "SOFTWARE")
+
+    def _read_software(self) -> SoftwareData:
+        self.launch()
+        settings = self.open_charging_settings(require_charging_values=False)
+        for attempt in range(4):
+            self.raise_for_rate_limit_state(settings)
+            self.raise_for_lockout_state(settings)
+            try:
+                x, y = self.described_node_center_any(settings, ("Software-Updates", "Software Updates"))
+                break
+            except RuntimeError:
+                if attempt == 3:
+                    return SoftwareData(
+                        available=False, updateStatus="not-exposed",
+                        observedAt=datetime.now().astimezone().isoformat(timespec="seconds"),
+                    )
+                width, height = self.viewport_size(settings)
+                self.shell("input", "swipe", str(width // 2), str(round(height * .75)),
+                           str(width // 2), str(round(height * .35)), "400")
+                time.sleep(.5)
+                settings = self.dump_ui_with_overlay_recovery("vw-software-settings.xml")
+        self.shell("input", "tap", str(x), str(y))
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            root = self.dump_ui_with_overlay_recovery("vw-software.xml")
+            self.raise_for_rate_limit_state(root)
+            self.raise_for_lockout_state(root)
+            try:
+                result = self.parse_software(root)
+            except RuntimeError as exc:
+                if isinstance(exc, TransientEndpointState) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(.5)
+                continue
+            result.observedAt = datetime.now().astimezone().isoformat(timespec="seconds")
+            return result
 
     @staticmethod
     def parse_navigation_coordinates(text: str) -> tuple[float, float]:
@@ -2482,7 +2665,10 @@ class VolkswagenReader:
             current_text = "\n".join(self.strings(overview))
             current = self.parse_locked(current_text)
             if current is desired:
-                return self.with_retries(self._read, "ACTION_VERIFY")
+                result = self.with_retries(self._read, "ACTION_VERIFY")
+                if result.locked is not desired:
+                    raise TransientEndpointState("LOCK_ACTION_UNCONFIRMED", "Volkswagen did not confirm the requested lock state")
+                return result
 
             x, y = self.described_node_center_any(
                 overview, ("Fahrzeug.", "Vehicle.")
@@ -2515,8 +2701,41 @@ class VolkswagenReader:
             except Exception as exc:
                 self.save_diagnostics("LOCK" if desired else "UNLOCK", exc)
                 raise
-            time.sleep(8)
-            return self.with_retries(self._read, "ACTION_VERIFY")
+            self.wait_for_lock_action_result(desired)
+            result = self.with_retries(self._read, "ACTION_VERIFY")
+            if result.locked is not desired:
+                raise TransientEndpointState(
+                    "LOCK_ACTION_UNCONFIRMED",
+                    "Volkswagen did not confirm the requested lock state",
+                )
+            return result
+
+    def wait_for_lock_action_result(self, desired: bool) -> ET.Element:
+        # Keep the app alive while its asynchronous vehicle request is pending.
+        # Restarting it after a fixed delay discards the completion/error UI.
+        deadline = time.monotonic() + max(self.ui_update_timeout, 90)
+        while True:
+            root = self.dump_ui_with_overlay_recovery("vw-lock-action-result.xml")
+            self.raise_for_rate_limit_state(root)
+            self.raise_for_lockout_state(root)
+            text = "\n".join(self.strings(root))
+            if any(phrase in text.casefold() for phrase in (
+                "connection to your vehicle is currently unstable",
+                "verbindung zu ihrem fahrzeug ist gerade instabil",
+            )):
+                raise TransientEndpointState(
+                    "LOCK_ACTION_FAILED", "Volkswagen reports an unstable vehicle connection",
+                )
+            if self.parse_locked(text) is desired:
+                return root
+            if time.monotonic() >= deadline:
+                raise TransientEndpointState(
+                    "LOCK_ACTION_UNCONFIRMED",
+                    "Volkswagen did not confirm the requested lock state",
+                )
+            time.sleep(.5)
+
+
 
     def _read_location(self) -> LocationData:
         self.launch("map")
@@ -2697,12 +2916,55 @@ class VolkswagenReader:
                 )
                 self.shell("input", "tap", str(x), str(y))
                 time.sleep(self.detail_wait)
-                detail = self.dump_ui("vw-climate-action.xml")
+                detail = self.dump_ui_with_overlay_recovery("vw-climate-action.xml")
+                self.raise_for_rate_limit_state(detail)
+                self.raise_for_lockout_state(detail)
                 labels = ("Starten", "Start") if desired else ("Stoppen", "Stop")
                 x, y = self.described_node_center_any(detail, labels)
                 self.shell("input", "tap", str(x), str(y))
-                time.sleep(8)
-            return self.with_retries(self._read, "ACTION_VERIFY")
+                # Wait for command feedback on this page before reading the
+                # overview; a fixed delay does not establish completion.
+                # Vehicle commands can outlast a normal navigation transition.
+                deadline = time.monotonic() + max(self.ui_update_timeout, 45)
+                expected = ("Stoppen", "Stopp", "Stop") if desired else ("Starten", "Start")
+                while True:
+                    detail = self.dump_ui_with_overlay_recovery("vw-climate-action-result.xml")
+                    self.raise_for_rate_limit_state(detail)
+                    self.raise_for_lockout_state(detail)
+                    feedback = "\n".join(self.strings(detail))
+                    overview_confirmed = (
+                        self.parse_locked(feedback) is not None
+                        and self.parse_climater(feedback) is desired
+                    )
+                    if overview_confirmed or any(
+                        node.attrib.get("enabled", "true") == "true"
+                        and (node.attrib.get("clickable") == "true"
+                             or node.attrib.get("class", "").endswith("Button"))
+                        and any(self.text_matches_label(node.attrib.get(key, ""), label)
+                                for key in ("text", "content-desc") for label in expected)
+                        for node in detail.iter()
+                    ):
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TransientEndpointState(
+                            "CLIMATE_ACTION_UNCONFIRMED",
+                            "Volkswagen did not confirm the requested climate state",
+                        )
+                    time.sleep(.5)
+            # The command can be acknowledged before the overview reflects
+            # its result. Read back with a bounded wait, without tapping again.
+            deadline = time.monotonic() + self.ui_update_timeout
+            for attempt in range(3):
+                result = self.with_retries(self._read, "ACTION_VERIFY")
+                if result.climater is desired:
+                    return result
+                if attempt == 2 or time.monotonic() >= deadline:
+                    break
+                time.sleep(3)
+            raise TransientEndpointState(
+                "CLIMATE_ACTION_UNCONFIRMED",
+                "Volkswagen did not confirm the requested climate state",
+            )
 
     @staticmethod
     def checked_nodes(root: ET.Element) -> list[ET.Element]:
@@ -3017,6 +3279,7 @@ class VolkswagenReader:
         if not self.is_vehicle_report_page(report):
             raise RuntimeError("Volkswagen vehicle health report did not open")
         self.parse_vehicle_report(report, result)
+        self.collect_battery_health(report, result)
 
         self.launch()
         departure = self.open_departure_times()
@@ -3502,7 +3765,7 @@ class VolkswagenReader:
                     )
         raise RuntimeError("Volkswagen overview element not found")
 
-    def open_charging_settings(self) -> ET.Element:
+    def open_charging_settings(self, *, require_charging_values: bool = True) -> ET.Element:
         overview = self.open_overview()
         _overview, (x, y) = self.find_overview_element(
             overview,
@@ -3515,7 +3778,25 @@ class VolkswagenReader:
             "settingsTile",
         )
         self.shell("input", "tap", str(x), str(y))
-        return self.wait_for_settings_values("vw-charging-settings.xml")
+        if require_charging_values:
+            return self.wait_for_settings_values("vw-charging-settings.xml")
+        # Software information also applies to vehicles without charging
+        # controls. Wait for actual vehicle-setting content, not EV values.
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            root = self.dump_ui_with_overlay_recovery("vw-software-settings.xml")
+            self.raise_for_rate_limit_state(root)
+            self.raise_for_lockout_state(root)
+            values = {v.casefold() for v in self.strings(root)}
+            if self.setting_values(root) or values.intersection((
+                "software-updates", "software updates", "fahrzeugname", "vehicle name",
+                "benachrichtigungen", "notifications", "nutzer verwalten", "manage users",
+                "hauptnutzer werden", "become primary user",
+            )):
+                return root
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Volkswagen vehicle settings did not finish loading")
+            time.sleep(.5)
 
     def save_settings(self, root: ET.Element) -> None:
         for attempt in range(3):
@@ -4158,11 +4439,13 @@ class BackgroundCache(Generic[T]):
         shared_backoff_reason: Callable[[T], str] | None = None,
         clears_shared_backoff: Callable[[T], bool] | None = None,
         error_retry_intervals: dict[str, float] | None = None,
+        auto_refresh: bool = True,
     ) -> None:
         self.name = name
         self.loader = loader
         self.interval = interval
         self.empty_factory = empty_factory
+        self.auto_refresh = auto_refresh
         self.lock = threading.Lock()
         self.value: T | None = None
         self.last_success_monotonic = 0.0
@@ -4183,7 +4466,8 @@ class BackgroundCache(Generic[T]):
         self.clears_shared_backoff = clears_shared_backoff
         self.error_retry_intervals = error_retry_intervals or {}
         self._load_persisted()
-        threading.Thread(target=self._worker, name=f"{name}-refresh", daemon=True).start()
+        if auto_refresh:
+            threading.Thread(target=self._worker, name=f"{name}-refresh", daemon=True).start()
 
     def _load_persisted(self) -> None:
         if self.state_path is None:
@@ -4313,7 +4597,7 @@ class BackgroundCache(Generic[T]):
         ):
             self.shared_backoff.clear()
 
-    def refresh(self) -> T:
+    def refresh(self, *, raise_errors: bool = False) -> T:
         deferred = self.shared_backoff_value()
         if deferred is not None:
             return deferred
@@ -4387,6 +4671,8 @@ class BackgroundCache(Generic[T]):
                 self.value = value
             if self.on_update is not None:
                 self.on_update(self.name, value)
+            if raise_errors:
+                raise
             return value
         finally:
             with self.lock:
@@ -4398,12 +4684,15 @@ class BackgroundCache(Generic[T]):
         with self.lock:
             value = self.value
         if value is None:
-            self.trigger()
+            if self.auto_refresh:
+                self.trigger()
             value = self.empty_factory()
-            setattr(value, "error", "Cache is initializing")
-            setattr(value, "errorCategory", "INITIALIZING")
+            setattr(value, "error", "Cache is initializing" if self.auto_refresh else "Explicit refresh required")
+            setattr(value, "errorCategory", "INITIALIZING" if self.auto_refresh else "NOT_OBSERVED")
             return value
         if self.age() >= self.interval(value):
+            if not self.auto_refresh:
+                return replace(value, stale=True)
             self.trigger()
             deferred = self.shared_backoff_value()
             if deferred is not None:
@@ -4578,12 +4867,14 @@ class ActionJobManager:
 
 class AppState:
     READ_ONLY_ACTIONS = {
+        "software/refresh",
         "charging/settings",
         "charging-location/settings",
         "charging-locations",
         "departure-time/settings",
     }
     SUPPORTED_ACTIONS = (
+        "software/refresh",
         "lock",
         "unlock",
         "charging/start",
@@ -4743,7 +5034,7 @@ class AppState:
         self.reader = VolkswagenReader()
         self.usage = UsageLimiter()
         self.verified_app_version = os.getenv(
-            "VERIFIED_APP_VERSION", "4.3.2"
+            "VERIFIED_APP_VERSION", "4.6.4"
         ).strip()
         self.priority_lock = threading.Lock()
         self.priority_waiters = 0
@@ -4834,6 +5125,11 @@ class AppState:
                 "LOCATION_GPS_UNAVAILABLE": location_interval,
             },
         )
+        self.software = BackgroundCache(
+            "software", self.reader.read_software, lambda _: detail_interval,
+            SoftwareData, state_path=cache_dir / "software.json", auto_refresh=False,
+            on_update=self._cache_updated,
+        )
 
         # A persisted charge cache can still be younger than the parked
         # interval when the service starts. Queue one protected refresh so a
@@ -4861,6 +5157,7 @@ class AppState:
             "charge": self.charge.value,
             "details": self.details.value,
             "location": self.location.value,
+            "software": self.software.get(),
             "health": self.health(),
         }
 
@@ -4876,7 +5173,10 @@ class AppState:
             "available": value is not None and bool(last_success_at),
             "lastSuccessfulAt": last_success_at,
             "ageSeconds": round(cache.age()) if last_success_at else None,
-            "stale": bool(getattr(value, "stale", False)) if value is not None else False,
+            "stale": (
+                bool(getattr(value, "stale", False))
+                or (not cache.auto_refresh and cache.age() >= cache.interval(value))
+            ) if value is not None else False,
             "refreshing": refreshing,
             "lastErrorCategory": last_error_category,
             "retryInSeconds": (
@@ -4895,6 +5195,11 @@ class AppState:
             charge_value = self.charge.value
         with self.details.lock:
             detail_value = self.details.value
+        software_value = None
+        software_cache = getattr(self, "software", None)
+        if software_cache is not None:
+            with software_cache.lock:
+                software_value = software_cache.value
         charge_capabilities = (
             charge_value.capabilities
             if isinstance(charge_value, VehicleData) and charge_value.capabilities
@@ -5019,6 +5324,15 @@ class AppState:
 
         data_capabilities: dict[str, dict[str, object]] = {}
         data_fields = {
+            "vehicle-report.battery-health": (
+                detail_capabilities.get("vehicle-report.battery-health"), "details",
+            ),
+            "vehicle.software": (
+                software_value.available
+                if isinstance(software_value, SoftwareData)
+                else None,
+                "software",
+            ),
             "charge.state-of-charge": (
                 isinstance(charge_value, VehicleData) and charge_value.soc is not None,
                 "charge",
@@ -5071,6 +5385,7 @@ class AppState:
                 "charge": True,
                 "details": True,
                 "location": True,
+                "software": True,
                 "health": True,
                 "capabilities": True,
                 "metrics": True,
@@ -5118,6 +5433,7 @@ class AppState:
                 "charge": self._cache_snapshot(self.charge),  # type: ignore[arg-type]
                 "details": self._cache_snapshot(self.details),  # type: ignore[arg-type]
                 "location": self._cache_snapshot(self.location),  # type: ignore[arg-type]
+                **({"software": self._cache_snapshot(self.software)} if hasattr(self, "software") else {}),
             },
             "usage": self.usage.snapshot(),
         }
@@ -5133,6 +5449,7 @@ class AppState:
             "charge": self.charge,
             "details": self.details,
             "location": self.location,
+            **({"software": self.software} if hasattr(self, "software") else {}),
         }
         lines = [
             "# HELP vw_app_connector_up Connector health status, 1 when not error.",
@@ -5379,6 +5696,8 @@ class AppState:
             self._end_action()
 
     def _action(self, name: str, query: dict[str, list[str]]) -> object:
+        if name == "software/refresh":
+            return self.software.refresh(raise_errors=True)
         actions: dict[str, Callable[[], object]] = {
             "lock": lambda: self.reader.set_locked(True),
             "unlock": lambda: self.reader.set_locked(False),
@@ -5742,6 +6061,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json(self.state.diagnostics_index(limit), 200)
             return
         caches: dict[str, BackgroundCache[object]] = {
+            "/software": self.state.software,  # type: ignore[dict-item]
             "/charge": self.state.charge,  # type: ignore[dict-item]
             "/details": self.state.details,  # type: ignore[dict-item]
             "/location": self.state.location,  # type: ignore[dict-item]
@@ -5848,7 +6168,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 409,
             )
             return
-        except TransientVolkswagenState as exc:
+        except (TransientVolkswagenState, TransientEndpointState) as exc:
             self.send_json(
                 {"error": str(exc), "errorCategory": exc.reason}, 503
             )

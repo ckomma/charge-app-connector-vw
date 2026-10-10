@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.27
+
+- Accept the new German `Parkt seit` location label for vehicle-marker
+  selection and address parsing, preserving existing German/English labels.
+
+- Keep the climate action page open for bounded command confirmation and
+  verify the requested state before reporting success. Unconfirmed commands
+  return HTTP 503 with `CLIMATE_ACTION_UNCONFIRMED`, without repeating the tap.
+- Expose optional battery state of health and its localized calculation date
+  through details and Home Assistant MQTT discovery, separate from charge SoC.
+- Add cache-only `/software` and authenticated read-only
+  `/action/software/refresh` for vehicle version, update status and release-note
+  availability, without additional background polling or vehicle writes.
+- Recognize the Volkswagen 4.6.4 data-saving recovery screen in German and
+  English as `APP_DATA_UPDATING`, preserving caches and existing backoff without
+  changing preferences or treating it as a request-limit cooldown.
+- Prepare the 4.6.4 write baseline after German/English real-phone verification.
+  Treat pending locking/unlocking labels as unknown, keep the app alive for
+  completion feedback and reject unconfirmed lock results.
+
 ## 0.1.26
 
 - Report `APP_INTERACTION_REQUIRED` when overview navigation fails with a

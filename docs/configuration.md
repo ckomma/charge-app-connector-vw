@@ -15,7 +15,7 @@ secrets in the runtime environment, never in Git.
 | `PORT` | `9920` | REST port |
 | `APP_PACKAGE` | `com.volkswagen.weconnect` | Volkswagen Android package |
 | `MAPS_PACKAGE` | `com.google.android.apps.maps` | Maps package used for coordinates |
-| `VERIFIED_APP_VERSION` | `4.3.2` | Real-device-tested write-action baseline |
+| `VERIFIED_APP_VERSION` | `4.6.4` | Real-device-tested write-action baseline |
 | `SLEEP_AFTER_OPERATION` | `true` | Wake before and sleep after UI work |
 | `API_KEY` | required for writes | Protects `/action/*` and `/admin/*` |
 | `VW_SPIN` | empty | Required only for lock/unlock |

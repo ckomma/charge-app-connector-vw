@@ -54,6 +54,51 @@ distance when the app provides them. Departure entries keep the existing
 `time` and `day` fields and add a one-based `index` plus `enabled` when the
 switch state is exposed.
 
+`batteryHealthPercent` is the explicitly labelled battery state of health
+(0–100%, optional), distinct from charge SoC. `batteryHealthCalculatedOn` retains
+the app's localized calculation date as a string; it is not an ISO timestamp.
+Missing cards return `null` / an empty date and capability `NOT_OBSERVED`.
+An exposed card without a valid percentage records an unavailable capability.
+The existing detail read includes bounded scrolling within the health report;
+its weighted budget cost remains three.
+
+### `GET /software`
+
+Cache-only vehicle software information, separate from the Android app version:
+
+```json
+{
+  "available": true,
+  "installedVersion": "5.4",
+  "updateAvailable": false,
+  "updateStatus": "up-to-date",
+  "releaseNotesAvailable": true
+}
+```
+
+The payload also carries `observedAt`, `lastSuccessfulAt`, `stale`, `error`,
+`errorCategory` and `refreshDurationSeconds`. Update status is `available`,
+`up-to-date`, `unknown` or `not-exposed`. A missing software menu yields
+`available: false` and null version/update fields. Unknown or contradictory
+status is never interpreted as “up-to-date”. `releaseNotesAvailable` reports
+the visible link, without opening release notes or installing an update.
+
+Software is **not polled automatically**. Before its first explicit refresh,
+GET returns HTTP 503 with `NOT_OBSERVED`; a persisted successful observation
+returns HTTP 200. Observations older than `DETAIL_INTERVAL_SECONDS` are marked
+stale without opening the app. Home Assistant MQTT discovery includes battery
+health/date, vehicle software, update status, update availability and release
+notes availability. Missing or stale optional readings become unavailable.
+
+Refresh with authenticated `POST /action/software/refresh` (or the existing
+asynchronous action mechanism). This opens vehicle settings and the localized
+software page, consumes one action-budget unit and respects action priority,
+minimum intervals and cooldowns. It is read-only and therefore permitted while
+vehicle writes are version-quarantined. HTTP errors preserve the last good
+software observation as stale. `SOFTWARE_SERVICES_UNAVAILABLE` denotes the app's
+update-service error and does not pause other endpoints. No update-installation
+action is provided; the app directs installation to vehicle infotainment.
+
 ### `GET /location`
 
 Returns the last successful address, parked duration and navigation
@@ -84,6 +129,12 @@ without automatically turning a healthy connector into a software failure.
 ## Authenticated Actions
 
 Send `X-API-Key` with every action request.
+
+Climate start/stop waits for the action control to change and then checks the
+observed vehicle state. A pending or unconfirmed result returns HTTP 503 with
+`CLIMATE_ACTION_UNCONFIRMED`, rather than HTTP 200 with the opposite state. The
+wait is bounded, does not repeat the command and preserves normal action usage,
+cooldowns and app-version quarantine.
 
 ### Vehicle and charging
 
@@ -188,3 +239,10 @@ budgeted charge probe during an active Volkswagen rate-limit cooldown. It
 requires authorized ADB and the verified app version. The unchanged original
 cooldown is cleared only after success; failures preserve it. Probe attempts
 have their own minimum interval and never reset usage counters.
+
+Lock/unlock completion is checked before success is returned. Pending labels
+such as `Wird entriegelt` / `Is being unlocked` produce an unknown `locked`
+value rather than a completed state. The app remains open while the vehicle
+command finishes. Missing completion or a mismatching final read returns
+HTTP 503 / `LOCK_ACTION_UNCONFIRMED`; Volkswagen's unstable-connection failure
+returns `LOCK_ACTION_FAILED`. Commands are not blindly retapped.

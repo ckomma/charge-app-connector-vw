@@ -28,6 +28,12 @@ truth across Windows, Linux, Termux/mobile, and Codex Cloud.
   the test without resetting persisted counters, keep cooldowns and minimum
   intervals active, and restore the exact production limits afterward.
 
+## Public Communication
+
+- Describe features, compatibility findings and verification results without
+  naming internal analysis methods. Keep technical analysis provenance in the
+  sibling private operations repository, including in future releases.
+
 ## Issue Replies And GitHub Comments
 
 - Write like a helpful developer talking to another developer: brief, friendly,

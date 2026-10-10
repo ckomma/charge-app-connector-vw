@@ -1449,10 +1449,10 @@ class ParserTests(unittest.TestCase):
         )
 
     def test_lock_state_parsing_is_case_insensitive(self):
-        self.assertFalse(VolkswagenReader.parse_locked("Fahrzeug. Wird entriegelt."))
-        self.assertTrue(VolkswagenReader.parse_locked("Fahrzeug. Wird verriegelt."))
+        self.assertIsNone(VolkswagenReader.parse_locked("Fahrzeug. Wird entriegelt."))
+        self.assertIsNone(VolkswagenReader.parse_locked("Fahrzeug. Wird verriegelt."))
         self.assertFalse(VolkswagenReader.parse_locked("ENTRIEGELT"))
-        self.assertFalse(VolkswagenReader.parse_locked("Vehicle. Unlocking."))
+        self.assertIsNone(VolkswagenReader.parse_locked("Vehicle. Unlocking."))
         self.assertTrue(VolkswagenReader.parse_locked("Vehicle. Locked."))
         self.assertIsNone(VolkswagenReader.parse_locked("Fahrzeugstatus unbekannt"))
 
@@ -2357,7 +2357,8 @@ class ParserTests(unittest.TestCase):
                         patch.object(reader, "wait_for_lock_control", return_value=overview),
                         patch.object(reader, "display_size", return_value=(1080, 2400)),
                         patch.object(reader, "wait_for_pin_dialog", return_value=pin),
-                        patch.object(reader, "with_retries", return_value=VehicleData()) as retries,
+                        patch.object(reader, "wait_for_lock_action_result", return_value=overview),
+                        patch.object(reader, "with_retries", return_value=VehicleData(locked=desired)) as retries,
                         patch.object(reader, "shell") as shell,
                         patch("time.sleep"),
                     ):
@@ -2687,6 +2688,7 @@ class ParserTests(unittest.TestCase):
             "Parked since 26/06/2026",
             "Parked for 2 hours",
             "Geparkt seit 2 Std.",
+            "Parkt seit 2 Std.",
         ):
             with self.subTest(parked=parked):
                 root = ET.fromstring(
@@ -3214,6 +3216,16 @@ class ParserTests(unittest.TestCase):
             VolkswagenReader.parse_location_details(root),
             ("Example Street 1, Example City", "Parked for 2 hours"),
         )
+
+    def test_location_464_parking_labels_in_both_localizations(self):
+        for label in ("Parkt seit 2 Std.", "Parked since 2 hours"):
+            for merged in (False, True):
+                with self.subTest(label=label, merged=merged):
+                    text = "Example Street 1&#10;" + label if merged else "Example Street 1"
+                    extra = "" if merged else f'<node class="android.widget.TextView" text="{label}" bounds="[55,1660][1025,1725]"/>'
+                    root = ET.fromstring(f'<hierarchy><node class="android.widget.TextView" text="{text}" bounds="[55,1565][1025,1631]"/>{extra}<node text="Route" bounds="[502,1987][622,2042]"/></hierarchy>')
+                    self.assertTrue(VolkswagenReader.vehicle_marker_is_selected(root, ""))
+                    self.assertEqual(VolkswagenReader.parse_location_details(root), ("Example Street 1", label))
 
     def test_usage_limiter_persists_and_enforces_daily_budget(self):
         with TemporaryDirectory() as directory:
@@ -5057,7 +5069,7 @@ second device usb:1-2
             patch("vw_app_connector.BackgroundTransientBackoff"),
             patch(
                 "vw_app_connector.BackgroundCache",
-                side_effect=(charge, details, location),
+                side_effect=(charge, details, location, Mock()),
             ),
             patch("vw_app_connector.MqttPublisher.from_environment", return_value=None),
             patch("vw_app_connector.ActionJobManager"),
@@ -5068,5 +5080,3 @@ second device usb:1-2
 
 if __name__ == "__main__":
     unittest.main()
-    HealthData,
-    RequestHandler,

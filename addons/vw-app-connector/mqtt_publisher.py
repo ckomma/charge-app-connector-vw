@@ -117,11 +117,19 @@ class MqttPublisher:
             ("binary_sensor", "climate_zone_front_right", "Front-right climate zone", "details", "climateZoneFrontRight", None, None, None, "mdi:car-seat-heater"),
             ("sensor", "target_temperature", "Target temperature", "details", "targetTemperatureC", "°C", "temperature", "measurement", None),
             ("sensor", "odometer", "Odometer", "details", "odometerKm", "km", "distance", "total_increasing", None),
+            ("sensor", "battery_health", "Battery health", "details", "batteryHealthPercent", "%", None, "measurement", "mdi:battery-heart-variant"),
+            ("sensor", "battery_health_date", "Battery health calculated on", "details", "batteryHealthCalculatedOn", None, None, None, "mdi:calendar"),
+            ("sensor", "vehicle_software", "Vehicle software", "software", "installedVersion", None, None, None, "mdi:car-cog"),
+            ("sensor", "software_update_status", "Software update status", "software", "updateStatus", None, None, None, "mdi:update"),
+            ("binary_sensor", "software_update_available", "Software update available", "software", "updateAvailable", None, "update", None, None),
+            ("binary_sensor", "software_release_notes", "Software release notes available", "software", "releaseNotesAvailable", None, None, None, "mdi:text-box-outline"),
             ("sensor", "service_days", "Service due", "details", "serviceDays", "d", "duration", "measurement", None),
             ("sensor", "warning_status", "Warning status", "details", "warningStatus", None, None, None, "mdi:alert-circle-outline"),
             ("sensor", "address", "Vehicle address", "location", "address", None, None, None, "mdi:map-marker"),
             ("sensor", "parked_duration", "Parked duration", "location", "parkedDuration", None, None, None, "mdi:timer-outline"),
             ("sensor", "connector_status", "Connector health", "health", "status", None, None, None, "mdi:connection"),
+            ("sensor", "status_reasons", "Connector status reasons", "health", "statusReasons", None, None, None, "mdi:alert-circle-outline"),
+            ("sensor", "data_warnings", "Vehicle data warnings", "health", "dataWarnings", None, None, None, "mdi:database-alert-outline"),
             ("sensor", "vehicle_source_age", "Vehicle source age", "health", "vehicleSourceAgeMinutes", "min", "duration", "measurement", None),
             ("binary_sensor", "vehicle_source_stale", "Vehicle source data stale", "health", "vehicleSourceStale", None, "problem", None, None),
             ("sensor", "background_backoff_reason", "Background backoff reason", "health", "backgroundBackoffReason", None, None, None, "mdi:timer-alert-outline"),
@@ -152,6 +160,26 @@ class MqttPublisher:
             }
             if unit:
                 config["unit_of_measurement"] = unit
+            if object_id in (
+                "battery_health", "battery_health_date", "vehicle_software",
+                "software_update_status", "software_update_available", "software_release_notes",
+            ):
+                # Unknown fields must not become healthy/false sensor readings.
+                config.pop("availability_topic")
+                config["availability_mode"] = "all"
+                valid = "value_json.get('%s') is not none and value_json.get('%s') != ''" % (key, key)
+                if state_name == "software":
+                    valid += " and value_json.get('available') == true"
+                    expiry = max(1, int(float(os.getenv("DETAIL_INTERVAL_SECONDS", "43200"))))
+                    config["expire_after"] = expiry
+                    # Retained observations must not appear fresh after an HA
+                    # restart; expiry also handles the absence of polling.
+                    valid += " and (as_timestamp(now()) - as_timestamp(value_json.get('lastSuccessfulAt'), 0)) < %d" % expiry
+                config["availability"] = [
+                    {"topic": self.availability_topic},
+                    {"topic": f"{self.topic_prefix}/{state_name}",
+                     "value_template": "{{ 'online' if " + valid + " and not value_json.get('stale', false) else 'offline' }}"},
+                ]
             if device_class:
                 config["device_class"] = device_class
             if state_class:

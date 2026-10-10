@@ -89,6 +89,14 @@ machine-readable reasons. An optimized-battery-use prompt is never activated
 automatically; the connector selects only `Nicht jetzt` / `Not now` and reports
 `VEHICLE_ENERGY_UNAVAILABLE`.
 
+Volkswagen app 4.6.4 can show a data-saving recovery screen while vehicle data
+is loading. The localized recovery wording together with `Datensparmodus` /
+`data saving mode` is reported as `APP_DATA_UPDATING`. The connector preserves
+cached data as stale and uses the existing persisted shared background backoff;
+it does not dismiss the screen, change the data-saving preference or immediately
+relaunch the app. This state does not start the server request-limit cooldown.
+A data-saving settings label alone does not block reads.
+
 On service startup the charge worker queues one protected early refresh so a
 phone connection event missed during downtime does not wait for the parked
 interval. Usage limits, minimum intervals, cooldown and shared backoff remain
@@ -134,3 +142,13 @@ gauges without triggering a Volkswagen app refresh.
 - Treat location, lock state, MQTT payloads, logs and diagnostics as sensitive.
 - Keep the connector on localhost or behind a trusted authenticated network
   boundary.
+
+
+### Secure screen locks during temporary phone tests
+
+On a securely locked phone, ADB cannot replace manual authentication. The Pixel
+10 test passed after manual unlocking with `SLEEP_AFTER_OPERATION=false` in the
+isolated test environment. With `true`, putting the display to sleep activated
+the device lock between reads. Restore the original production setting after
+the temporary test; do not treat successful initial reads as proof that a
+securely locked phone supports unattended operation.
