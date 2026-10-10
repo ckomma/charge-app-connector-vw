@@ -20,7 +20,7 @@ Based on [janphkre/charge-app-connector](https://github.com/janphkre/charge-app-
 
 ## Compatibility
 
-The prepared write-action baseline is Volkswagen app `4.6.4` (`406040`).
+The verified write-action baseline is Volkswagen app `4.6.4` (`406040`).
 German and English real-phone tests cover reads, climate start/stop, charging
 stop/start and remote lock/unlock. Lock actions now wait for completed vehicle
 feedback and verify the result; pending labels remain unknown. The corrected

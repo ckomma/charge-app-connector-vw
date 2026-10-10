@@ -9,7 +9,7 @@ listing reports an update on 2026-10-08. The installed package independently
 reports version name/code `4.6.4` / `406040`. Search-index and third-party listing dates
 can lag or disagree and must not be used alone to decide that no update exists.
 
-The prepared write-action baseline is now `4.6.4`. German/English real-phone
+The verified write-action baseline for HA App 0.1.27 is `4.6.4`. German/English real-phone
 reads, climate, charging and lock/unlock verification passed. Physical feedback
 exposed a lock-completion defect during testing: “Wird entriegelt” / “Is being
 unlocked” had been interpreted as a completed unlock. The corrected parser
@@ -211,3 +211,16 @@ returned HTTP 200; production limits 180/20, retained counters 169/63, cooldown
 and shared backoff zero. The Pixel language remained de-DE. Production code
 and write baseline remain unchanged. The Redmi was reconnected and its authorized USB transport verified. The
 production service and existing endpoints remained healthy after the swap.
+
+
+## Release and deployment checkpoint
+
+HA App 0.1.27 is published on main. The same committed connector was deployed
+to the existing systemd installation, including its explicit 4.6.4 write
+baseline. Authenticated read-only software refresh returned available=false /
+not-exposed; software, details, charge, location and capabilities returned HTTP
+200. Details expose both optional battery-health fields. Production limits
+were restored to 180/20, persisted counters retained at 170/64, and cooldown /
+shared backoff were zero. The test action counter remains above its normal
+limit until the daily reset. No vehicle switch action was repeated during
+this deployment; the previous unlocked/restored setup was preserved.
