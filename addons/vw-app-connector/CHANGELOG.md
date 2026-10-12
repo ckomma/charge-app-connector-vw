@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.28
+
+- Recognize spelled-out singular synchronization ages in German and English,
+  including `Synchronisiert vor Eine Minute` and `Synced one minute ago`, so
+  fresh vehicle data can clear the existing stale-source background pause.
+- Verify active charging through the production connector and Home Assistant
+  after a fresh charge read. Preserve usage budgets, cooldowns and vehicle state.
+
 ## 0.1.27
 
 - Accept the new German `Parkt seit` location label for vehicle-marker

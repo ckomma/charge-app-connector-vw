@@ -1456,6 +1456,21 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(VolkswagenReader.parse_locked("Vehicle. Locked."))
         self.assertIsNone(VolkswagenReader.parse_locked("Fahrzeugstatus unbekannt"))
 
+    def test_spelled_out_sync_durations(self):
+        for text, expected in (
+            ("Ihr Fahrzeug: Example Vehicle. Synchronisiert vor Eine Minute", 1),
+            ("Synchronisiert vor einer unbekannten Zeit", None),
+            ("Synchronisiert vor Eine Stunde 5 Minuten", 65),
+            ("Synchronisiert vor Eine Stunde Eine Minute", 61),
+            ("Synced one minute ago", 1),
+            ("Updated a minute ago", 1),
+            ("Synchronised an hour ago", 60),
+            ("Synced one hour one minute ago", 61),
+            ("SYNCHRONISIERT VOR EINE MINUTE", 1),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(VolkswagenReader.parse_sync_age(text), expected)
+
     def test_english_overview_values(self):
         self.assertEqual(VolkswagenReader.parse_sync_age("Synced 2 hours 5 minutes"), 125)
         self.assertEqual(VolkswagenReader.parse_sync_age("Just synced"), 0)

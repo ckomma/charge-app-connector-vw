@@ -1736,15 +1736,20 @@ class VolkswagenReader:
 
     @staticmethod
     def parse_sync_age(text: str) -> int | None:
+        # Accessibility labels spell out singular durations in both languages.
         match = re.search(
             r"(?:Synchronisiert vor|Synced|Synchronised|Updated)\s*"
-            r"(?:(\d+)\s*(?:Stunden?|hours?)\s*)?"
-            r"(?:(\d+)\s*(?:Minuten?|minutes?))?(?:\s*ago)?",
+            r"(?:(\d+|eine?|one|an?)\s*(?:Stunden?|hours?)\s*)?"
+            r"(?:(\d+|eine?|one|a)\s*(?:Minuten?|minutes?))?(?:\s*ago)?",
             text,
             re.IGNORECASE,
         )
         if match and any(match.groups()):
-            return int(match.group(1) or 0) * 60 + int(match.group(2) or 0)
+            hours, minutes = (
+                int(value) if value and value.isdecimal() else 1 if value else 0
+                for value in match.groups()
+            )
+            return hours * 60 + minutes
         if re.search(
             r"Gerade (?:eben )?synchronisiert|Just synced|Synced just now|"
             r"Synchronised just now|Just updated",
