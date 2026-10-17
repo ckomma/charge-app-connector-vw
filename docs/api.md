@@ -225,6 +225,22 @@ from authenticated `GET /actions/JOB_ID`.
 
 ## Administrative Endpoints
 
+### `POST /admin/rest/pause` and `POST /admin/rest/resume`
+
+Require `X-API-Key`. Pause stops automatic app polling after running work
+finishes; resume queues a protected fresh charge read. Responses include `paused`,
+`since`, `reason` and `changed`. Both operations are idempotent and preserve
+usage counters. `since` is the most recent pause timestamp, also after resume.
+The default is unpaused; an explicitly requested pause survives restart.
+
+Cache GETs remain available during pause but report `stale: true` and
+`errorCategory: REST_MODE_PAUSED`. After resume, old values report
+`REST_MODE_RESUMING` until replaced by fresh measurements. Explicit app actions
+are rejected during pause with `REST_MODE_PAUSED`; resume first.
+
+These endpoints never start or stop vehicle charging. See the manual rest-mode
+section in [operations](operations.md) for Home Assistant and evcc behavior.
+
 ### `POST /admin/refresh/charge`
 
 Queues one early charge-cache refresh, intended for a disconnected-to-connected

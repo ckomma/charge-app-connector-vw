@@ -112,6 +112,7 @@ class MqttPublisher:
             ("binary_sensor", "locked", "Vehicle locked", "charge", "locked", None, "lock", None, None),
             ("binary_sensor", "charge_stale", "Charge data stale", "charge", "stale", None, "problem", None, None),
             ("binary_sensor", "action_available", "Vehicle actions available", "health", "actionAvailable", None, None, None, "mdi:shield-check-outline"),
+            ("binary_sensor", "rest_mode_paused", "Manual rest mode", "health", "restModePaused", None, None, None, "mdi:sleep"),
             ("binary_sensor", "automatic_window_heating", "Automatic window heating", "details", "automaticWindowHeating", None, None, None, "mdi:car-defrost-front"),
             ("binary_sensor", "climate_zone_front_left", "Front-left climate zone", "details", "climateZoneFrontLeft", None, None, None, "mdi:car-seat-heater"),
             ("binary_sensor", "climate_zone_front_right", "Front-right climate zone", "details", "climateZoneFrontRight", None, None, None, "mdi:car-seat-heater"),

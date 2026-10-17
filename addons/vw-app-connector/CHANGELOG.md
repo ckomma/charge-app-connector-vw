@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.31
+
+- Add an optional manual rest mode, off by default, with authenticated pause
+  and resume endpoints and Home Assistant example controls.
+- Persist explicit pauses across service restarts; keep REST and MQTT online,
+  mark paused vehicle data stale and block app actions until explicit resume.
+- Resume with a protected charge refresh; retain normal detail/location
+  schedules, usage counters, minimum intervals, cooldowns and version policy.
+- Expose rest-mode status through health and MQTT discovery.
+- Verify real-phone pause/resume, restart persistence and evcc charging
+  start/stop during pause. Restore the original target and operating settings.
+
 ## 0.1.30
 
 - Report connected-idle (`B`) when charge details explicitly say charging has

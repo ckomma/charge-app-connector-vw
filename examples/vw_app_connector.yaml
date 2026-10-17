@@ -83,6 +83,9 @@ rest:
         value_template: "{{ value_json.status }}"
         icon: mdi:cellphone-link
         json_attributes:
+          - restModePaused
+          - restModeSince
+          - restModeReason
           - adbState
           - adbMode
           - adbTransport
@@ -130,6 +133,18 @@ rest:
           - refreshDurationSeconds
 
 rest_command:
+  volkswagen_app_rest_pause:
+    url: "http://CONNECTOR_HOST:9920/admin/rest/pause"
+    method: post
+    timeout: 120
+    headers:
+      X-API-Key: !secret vw_app_connector_api_key
+  volkswagen_app_rest_resume:
+    url: "http://CONNECTOR_HOST:9920/admin/rest/resume"
+    method: post
+    timeout: 120
+    headers:
+      X-API-Key: !secret vw_app_connector_api_key
   volkswagen_app_charge_refresh:
     url: "http://CONNECTOR_HOST:9920/admin/refresh/charge"
     method: post
@@ -201,6 +216,22 @@ rest_command:
 #       - action: rest_command.volkswagen_app_charge_refresh
 
 template:
+  - switch:
+      - name: "Volkswagen App Ruhemodus"
+        unique_id: volkswagen_app_rest_mode
+        icon: mdi:sleep
+        state: "{{ state_attr('sensor.volkswagen_app_connector', 'restModePaused') is true }}"
+        availability: "{{ state_attr('sensor.volkswagen_app_connector', 'restModePaused') is boolean }}"
+        turn_on:
+          - action: rest_command.volkswagen_app_rest_pause
+          - action: homeassistant.update_entity
+            target:
+              entity_id: sensor.volkswagen_app_connector
+        turn_off:
+          - action: rest_command.volkswagen_app_rest_resume
+          - action: homeassistant.update_entity
+            target:
+              entity_id: sensor.volkswagen_app_connector
   - binary_sensor:
       - name: "Volkswagen App Actions Ready"
         unique_id: volkswagen_app_actions_ready

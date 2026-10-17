@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -419,6 +419,9 @@ class SoftwareData:
 @dataclass
 class HealthData:
     status: str = "ok"
+    restModePaused: bool = False
+    restModeSince: str = ""
+    restModeReason: str = ""
     statusReasons: tuple[str, ...] = ()
     dataWarnings: tuple[str, ...] = ()
     adbState: str = ""
@@ -4449,6 +4452,33 @@ class BackgroundTransientBackoff:
             }
 
 
+class RestMode:
+    """Explicit, persisted manual pause; no automatic vehicle-state policy."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.lock = threading.RLock()
+        self.paused = False
+        self.since = ""
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.paused = saved.get("paused") is True
+            self.since = str(saved.get("since", ""))
+        except FileNotFoundError:
+            pass
+
+    def set(self, paused: bool) -> bool:
+        if self.paused == paused:
+            return False
+        since = datetime.now().astimezone().isoformat(timespec="seconds") if paused else self.since
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"paused": paused, "since": since}), encoding="utf-8")
+        temporary.replace(self.path)
+        self.paused, self.since = paused, since
+        return True
+
+
 class BackgroundCache(Generic[T]):
     def __init__(
         self,
@@ -4466,12 +4496,14 @@ class BackgroundCache(Generic[T]):
         clears_shared_backoff: Callable[[T], bool] | None = None,
         error_retry_intervals: dict[str, float] | None = None,
         auto_refresh: bool = True,
+        rest_mode: RestMode | None = None,
     ) -> None:
         self.name = name
         self.loader = loader
         self.interval = interval
         self.empty_factory = empty_factory
         self.auto_refresh = auto_refresh
+        self.rest_mode = rest_mode
         self.lock = threading.Lock()
         self.value: T | None = None
         self.last_success_monotonic = 0.0
@@ -4560,6 +4592,8 @@ class BackgroundCache(Generic[T]):
         return time.monotonic() - self.last_success_monotonic
 
     def refresh_due(self) -> bool:
+        if self.rest_mode is not None and self.rest_mode.paused:
+            return False
         with self.lock:
             early_refresh_requested = self.early_refresh_requested
             value = self.value
@@ -4709,6 +4743,14 @@ class BackgroundCache(Generic[T]):
     def get(self) -> T:
         with self.lock:
             value = self.value
+        rest = self.rest_mode
+        if rest is not None and (rest.paused or (rest.since and self.last_success_at <= rest.since)):
+            return replace(
+                value if value is not None else self.empty_factory(),
+                stale=True,
+                error="Manual rest mode" if rest.paused else "Awaiting fresh data after rest mode",
+                errorCategory="REST_MODE_PAUSED" if rest.paused else "REST_MODE_RESUMING",
+            )
         if value is None:
             if self.auto_refresh:
                 self.trigger()
@@ -5005,6 +5047,12 @@ class AppState:
         self, loader: Callable[[], T], cost: int, priority: bool = False
     ) -> Callable[[], T]:
         def run() -> T:
+            rest = getattr(self, "rest_mode", None)
+            def yield_background() -> bool:
+                if rest is not None and rest.paused:
+                    raise ActionPriority("Background refresh paused manually")
+                return not priority and self.priority_pending() and time.monotonic() < priority_yield_until
+
             priority_yield_until = (
                 time.monotonic()
                 + max(self.usage.background_min_interval, 0.25)
@@ -5013,6 +5061,7 @@ class AppState:
                 with self.priority_lock:
                     self.priority_waiters += 1
             try:
+                yield_background()
                 while self.reader.action_pending.is_set():
                     time.sleep(0.25)
                 with self.background_preflight_lock:
@@ -5031,18 +5080,14 @@ class AppState:
                         raise
                 self.usage.acquire_background(
                     cost,
-                    yield_to=(
-                        None
-                        if priority
-                        else lambda: (
-                            self.priority_pending()
-                            and time.monotonic() < priority_yield_until
-                        )
-                    ),
+                    yield_to=yield_background,
                 )
                 self.reader.context.background = True
                 try:
-                    return loader()
+                    with rest.lock if rest is not None else nullcontext():
+                        if rest is not None and rest.paused:
+                            raise ActionPriority("Background refresh paused manually")
+                        return loader()
                 except VolkswagenRateLimit as exc:
                     self.usage.record_rate_limit(exc.reason)
                     raise
@@ -5082,6 +5127,7 @@ class AppState:
         cache_dir = Path(
             os.getenv("CACHE_STATE_DIR", "/var/lib/vw-app-connector/cache")
         )
+        self.rest_mode = RestMode(cache_dir / "rest-mode.json")
         self.background_backoff = BackgroundTransientBackoff(
             cache_dir / "background-backoff.json",
             base_seconds=error_retry_interval,
@@ -5111,6 +5157,7 @@ class AppState:
             self.background_loader(self.reader.read, 1),
             charge_interval,
             VehicleData,
+            rest_mode=self.rest_mode,
             error_retry_interval=error_retry_interval,
             state_path=cache_dir / "charge.json",
             on_update=charge_updated,
@@ -5128,6 +5175,7 @@ class AppState:
             self.background_loader(self.reader.read_details, 3, priority=True),
             lambda _: detail_interval,
             DetailData,
+            rest_mode=self.rest_mode,
             initial_delay=600,
             error_retry_interval=error_retry_interval,
             state_path=cache_dir / "details.json",
@@ -5139,6 +5187,7 @@ class AppState:
             self.background_loader(self.reader.read_location, 1, priority=True),
             lambda _: location_interval,
             LocationData,
+            rest_mode=self.rest_mode,
             initial_delay=300,
             error_retry_interval=error_retry_interval,
             state_path=cache_dir / "location.json",
@@ -5154,6 +5203,7 @@ class AppState:
         self.software = BackgroundCache(
             "software", self.reader.read_software, lambda _: detail_interval,
             SoftwareData, state_path=cache_dir / "software.json", auto_refresh=False,
+            rest_mode=self.rest_mode,
             on_update=self._cache_updated,
         )
 
@@ -5180,9 +5230,9 @@ class AppState:
 
     def mqtt_state(self) -> dict[str, object]:
         return {
-            "charge": self.charge.value,
-            "details": self.details.value,
-            "location": self.location.value,
+            "charge": self.charge.get(),
+            "details": self.details.get(),
+            "location": self.location.get(),
             "software": self.software.get(),
             "health": self.health(),
         }
@@ -5662,6 +5712,8 @@ class AppState:
         )
 
     def ensure_action_allowed(self, name: str, app_version: str | None = None) -> None:
+        if getattr(self, "rest_mode", None) is not None and self.rest_mode.paused:
+            raise ActionQuarantined("REST_MODE_PAUSED", "", self.verified_app_version)
         if not self.is_write_action(name):
             return
         actual = (
@@ -5711,7 +5763,10 @@ class AppState:
         self._begin_action()
         try:
             self.usage.acquire_action()
-            return self._action(name, query)
+            rest = getattr(self, "rest_mode", None)
+            with rest.lock if rest is not None else nullcontext():
+                self.ensure_action_allowed(name)
+                return self._action(name, query)
         except VolkswagenRateLimit as exc:
             self.usage.record_rate_limit(exc.reason)
             raise
@@ -5879,6 +5934,13 @@ class AppState:
         raise KeyError(name)
 
     def probe_cooldown(self) -> dict[str, object]:
+        rest = getattr(self, "rest_mode", None)
+        with rest.lock if rest is not None else nullcontext():
+            if rest is not None and rest.paused:
+                raise CooldownProbeRejected("REST_MODE_PAUSED", "Resume manual rest mode first")
+            return self._probe_cooldown()
+
+    def _probe_cooldown(self) -> dict[str, object]:
         health = self.reader.phone_health()
         if health.adbState != "device":
             raise CooldownProbeRejected(
@@ -5919,6 +5981,8 @@ class AppState:
         }
 
     def request_charge_refresh(self) -> dict[str, object]:
+        if getattr(self, "rest_mode", None) is not None and self.rest_mode.paused:
+            return {"status": "paused", "reason": "REST_MODE_PAUSED"}
         result = self.charge.request_early_refresh()
         result["budgetCost"] = 1
         result["minimumIntervalPreserved"] = True
@@ -5926,13 +5990,36 @@ class AppState:
         result["backgroundBackoffPreserved"] = True
         return result
 
+    def set_rest_mode(self, paused: bool) -> dict[str, object]:
+        # Drain an already-running background read before acknowledging pause.
+        # Synchronize with the usage guard so a waiting worker cannot debit
+        # budget after pause has been acknowledged.
+        with self.rest_mode.lock:
+            with self.usage.lock:
+                changed = self.rest_mode.set(paused)
+        if not paused and changed:
+            self.charge.request_early_refresh()
+        if self.mqtt is not None:
+            for name, value in self.mqtt_state().items():
+                self.mqtt.publish_state(name, value)
+        return {"paused": self.rest_mode.paused, "since": self.rest_mode.since,
+                "reason": "manual" if self.rest_mode.paused else "", "changed": changed}
+
     def health(self) -> HealthData:
         value = self.reader.phone_health()
+        rest = getattr(self, "rest_mode", None)
+        if rest is not None:
+            value.restModePaused = rest.paused
+            value.restModeSince = rest.since
+            value.restModeReason = "manual" if rest.paused else ""
         value.verifiedAppVersion = self.verified_app_version
         value.appVersionVerified, value.actionBlockedReason = self.version_policy(
             value.appVersion, self.verified_app_version
         )
         value.actionAvailable = value.appVersionVerified
+        if value.restModePaused:
+            value.actionAvailable = False
+            value.actionBlockedReason = "REST_MODE_PAUSED"
         value.chargeLastSuccessfulAt = self.charge.last_success_at
         value.chargeAgeSeconds = (
             round(self.charge.age()) if self.charge.last_success_at else None
@@ -6102,6 +6189,16 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         prefix = "/action/"
+        if parsed.path in ("/admin/rest/pause", "/admin/rest/resume"):
+            if not self.authenticated():
+                self.send_error(401)
+                return
+            try:
+                self.send_json(self.state.set_rest_mode(parsed.path.endswith("/pause")), 200)
+            except Exception:
+                LOG.exception("Manual rest-mode transition failed")
+                self.send_json({"errorCategory": "REST_MODE_FAILED"}, 503)
+            return
         if parsed.path == "/admin/refresh/charge":
             if not self.authenticated():
                 self.send_error(401)
@@ -6176,8 +6273,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         except ActionQuarantined as exc:
             self.send_json(
                 {
-                    "error": "Vehicle actions are quarantined for this app version",
-                    "errorCategory": "APP_VERSION",
+                    "error": ("Resume manual rest mode before app actions" if exc.reason == "REST_MODE_PAUSED"
+                              else "Vehicle actions are quarantined for this app version"),
+                    "errorCategory": "REST_MODE_PAUSED" if exc.reason == "REST_MODE_PAUSED" else "APP_VERSION",
                     "reason": exc.reason,
                     "appVersion": exc.app_version,
                     "verifiedAppVersion": exc.verified_version,

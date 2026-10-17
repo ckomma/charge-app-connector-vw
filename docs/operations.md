@@ -27,6 +27,34 @@ Due details and location work have priority over routine charge refreshes.
 Routine charge work yields for at most one background minimum interval so it
 cannot be starved indefinitely.
 
+## Manual Rest Mode
+
+Rest mode is off by default and never starts automatically. The optional
+Home Assistant package includes a `Volkswagen App Ruhemodus` switch. Turning
+it on calls authenticated `POST /admin/rest/pause`; turning it off calls
+`POST /admin/rest/resume`.
+
+Pause waits for a running background read or action to finish, then prevents
+new automatic app reads. REST, MQTT and phone-health telemetry remain available.
+Vehicle caches are returned with `stale: true` and `REST_MODE_PAUSED`, preserving
+their original timestamps. Vehicle actions, read-only app actions and cooldown
+probes require explicit resume; a charge-refresh request does not end pause.
+
+The pause and its timestamp are persisted in `CACHE_STATE_DIR/rest-mode.json`,
+including across service restarts. Repeated pause/resume calls are idempotent.
+Resume queues a charge read without bypassing budgets, minimum intervals,
+cooldowns or existing backoff. Details and location retain their normal
+refresh schedules. Each cache remains stale with
+`REST_MODE_RESUMING` until a fresh read completes. Software still requires an
+explicit software refresh. Health exposes `restModePaused`, `restModeSince`
+and `restModeReason`; MQTT also discovers a read-only rest-mode binary sensor.
+
+This first version has no automatic connection or charging triggers. Resume
+manually before vehicle actions or when fresh vehicle data is required. An
+evcc configuration rejecting stale data will use its missing-data behavior;
+validate charge control and SoC estimation for the installation. Rest mode
+does not guarantee vehicle sleep or reduced 12-V consumption.
+
 ## Usage Protection
 
 Background work has a persisted weighted daily budget. Actions have a separate

@@ -15,6 +15,8 @@ Based on [janphkre/charge-app-connector](https://github.com/janphkre/charge-app-
 - German and English Volkswagen app UI support.
 - USB ADB with optional Wi-Fi fallback.
 - Persisted usage budgets, retries, cooldowns and stale-data handling.
+- Optional manual rest mode through authenticated endpoints and a Home Assistant
+  switch, with persisted pause state and explicit stale-cache reporting.
 - MQTT discovery for Home Assistant plus examples for REST, openHAB and evcc.
 - systemd, Docker Compose and Home Assistant App deployment options.
 
@@ -110,7 +112,7 @@ Settings -> Add-ons -> Add-on Store -> Repositories
 
 The app uses the same connector code, stores persistent state below
 Supervisor-managed `/data`, defaults to manual boot and currently reports
-version `0.1.30`. See the [installation guide](deploy/home-assistant/README.md).
+version `0.1.31`. See the [installation guide](deploy/home-assistant/README.md).
 
 ## Integrations
 
