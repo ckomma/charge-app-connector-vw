@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.30
+
+- Report connected-idle (`B`) when charge details explicitly say charging has
+  stopped or the charge target is reached, even if the stop control remains
+  visible. Prevent `Lädt gerade nicht` from being classified as active charging.
+- Add German and English regression coverage and verify the reached-target
+  state on a real phone with Volkswagen app 4.8.1 in German.
+- Verify evcc charging start and stop with the connector service paused;
+  restore the original charging target and all test settings afterward.
+  Preserve existing budgets, cooldowns, authentication and app-version policy.
+
 ## 0.1.29
 
 - Support Volkswagen 4.8.1 localized vehicle-location map controls in German

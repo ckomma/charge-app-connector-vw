@@ -1801,6 +1801,10 @@ class VolkswagenReader:
 
     @staticmethod
     def text_reports_active_charging(text: str) -> bool:
+        # The stop control remains visible after charging completes. Explicit
+        # vehicle feedback takes precedence over that control's action label.
+        if VolkswagenReader.text_reports_idle_charging(text):
+            return False
         return bool(
             re.search(
                 r"Laden stoppen|Wird geladen|Lädt|Stop charging|"
@@ -1811,6 +1815,15 @@ class VolkswagenReader:
                 re.IGNORECASE,
             )
         )
+
+    @staticmethod
+    def text_reports_idle_charging(text: str) -> bool:
+        return bool(re.search(
+            r"Lädt\s+(?:gerade\s+)?nicht|Wird\s+(?:gerade\s+)?nicht\s+geladen|"
+            r"Zielladestand\s+erreicht|(?:Is\s+)?not\s+(?:currently\s+)?charging|"
+            r"(?:Target\s+charge\s+(?:level\s+)?|Charge\s+target\s+)reached",
+            text, re.IGNORECASE,
+        ))
 
     @staticmethod
     def text_reports_disconnected(text: str) -> bool:
@@ -2650,6 +2663,8 @@ class VolkswagenReader:
         lowered = detail_text.casefold()
         if self.text_reports_disconnected(detail_text):
             result.status = "A"
+        elif self.text_reports_idle_charging(detail_text):
+            result.status = "B"
         elif self.text_reports_active_charging(detail_text):
             result.status = "C"
         elif any(

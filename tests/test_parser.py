@@ -1493,6 +1493,21 @@ class ParserTests(unittest.TestCase):
             )
         )
 
+    def test_explicit_idle_feedback_overrides_stop_control(self):
+        for text in (
+            "Laden stoppen. Zielladestand erreicht. Lädt gerade nicht.",
+            "Laden stoppen. Lädt nicht.",
+            "Stop charging. Target charge level reached. Not charging.",
+            "Stop charging. Is not currently charging.",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(VolkswagenReader.text_reports_idle_charging(text))
+                self.assertFalse(VolkswagenReader.text_reports_active_charging(text))
+        for text in ("Laden stoppen. Wird geladen.", "Stop charging. Is charging."):
+            with self.subTest(text=text):
+                self.assertFalse(VolkswagenReader.text_reports_idle_charging(text))
+                self.assertTrue(VolkswagenReader.text_reports_active_charging(text))
+
     def test_explicitly_disconnected_cable_text_is_recognized(self):
         self.assertTrue(
             VolkswagenReader.text_reports_disconnected(
@@ -1654,6 +1669,29 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.chargePowerKw, 2)
         self.assertEqual(result.targetSoc, 100)
         self.assertEqual(result.chargingMode, "Immediate charging")
+
+    def test_charge_read_explicit_idle_feedback_sets_connected_status(self):
+        overview = ET.fromstring('<hierarchy><node content-desc="Battery range: 300 km" bounds="[100,500][900,760]"/></hierarchy>')
+        for label in (
+            "Laden stoppen. Zielladestand erreicht. Lädt gerade nicht.",
+            "Stop charging. Target charge level reached. Not charging.",
+        ):
+            detail = ET.Element("hierarchy")
+            ET.SubElement(detail, "node", text="State of charge: 80 percent")
+            ET.SubElement(detail, "node", text=label)
+            with self.subTest(label=label), TemporaryDirectory() as directory:
+                with patch.dict("os.environ", {"ADB_SERIAL": "usb", "DIAGNOSTICS_DIR": directory}):
+                    reader = VolkswagenReader()
+                    with (
+                        patch.object(reader, "launch"),
+                        patch.object(reader, "open_overview", return_value=overview),
+                        patch.object(reader, "wait_for_charge_detail", return_value=detail),
+                        patch.object(reader, "shell"),
+                        patch("time.sleep"),
+                    ):
+                        result = reader._read()
+                self.assertEqual(result.status, "B")
+                self.assertEqual(result.soc, 80)
 
     def test_empty_phev_detail_uses_zero_soc_from_overview(self):
         cases = (

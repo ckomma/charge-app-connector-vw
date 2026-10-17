@@ -17,6 +17,12 @@ read without a target state of charge schedules one bounded follow-up at the
 charging interval. Continued connected-idle state then returns to the parked
 interval.
 
+Explicit charge-detail feedback such as `Lädt gerade nicht` / `Not charging`
+or a reached charge target takes precedence over a still-visible stop control.
+It reports connected-idle (`B`), rather than active charging (`C`). This is
+the app-reported state; an independent wallbox meter remains the reference
+for actual power flow.
+
 Due details and location work have priority over routine charge refreshes.
 Routine charge work yields for at most one background minimum interval so it
 cannot be starved indefinitely.
