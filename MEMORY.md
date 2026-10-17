@@ -494,6 +494,12 @@ coordinates, screenshots, raw UI dumps, and private network details.
   cleared.
 - After wake, overlay, selector, or localization changes, test on a real phone
   before committing.
+- On 2026-10-17, Volkswagen 4.8.1 / 408010 passed German and English real-phone
+  reads, localized map navigation, climate start/stop, charging stop/start and
+  lock/unlock with physical door confirmation. HA App 0.1.29 adopts this default
+  verified baseline. Optional battery-health and software values were not
+  exposed on the test account. Vehicle state, language and production limits
+  were restored without resetting persisted usage counters.
 - Verify `/health`, the affected cached endpoint, service logs, screen-off
   cleanup, and usage counters.
 - Test German and English when localized UI matching is affected.

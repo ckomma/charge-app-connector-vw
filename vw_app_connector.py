@@ -467,6 +467,12 @@ class HealthData:
 
 
 class VolkswagenReader:
+    CAR_LOCATE_LABELS = (
+        "Car Locate Button",
+        "Find vehicle",
+        "Fahrzeugstandort",
+        "Vehicle location",
+    )
     # This is the high-voltage charging preference. Keep it separate from the
     # overview's intelligent power-saving/energy-protection notice telemetry.
     BATTERY_CARE_LABELS = ("Batterieschutz", "Battery Care", "Battery care")
@@ -1651,7 +1657,7 @@ class VolkswagenReader:
             self.raise_for_location_state(root)
             try:
                 self.described_node_center_any(
-                    root, ("Car Locate Button", "Find vehicle")
+                    root, self.CAR_LOCATE_LABELS
                 )
                 return root
             except RuntimeError:
@@ -1694,16 +1700,16 @@ class VolkswagenReader:
             "Google Maps",
             "Map Back Button",
             "Map Settings Button",
-            "Car Locate Button",
-            "Find vehicle",
             "Device Location Button",
             "Close details view",
         }
+        ignored.update(cls.CAR_LOCATE_LABELS)
+        ignored = {label.casefold() for label in ignored}
         for node in root.iter():
             if node.attrib.get("class") != "android.widget.TextView":
                 continue
             text = node.attrib.get("text", "").strip()
-            if not text or text in ignored or text == parked_duration:
+            if not text or text.casefold() in ignored or text == parked_duration:
                 continue
             bounds = cls.node_bounds(node)
             if not bounds:
@@ -2787,7 +2793,7 @@ class VolkswagenReader:
             time.sleep(self.detail_wait)
             map_root = self.wait_for_car_locate_button("vw-location-map.xml")
         x, y = self.described_node_center_any(
-            map_root, ("Car Locate Button", "Find vehicle")
+            map_root, self.CAR_LOCATE_LABELS
         )
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
@@ -2824,7 +2830,7 @@ class VolkswagenReader:
                     time.sleep(1)
                 map_root = self.wait_for_car_locate_button("vw-location-map.xml")
                 x, y = self.described_node_center_any(
-                    map_root, ("Car Locate Button", "Find vehicle")
+                    map_root, self.CAR_LOCATE_LABELS
                 )
                 self.shell("input", "tap", str(x), str(y))
                 time.sleep(self.detail_wait)
@@ -5039,7 +5045,7 @@ class AppState:
         self.reader = VolkswagenReader()
         self.usage = UsageLimiter()
         self.verified_app_version = os.getenv(
-            "VERIFIED_APP_VERSION", "4.6.4"
+            "VERIFIED_APP_VERSION", "4.8.1"
         ).strip()
         self.priority_lock = threading.Lock()
         self.priority_waiters = 0

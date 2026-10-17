@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.29
+
+- Support Volkswagen 4.8.1 localized vehicle-location map controls in German
+  and English, preserving previous app labels and bounded navigation retries.
+- Exclude vehicle-location control labels from address parsing.
+- Keep the packaged shell launcher Linux-compatible when staging on Windows.
+- Verify the Volkswagen 4.8.1 write-action baseline on a real phone in German
+  and English, including climate, charging and physically confirmed unlocking.
+  Preserve explicit version settings, usage budgets, cooldowns and API
+  authentication.
+
 ## 0.1.28
 
 - Recognize spelled-out singular synchronization ages in German and English,

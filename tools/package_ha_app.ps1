@@ -22,6 +22,11 @@ foreach ($file in $staticFiles) {
     Copy-Item -LiteralPath (Join-Path $sourceDir $file) -Destination (Join-Path $OutputPath $file) -Force
 }
 
+# The launcher is executed on Linux, including packages staged on Windows.
+$launcherPath = Join-Path $OutputPath "run.sh"
+$launcherText = [System.IO.File]::ReadAllText($launcherPath).Replace("`r`n", "`n")
+[System.IO.File]::WriteAllText($launcherPath, $launcherText, [System.Text.UTF8Encoding]::new($false))
+
 $runtimeFiles = @("vw_app_connector.py", "mqtt_publisher.py", "requirements.txt", "LICENSE")
 foreach ($file in $runtimeFiles) {
     Copy-Item -LiteralPath (Join-Path $repoRoot $file) -Destination (Join-Path $OutputPath $file) -Force

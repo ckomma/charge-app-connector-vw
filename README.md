@@ -20,17 +20,17 @@ Based on [janphkre/charge-app-connector](https://github.com/janphkre/charge-app-
 
 ## Compatibility
 
-The verified write-action baseline is Volkswagen app `4.6.4` (`406040`).
+The verified write-action baseline is Volkswagen app `4.8.1` (`408010`).
 German and English real-phone tests cover reads, climate start/stop, charging
 stop/start and remote lock/unlock. Lock actions now wait for completed vehicle
 feedback and verify the result; pending labels remain unknown. The corrected
 unlock was physically confirmed by the user in both languages. Existing
 explicit version settings remain unchanged. See the
-[compatibility findings](docs/compatibility-4.6.4.md).
+[compatibility findings](docs/compatibility-4.8.1.md).
 
-Version `4.6.4` supports the new data-saving recovery wording and German parking
-label. Optional battery-health and vehicle-software fields are available when
-the app exposes them; this test account exposed neither optional feature.
+Version `4.8.1` uses localized vehicle-location map controls, supported alongside
+the previous labels. Optional battery-health and vehicle-software fields are
+available when the app exposes them; this test account exposed neither feature.
 
 Requirements:
 
@@ -110,7 +110,7 @@ Settings -> Add-ons -> Add-on Store -> Repositories
 
 The app uses the same connector code, stores persistent state below
 Supervisor-managed `/data`, defaults to manual boot and currently reports
-version `0.1.28`. See the [installation guide](deploy/home-assistant/README.md).
+version `0.1.29`. See the [installation guide](deploy/home-assistant/README.md).
 
 ## Integrations
 
