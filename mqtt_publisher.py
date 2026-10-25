@@ -161,6 +161,11 @@ class MqttPublisher:
             }
             if unit:
                 config["unit_of_measurement"] = unit
+            if object_id in ("status_reasons", "data_warnings"):
+                config["value_template"] = (
+                    "{{ value_json.%s | join(', ') if value_json.%s else 'None' }}"
+                    % (key, key)
+                )
             if object_id == "vehicle_source_stale":
                 # Keep the discovery identity stable when changing presentation.
                 config["entity_category"] = "diagnostic"

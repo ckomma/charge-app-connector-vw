@@ -871,6 +871,23 @@ class ParserTests(unittest.TestCase):
         health_config = json.loads(health_config_call[0][1])
         self.assertEqual(health_config["name"], "Connector health")
         self.assertEqual(health_config["state_topic"], "vw_app_connector/health")
+        for object_id, key in (
+            ("status_reasons", "statusReasons"),
+            ("data_warnings", "dataWarnings"),
+        ):
+            config_call = next(
+                call for call in mqtt.client.published
+                if call[0][0]
+                == f"homeassistant/sensor/vw-app-connector/{object_id}/config"
+            )
+            config = json.loads(config_call[0][1])
+            self.assertEqual(config["unique_id"], f"vw-app-connector_{object_id}")
+            self.assertEqual(config["state_topic"], "vw_app_connector/health")
+            self.assertEqual(
+                config["value_template"],
+                "{{ value_json.%s | join(', ') if value_json.%s else 'None' }}"
+                % (key, key),
+            )
         source_stale_config_call = next(
             call for call in mqtt.client.published
             if call[0][0]

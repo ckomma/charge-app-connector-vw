@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.33
+
+- Display empty connector-status and vehicle-data-warning lists as `None` in
+  Home Assistant; show populated lists as comma-separated messages without
+  brackets.
+- Preserve existing entity identities and structured REST/MQTT fields.
+
 ## 0.1.32
 
 - Rename the Home Assistant source-data warning to `Vehicle data outdated`
