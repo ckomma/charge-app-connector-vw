@@ -877,7 +877,13 @@ class ParserTests(unittest.TestCase):
             == "homeassistant/binary_sensor/vw-app-connector/vehicle_source_stale/config"
         )
         source_stale_config = json.loads(source_stale_config_call[0][1])
-        self.assertEqual(source_stale_config["device_class"], "problem")
+        self.assertEqual(source_stale_config["name"], "Vehicle data outdated")
+        self.assertEqual(
+            source_stale_config["unique_id"], "vw-app-connector_vehicle_source_stale"
+        )
+        self.assertEqual(source_stale_config["entity_category"], "diagnostic")
+        self.assertNotIn("device_class", source_stale_config)
+        self.assertEqual(source_stale_config["state_topic"], "vw_app_connector/health")
         self.assertEqual(
             source_stale_config["value_template"],
             "{{ 'ON' if value_json.vehicleSourceStale else 'OFF' }}",

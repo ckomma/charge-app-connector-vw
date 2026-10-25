@@ -114,7 +114,13 @@ Check these `/health` areas separately:
 
 An endpoint-local location state is not evidence that charge or details are
 broken. Likewise, old Volkswagen source data is a data-quality warning rather
-than automatically a connector software error.
+than automatically a connector software error. In Home Assistant this appears
+as the diagnostic binary sensor **Vehicle data outdated**, with an on/off state
+rather than "Problem". The default source-age threshold is 60 minutes. Repeated
+old source data increases the background pause up to two hours by default, so
+new vehicle data may be detected later. Compare **Vehicle source age** with the
+Volkswagen app's synchronization time if the warning persists after a drive or
+while charging.
 
 The connector distinguishes Volkswagen's general request limit from the
 vehicle-specific too-many-requests response. It also reports vehicle offline,

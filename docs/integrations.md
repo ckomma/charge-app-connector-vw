@@ -16,7 +16,18 @@ Vehicle actions remain authenticated REST calls.
 Connector health, Volkswagen source age/staleness and background backoff are
 separate entities. MQTT discovery also exposes connector `statusReasons` and
 vehicle `dataWarnings` as distinct diagnostic sensors, so transport or service
-failures are not conflated with stale vehicle source data. The lock entity
+failures are not conflated with stale vehicle source data.
+
+The diagnostic binary sensor **Vehicle data outdated** turns on when the
+Volkswagen app reports vehicle data at least 60 minutes old by default
+(`SOURCE_STALE_AFTER_MINUTES`, or `source_stale_after_minutes` in the HA app).
+The connector can still be healthy and successfully read that older data. This
+warning alone does not identify a vehicle fault or a 12-V battery problem.
+The sensor uses the regular on/off display instead of HA's "Problem" class.
+Existing installations retain the entity ID, discovery topic and unique ID;
+user-customized names may continue to override the new default name.
+
+The lock entity
 follows Home Assistant convention:
 `locked: true` maps to binary-sensor `OFF`, while `locked: false` maps to `ON`.
 The GPS tracker lets Home Assistant derive its zone state. Do not enable

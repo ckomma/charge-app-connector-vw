@@ -112,7 +112,7 @@ Settings -> Add-ons -> Add-on Store -> Repositories
 
 The app uses the same connector code, stores persistent state below
 Supervisor-managed `/data`, defaults to manual boot and currently reports
-version `0.1.31`. See the [installation guide](deploy/home-assistant/README.md).
+version `0.1.32`. See the [installation guide](deploy/home-assistant/README.md).
 
 ## Integrations
 

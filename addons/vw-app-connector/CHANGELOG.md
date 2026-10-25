@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.32
+
+- Rename the Home Assistant source-data warning to `Vehicle data outdated`
+  and classify it as a diagnostic entity with a regular on/off state instead
+  of the `problem` device class.
+- Preserve existing entity identities, API fields, source-age thresholds and
+  background retry behavior. Explain the distinction between older vehicle
+  data and connector health in the integration and operations guides.
+
 ## 0.1.31
 
 - Add an optional manual rest mode, off by default, with authenticated pause

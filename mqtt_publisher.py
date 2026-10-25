@@ -132,7 +132,7 @@ class MqttPublisher:
             ("sensor", "status_reasons", "Connector status reasons", "health", "statusReasons", None, None, None, "mdi:alert-circle-outline"),
             ("sensor", "data_warnings", "Vehicle data warnings", "health", "dataWarnings", None, None, None, "mdi:database-alert-outline"),
             ("sensor", "vehicle_source_age", "Vehicle source age", "health", "vehicleSourceAgeMinutes", "min", "duration", "measurement", None),
-            ("binary_sensor", "vehicle_source_stale", "Vehicle source data stale", "health", "vehicleSourceStale", None, "problem", None, None),
+            ("binary_sensor", "vehicle_source_stale", "Vehicle data outdated", "health", "vehicleSourceStale", None, None, None, None),
             ("sensor", "background_backoff_reason", "Background backoff reason", "health", "backgroundBackoffReason", None, None, None, "mdi:timer-alert-outline"),
             ("sensor", "background_backoff", "Background backoff", "health", "backgroundBackoffSeconds", "s", "duration", "measurement", None),
             ("sensor", "phone_battery", "Phone battery", "health", "phoneBatteryLevel", "%", "battery", "measurement", None),
@@ -161,6 +161,9 @@ class MqttPublisher:
             }
             if unit:
                 config["unit_of_measurement"] = unit
+            if object_id == "vehicle_source_stale":
+                # Keep the discovery identity stable when changing presentation.
+                config["entity_category"] = "diagnostic"
             if object_id in (
                 "battery_health", "battery_health_date", "vehicle_software",
                 "software_update_status", "software_update_available", "software_release_notes",
