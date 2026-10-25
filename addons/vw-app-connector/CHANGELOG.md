@@ -2,7 +2,7 @@
 
 ## 0.1.33
 
-- Display empty connector-status and vehicle-data-warning lists as `None` in
+- Display empty connector-status and vehicle-data-warning lists as `None.` in
   Home Assistant; show populated lists as comma-separated messages without
   brackets.
 - Preserve existing entity identities and structured REST/MQTT fields.

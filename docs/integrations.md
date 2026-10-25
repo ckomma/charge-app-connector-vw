@@ -17,10 +17,12 @@ Connector health, Volkswagen source age/staleness and background backoff are
 separate entities. MQTT discovery also exposes connector `statusReasons` and
 vehicle `dataWarnings` as distinct diagnostic sensors, so transport or service
 failures are not conflated with stale vehicle source data.
-These two sensors display `None` when their list is empty and otherwise show
+These two sensors display `None.` when their list is empty and otherwise show
 comma-separated messages without list brackets. REST API and MQTT state
 payloads retain the structured `statusReasons` and `dataWarnings` arrays;
 existing entity identities are unchanged.
+The trailing period in `None.` is intentional: Home Assistant's MQTT sensor
+reserves the exact text `None` for an unknown value.
 
 The diagnostic binary sensor **Vehicle data outdated** turns on when the
 Volkswagen app reports vehicle data at least 60 minutes old by default

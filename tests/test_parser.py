@@ -885,7 +885,7 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(config["state_topic"], "vw_app_connector/health")
             self.assertEqual(
                 config["value_template"],
-                "{{ value_json.%s | join(', ') if value_json.%s else 'None' }}"
+                "{{ value_json.%s | join(', ') if value_json.%s else 'None.' }}"
                 % (key, key),
             )
         source_stale_config_call = next(

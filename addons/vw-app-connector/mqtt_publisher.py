@@ -162,8 +162,9 @@ class MqttPublisher:
             if unit:
                 config["unit_of_measurement"] = unit
             if object_id in ("status_reasons", "data_warnings"):
+                # HA MQTT treats the exact string "None" as an unknown state.
                 config["value_template"] = (
-                    "{{ value_json.%s | join(', ') if value_json.%s else 'None' }}"
+                    "{{ value_json.%s | join(', ') if value_json.%s else 'None.' }}"
                     % (key, key)
                 )
             if object_id == "vehicle_source_stale":
