@@ -109,7 +109,7 @@ class MqttPublisher:
             ("sensor", "target_soc", "Target state of charge", "charge", "targetSoc", "%", "battery", "measurement", None),
             ("sensor", "charging_mode", "Charging mode", "charge", "chargingMode", None, None, None, None),
             ("binary_sensor", "climater", "Climate", "charge", "climater", None, "running", None, None),
-            ("binary_sensor", "locked", "Vehicle locked", "charge", "locked", None, "lock", None, None),
+            ("binary_sensor", "locked", "Vehicle lock status", "charge", "locked", None, "lock", None, None),
             ("binary_sensor", "charge_stale", "Charge data stale", "charge", "stale", None, "problem", None, None),
             ("binary_sensor", "action_available", "Vehicle actions available", "health", "actionAvailable", None, None, None, "mdi:shield-check-outline"),
             ("binary_sensor", "rest_mode_paused", "Manual rest mode", "health", "restModePaused", None, None, None, "mdi:sleep"),
@@ -144,7 +144,10 @@ class MqttPublisher:
         ]
         for component, object_id, name, state_name, key, unit, device_class, state_class, icon in entities:
             binary_value_template = (
-                "{{ 'OFF' if value_json.%s else 'ON' }}" % key
+                # HA's lock class uses OFF for locked; its MQTT unknown payload
+                # is the literal "None". Never turn a missing/unknown lock into ON.
+                "{{ 'OFF' if value_json.get('%s') is true else "
+                "'ON' if value_json.get('%s') is false else 'None' }}" % (key, key)
                 if device_class == "lock"
                 else "{{ 'ON' if value_json.%s else 'OFF' }}" % key
             )

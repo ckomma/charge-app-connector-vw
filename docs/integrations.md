@@ -36,6 +36,9 @@ user-customized names may continue to override the new default name.
 The lock entity
 follows Home Assistant convention:
 `locked: true` maps to binary-sensor `OFF`, while `locked: false` maps to `ON`.
+Missing, unknown or non-boolean lock values map to `unknown`, never `Unlocked`.
+The default name is `Vehicle lock status`. Existing discovery topics, unique IDs
+and registered entity IDs remain unchanged; user-customized names are preserved.
 The GPS tracker lets Home Assistant derive its zone state. Do not enable
 location publishing on an untrusted broker.
 

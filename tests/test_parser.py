@@ -854,12 +854,16 @@ class ParserTests(unittest.TestCase):
             if call[0][0] == "homeassistant/binary_sensor/vw-app-connector/locked/config"
         )
         locked_config = json.loads(locked_config_call[0][1])
-        self.assertEqual(locked_config["name"], "Vehicle locked")
+        self.assertEqual(locked_config["name"], "Vehicle lock status")
         self.assertEqual(locked_config["unique_id"], "vw-app-connector_locked")
         self.assertEqual(locked_config["device_class"], "lock")
+        self.assertEqual(locked_config["state_topic"], "vw_app_connector/charge")
+        self.assertNotIn("default_entity_id", locked_config)
+        self.assertTrue(locked_config_call[1]["retain"])
         self.assertEqual(
             locked_config["value_template"],
-            "{{ 'OFF' if value_json.locked else 'ON' }}",
+            "{{ 'OFF' if value_json.get('locked') is true else "
+            "'ON' if value_json.get('locked') is false else 'None' }}",
         )
         self.assertEqual(mqtt.client.username, "connector")
         self.assertEqual(mqtt.client.password, "secret")
