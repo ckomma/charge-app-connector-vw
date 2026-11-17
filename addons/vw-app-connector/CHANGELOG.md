@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.35
+
+- Report the Volkswagen thumbs-up/thumbs-down feedback dialog as
+  `APP_INTERACTION_REQUIRED` during charge, details, location, trip, and
+  software reads, including in `/health.statusReasons`.
+- Leave the dialog for the user to dismiss and retain the last successful
+  reading. Cover German and English prompts and unlabeled buttons in tests.
+
 ## 0.1.34
 
 - Add optional latest-trip polling for vehicles that expose Driving data.

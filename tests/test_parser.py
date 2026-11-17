@@ -272,7 +272,7 @@ class ParserTests(unittest.TestCase):
         )
 
     def test_health_reports_interaction_from_each_cache_and_clears_on_recovery(self):
-        for endpoint in ("charge", "details", "location"):
+        for endpoint in ("charge", "details", "location", "latest_trip", "software"):
             with self.subTest(endpoint=endpoint):
                 state = object.__new__(AppState)
                 state.verified_app_version = "4.3.2"
@@ -280,7 +280,7 @@ class ParserTests(unittest.TestCase):
                 state.reader.phone_health.side_effect = lambda: HealthData(
                     adbState="device", appVersion="4.3.2"
                 )
-                for name in ("charge", "details", "location"):
+                for name in ("charge", "details", "location", "latest_trip", "software"):
                     setattr(state, name, SimpleNamespace(
                         last_success_at="now", refreshing=False,
                         value=VehicleData(status="B"), last_error="",
@@ -4799,6 +4799,46 @@ class ParserTests(unittest.TestCase):
                 shell.assert_called_once_with(
                     "input", "keyevent", "KEYCODE_VOLUME_UP"
                 )
+
+    def test_feedback_prompt_blocks_all_readers_without_tapping_or_retrying(self):
+        for title in (
+            "How do you like the Volkswagen app? Give us your feedback.",
+            "Wie gefällt Ihnen die Volkswagen App? Geben Sie uns Feedback.",
+        ):
+            for name in ("read", "read_details", "read_location", "read_latest_trip", "read_software"):
+                with self.subTest(title=title, reader=name):
+                    reader = VolkswagenReader.__new__(VolkswagenReader)
+                    reader.package = "com.volkswagen.weconnect"
+                    reader.screen_session = nullcontext
+                    reader.ui_update_timeout = 0
+                    reader.launch = Mock()
+                    reader.shell = Mock()
+                    reader.save_diagnostics = Mock()
+                    root = ET.Element("hierarchy")
+                    ET.SubElement(root, "node", text=title)
+                    reader.read_ui_dump = Mock(return_value=ET.tostring(root, encoding="unicode"))
+
+                    with self.assertRaises(TransientEndpointState) as caught:
+                        getattr(reader, name)()
+
+                    self.assertEqual(caught.exception.reason, "APP_INTERACTION_REQUIRED")
+                    reader.launch.assert_called_once()
+                    reader.save_diagnostics.assert_not_called()
+                    reader.shell.assert_called_once()
+                    self.assertEqual(reader.shell.call_args.args[:2], ("uiautomator", "dump"))
+
+    def test_feedback_prompt_matches_both_vw_button_ids_without_labels(self):
+        reader = VolkswagenReader.__new__(VolkswagenReader)
+        reader.package = "com.volkswagen.weconnect"
+        root = ET.Element("hierarchy")
+        ET.SubElement(root, "node", attrib={"resource-id": "com.volkswagen.weconnect:id/cta_thumb_down"})
+        reader.raise_for_feedback_prompt(root)
+        other = ET.SubElement(root, "node", attrib={"resource-id": "other.app:id/cta_thumb_up"})
+        reader.raise_for_feedback_prompt(root)
+        other.set("resource-id", "com.volkswagen.weconnect:id/cta_thumb_up")
+        with self.assertRaises(TransientEndpointState) as caught:
+            reader.raise_for_feedback_prompt(root)
+        self.assertEqual(caught.exception.reason, "APP_INTERACTION_REQUIRED")
 
     def test_ui_dump_uses_compressed_fallback_for_launcher_tree(self):
         with TemporaryDirectory() as directory:

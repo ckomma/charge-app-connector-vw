@@ -893,13 +893,32 @@ class VolkswagenReader:
                     args.append("--compressed")
                 args.append(remote_path)
                 self.shell(*args, timeout=30)
-                return ET.fromstring(self.read_ui_dump(remote_name, timeout=10))
+                root = ET.fromstring(self.read_ui_dump(remote_name, timeout=10))
             except (RuntimeError, ET.ParseError) as exc:
                 last_error = exc
                 if attempt == 0:
                     time.sleep(1)
+            else:
+                self.raise_for_feedback_prompt(root)
+                return root
         assert last_error is not None
         raise last_error
+
+    def raise_for_feedback_prompt(self, root: ET.Element) -> None:
+        titles = (
+            "how do you like the volkswagen app?",
+            "wie gefällt ihnen die volkswagen app?",
+        )
+        has_title = any(value.casefold().startswith(titles) for value in self.strings(root))
+        resource_ids = {node.get("resource-id") for node in root.iter()}
+        buttons = {
+            f"{self.package}:id/cta_thumb_{direction}" for direction in ("up", "down")
+        }
+        if has_title or buttons.issubset(resource_ids):
+            raise TransientEndpointState(
+                "APP_INTERACTION_REQUIRED",
+                "Dismiss the Volkswagen feedback prompt on the connector phone",
+            )
 
     @classmethod
     def is_proximity_overlay(cls, root: ET.Element) -> bool:
@@ -3588,15 +3607,6 @@ class VolkswagenReader:
         report = self.dump_ui("vw-report.xml")
         self.raise_for_rate_limit_state(report)
         self.raise_for_lockout_state(report)
-        if any(
-            phrase in text.casefold()
-            for text in self.strings(report)
-            for phrase in ("how do you like the volkswagen app?", "wie gefällt ihnen die volkswagen app?")
-        ):
-            raise TransientEndpointState(
-                "APP_INTERACTION_REQUIRED",
-                "Dismiss the Volkswagen feedback prompt on the phone to read the vehicle health report",
-            )
         if not self.is_vehicle_report_page(report):
             raise RuntimeError("Volkswagen vehicle health report did not open")
         return report
@@ -6424,7 +6434,10 @@ class AppState:
                 value.status = "degraded"
         if any(
             getattr(cache, "last_error_category", "") == "APP_INTERACTION_REQUIRED"
-            for cache in (self.charge, self.details, self.location)
+            for cache in (
+                self.charge, self.details, self.location,
+                getattr(self, "latest_trip", None), getattr(self, "software", None),
+            )
         ):
             add_status_reason("APP_INTERACTION_REQUIRED")
             if value.status == "ok":

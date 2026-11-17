@@ -153,11 +153,13 @@ Closing a workshop recommendation can itself open a reminder dialog.
 
 If overview navigation times out while a recognizable data-consent prompt with
 both accept and reject labels is visible, the affected cache reports
-`APP_INTERACTION_REQUIRED`, also exposed in `/health.statusReasons`. Open the
-Volkswagen app on the connector phone and review the choice manually. The
-connector preserves previous values as stale, skips the immediate app-relaunch
-retry, and retains the normal background error retry interval and usage limits.
-Successful subsequent refreshes clear the affected cache's error.
+`APP_INTERACTION_REQUIRED`, also exposed in `/health.statusReasons`. The known
+Volkswagen thumbs-up/thumbs-down feedback dialog reports the same category
+wherever a read encounters it. Open the app on the connector phone to review
+or dismiss the prompt. The connector leaves the dialog untouched, preserves
+previous values as stale, skips the immediate app-relaunch retry, and retains
+the normal background error retry interval and usage limits. Successful
+subsequent refreshes clear the affected cache's error.
 
 Detection is deliberately conservative: an inline card alone does not prove
 that it blocks the UI, and unknown wording still uses the normal UI error path.
