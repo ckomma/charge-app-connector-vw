@@ -62,6 +62,39 @@ An exposed card without a valid percentage records an unavailable capability.
 The existing detail read includes bounded scrolling within the health report;
 its weighted budget cost remains three.
 
+### `GET /trips/latest`
+
+Returns the last single trip observed in the Volkswagen app when
+`TRIP_POLL_ENABLED=true`. The vehicle and account must expose **Driving data**
+and a readable **Last single trip** card. GET reads the persisted cache only.
+It returns HTTP 503 before the first successful observation or when polling is
+disabled, and HTTP 200 with the last good result if a later read fails.
+
+The response includes `tripEndedAtLocal` (the displayed trip end, without a
+timezone), `distanceKm`, `averageSpeedKmh`, `drivingMinutes`, optional
+`electricConsumption` and `fuelConsumption` objects with a `value` and the
+displayed `unit`, and `observedAt` (the connector's read time). The
+`odometerKmAtObservation` is the mileage that prompted the read.
+
+The connector checks the odometer at `TRIP_INTERVAL_SECONDS` (default one
+hour), independently of `DETAIL_INTERVAL_SECONDS`. Each check reserves two
+background budget units for the vehicle health report and the potential
+driving data read. The connector opens the trip card on the first usable
+mileage and after an increase. It reads both pages in one phone session
+and publishes the mileage and trip fields together in this endpoint.
+If mileage increases and the app still shows the previous trip, the previous
+pair remains available with `stale: true` and `TRIP_NOT_UPDATED`. The next
+attempt uses the background error retry interval. Existing cooldown,
+backoff and rest-mode rules also apply.
+
+Use `odometerKmAtObservation` from this response as the automation trigger
+and consume the trip fields from the same response. `/details` continues
+to report its own mileage observation with its existing schedule. The trip
+record contains no trip start odometer. The app can group drives resumed
+within two hours into one single trip. If multiple trips appear between
+checks, this endpoint captures the latest visible one. Treat trip timestamps
+and mileage as sensitive data.
+
 ### `GET /software`
 
 Cache-only vehicle software information, separate from the Android app version:

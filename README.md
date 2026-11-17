@@ -70,6 +70,7 @@ untrusted network.
 | --- | --- |
 | `GET /charge` | Cached charge state, state of charge, range and freshness |
 | `GET /details` | Climate, odometer, service, battery health, warnings and departures |
+| `GET /trips/latest` | Cached last single trip, with optional odometer-triggered polling |
 | `GET /software` | Cached vehicle software version and update information |
 | `GET /location` | Cached address, parking duration and coordinates |
 | `GET /health` | ADB, app-version, cache, usage and cooldown health |

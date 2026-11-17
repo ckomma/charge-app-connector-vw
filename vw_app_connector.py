@@ -417,6 +417,23 @@ class SoftwareData:
 
 
 @dataclass
+class TripData:
+    tripEndedAtLocal: str = ""
+    odometerKmAtObservation: int | None = None
+    distanceKm: float | None = None
+    averageSpeedKmh: float | None = None
+    drivingMinutes: int | None = None
+    electricConsumption: dict[str, object] | None = None
+    fuelConsumption: dict[str, object] | None = None
+    observedAt: str = ""
+    error: str = ""
+    errorCategory: str = ""
+    stale: bool = False
+    lastSuccessfulAt: str = ""
+    refreshDurationSeconds: float | None = None
+
+
+@dataclass
 class HealthData:
     status: str = "ok"
     restModePaused: bool = False
@@ -503,6 +520,14 @@ class VolkswagenReader:
         "Vehicle Health",
         "Vehicle status report.",
         "Vehicle status report",
+    )
+    DRIVING_DATA_LABELS = ("Fahrdaten", "Driving data")
+    SINGLE_TRIP_LABEL = re.compile(r"\b(?:Letzte Einzelfahrt|Last single trip)\b", re.I)
+    TRIP_CARD_END = re.compile(
+        r"\b(?:Alle Einzelfahrten|All single trips|Letzte Langstrecke|"
+        r"Last long-haul trip|Letzte Fahrt ab|Last trip (?:since|from)|"
+        r"From (?:charging|refuelling)|Ab (?:Laden|Tanken)|"
+        r"Letzte Einzelfahrt|Last single trip)\b", re.I
     )
     VEHICLE_REPORT_CONTENT_LABELS = (
         "Gesamtstrecke",
@@ -1948,6 +1973,8 @@ class VolkswagenReader:
         lowered = value.casefold()
         if lowered in ("null", "zero"):
             return 0
+        if lowered in ("eine", "one"):
+            return unit_minutes
         return int(value) * unit_minutes
 
     @staticmethod
@@ -1976,6 +2003,21 @@ class VolkswagenReader:
             result.chargeRateKmH = int(rate_text)
             result.chargePowerKw = float(power_text.replace(",", "."))
             result.targetSoc = int(target_text)
+
+        remaining_time = re.search(
+            r"\b(?:(\d+|Null|Zero|Eine|One)\s+(?:Stunden?|hours?)\s+"
+            r"(?:und|and)[.,]?\s+)?"
+            r"(\d+|Null|Zero|Eine|One)\s+(?:Minuten?|minutes?)\s+"
+            r"(?:Ladezeit\s+verbleibend|of\s+charging\s+time\s+left)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if remaining_time:
+            hours_text, minutes_text = remaining_time.groups()
+            result.remainingChargeMinutes = (
+                VolkswagenReader.duration_part_minutes(hours_text or "0", 60)
+                + VolkswagenReader.duration_part_minutes(minutes_text, 1)
+            )
 
         compact_time = re.search(r"\b(\d{1,2}):(\d{2})\s*h\b", text)
         if compact_time:
@@ -2888,6 +2930,214 @@ class VolkswagenReader:
                 "LOCATION",
             )
 
+    @classmethod
+    def trip_carousel(cls, root: ET.Element) -> ET.Element | None:
+        # The carousel is the innermost scroll container that contains trip cards.
+        return next(
+            (
+                node for node in reversed(list(root.iter()))
+                if node.get("scrollable") == "true"
+                and any(
+                    cls.SINGLE_TRIP_LABEL.search(value) or cls.TRIP_CARD_END.search(value)
+                    for value in cls.strings(node)
+                )
+            ),
+            None,
+        )
+
+    @classmethod
+    def parse_latest_trip(cls, root: ET.Element) -> TripData | None:
+        carousel = cls.trip_carousel(root)
+        if carousel is None:
+            return cls.parse_trip_card(root)
+        for card in carousel:
+            trip = cls.parse_trip_card(card)
+            if trip is not None:
+                return trip
+        return None
+
+    @classmethod
+    def parse_trip_card(cls, root: ET.Element) -> TripData | None:
+        # Prefer visible text when the same node also exposes an alternate
+        # accessibility representation, such as the same date with slashes.
+        text = "\n".join(
+            value.strip()
+            for node in root.iter()
+            if (value := node.get("text", "").strip() or node.get("content-desc", "").strip())
+        )
+        for heading in cls.SINGLE_TRIP_LABEL.finditer(text):
+            card = cls.TRIP_CARD_END.split(text[heading.end():], maxsplit=1)[0]
+            # Compose can expose both a merged description and child text.
+            # Match the visible numeric date/time in either representation.
+            ended = re.search(
+                r"\b(\d{1,2}\.\d{1,2}\.\d{4})[\s,;·]+"
+                r"(\d{1,2}:\d{2}(?:\s*[AP]M)?)\b", card, re.I
+            )
+            if not ended:
+                continue
+            date, clock = ended.groups()
+            try:
+                clock = re.sub(r"\s+", "", clock).upper()
+                fmt = "%I:%M%p" if clock.endswith(("AM", "PM")) else "%H:%M"
+                trip_time = datetime.strptime(f"{date} {clock}", f"%d.%m.%Y {fmt}")
+            except ValueError:
+                continue
+
+            def measure(value: str, units: str) -> tuple[float, str] | None:
+                match = re.search(
+                    rf"(?<![\w.,/−–-])(\d{{1,3}}(?:[ \u00a0\u202f]\d{{3}})+|\d+)"
+                    rf"([.,]\d+)?\s*({units})(?!\w|\s*/)",
+                    value, re.I,
+                )
+                if match:
+                    number = re.sub(r"\s", "", match[1]) + (match[2] or "")
+                    return float(number.replace(",", ".")), match[3]
+                return None
+
+            fields = re.split(
+                r"\b(Zurückgelegte Strecke|Distance travel(?:l)?ed|"
+                r"Durchschnittsgeschwindigkeit|Average speed|Fahrzeit|Driving time|"
+                r"Gesamtverbrauch|Total consumption|Verbrauch|Consumption)\b",
+                card, flags=re.I,
+            )
+            values = {
+                label.casefold(): value for label, value in zip(fields[1::2], fields[2::2])
+                if value.strip(" ,.:;\n")
+            }
+
+            def field(*labels: str) -> str:
+                return " ".join(values.get(label, "") for label in labels)
+
+            distance = measure(
+                field("zurückgelegte strecke", "distance travelled", "distance traveled"),
+                r"km|mi",
+            )
+            speed = measure(
+                field("durchschnittsgeschwindigkeit", "average speed"), r"km\s*/\s*h|mph"
+            )
+            duration = field("fahrzeit", "driving time")
+            hours = measure(duration, r"h|Std\.?|Stunden?|hours?")
+            minutes = measure(duration, r"min\.?|Minuten?|minutes?")
+            if distance is None or (hours is None and minutes is None):
+                continue
+            consumption = field("verbrauch", "consumption")
+            electric = measure(consumption, r"kWh\s*/\s*(?:100\s*km|60\s*mi)|(?:km|mi)\s*/\s*kWh")
+            fuel = measure(consumption, r"l\s*/\s*(?:100\s*km|60\s*mi)|km\s*/\s*l|mpg")
+            return TripData(
+                tripEndedAtLocal=trip_time.isoformat(timespec="minutes"),
+                distanceKm=round(distance[0] * (1.609344 if distance[1].lower() == "mi" else 1), 3),
+                averageSpeedKmh=(
+                    round(speed[0] * (1.609344 if speed[1].lower() == "mph" else 1), 3)
+                    if speed else None
+                ),
+                drivingMinutes=round(
+                    (hours[0] * 60 if hours else 0) + (minutes[0] if minutes else 0)
+                ),
+                electricConsumption={"value": electric[0], "unit": electric[1]} if electric else None,
+                fuelConsumption={"value": fuel[0], "unit": fuel[1]} if fuel else None,
+                observedAt=datetime.now().astimezone().isoformat(timespec="seconds"),
+            )
+        return None
+
+    @classmethod
+    def driving_data_tile_center(cls, root: ET.Element) -> tuple[int, int] | None:
+        for node in root.iter():
+            if node.get("enabled") == "false" or node.get("visible-to-user") == "false":
+                continue
+            labels = (node.get("content-desc", ""), node.get("text", ""))
+            if any(
+                re.match(rf"^{re.escape(label)}(?:\s*[.,:]|$)", value.strip(), re.I)
+                for label in cls.DRIVING_DATA_LABELS for value in labels
+            ):
+                center = cls.node_center(node)
+                if center is not None:
+                    return center
+        return None
+
+    def _read_latest_trip(self) -> TripData:
+        self.launch()
+        root = self.open_overview()
+        for attempt in range(4):
+            # The overview contains both feature tiles and informational text.
+            # Match the beginning of the tile's label or merged description.
+            center = self.driving_data_tile_center(root)
+            if center is not None:
+                self.shell("input", "tap", str(center[0]), str(center[1]))
+                break
+            if attempt == 3:
+                self.raise_for_overview_interaction(root)
+                raise TransientEndpointState(
+                    "TRIPS_NOT_EXPOSED", "Volkswagen driving data tile is unavailable"
+                )
+            width, height = self.viewport_size(root)
+            self.shell(
+                "input", "swipe", str(width // 2), str(round(height * .78)),
+                str(width // 2), str(round(height * .36)), "350",
+            )
+            time.sleep(0.5)
+            root = self.dump_ui_with_compose_fallback("vw-driving-data-overview.xml")
+            self.raise_for_rate_limit_state(root)
+            self.raise_for_lockout_state(root)
+
+        deadline = time.monotonic() + self.ui_update_timeout
+        swipes = 0
+        while True:
+            root = self.dump_ui_with_compose_fallback("vw-latest-trip.xml")
+            self.raise_for_rate_limit_state(root)
+            self.raise_for_lockout_state(root)
+            trip = self.parse_latest_trip(root)
+            if trip is not None:
+                return trip
+            text = " ".join(self.strings(root)).casefold()
+            if "no driving data" in text or "keine fahrdaten verfügbar" in text:
+                break
+            carousel = self.trip_carousel(root)
+            bounds = self.node_bounds(carousel) if carousel is not None else None
+            if bounds is not None and swipes < 4:
+                left, top, right, bottom = bounds
+                width = right - left
+                y = (top + bottom) // 2
+                # Walk two cards forward, then back up to two cards from an
+                # end position. Swipes stay inside the semantic carousel.
+                start = left + round(width * .82)
+                end = left + round(width * .18)
+                if swipes >= 2:
+                    start, end = end, start
+                self.shell("input", "swipe", str(start), str(y), str(end), str(y), "350")
+                swipes += 1
+                time.sleep(0.5)
+                continue
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.5)
+        raise TransientEndpointState(
+            "TRIP_NOT_AVAILABLE", "Volkswagen did not expose a readable latest single trip"
+        )
+
+    def read_latest_trip(self, previous: TripData | None = None) -> TripData:
+        def read_pair() -> TripData:
+            report = DetailData()
+            self.parse_vehicle_report(self.open_vehicle_report(), report)
+            odometer = report.odometerKm
+            if odometer is None:
+                raise TransientEndpointState("TRIP_ODOMETER_UNAVAILABLE", "Vehicle mileage is unavailable")
+            if previous is not None and previous.odometerKmAtObservation is not None:
+                if odometer == previous.odometerKmAtObservation:
+                    return replace(previous)
+                if odometer < previous.odometerKmAtObservation:
+                    raise TransientEndpointState(
+                        "TRIP_ODOMETER_REGRESSED", "Vehicle mileage is older than the last paired reading"
+                    )
+            trip = self._read_latest_trip()
+            if previous is not None and trip.tripEndedAtLocal <= previous.tripEndedAtLocal:
+                raise TransientEndpointState(
+                    "TRIP_NOT_UPDATED", "Volkswagen still shows the previous single trip"
+                )
+            return replace(trip, odometerKmAtObservation=odometer)
+
+        with self.screen_session():
+            return self.with_retries(read_pair, "TRIPS")
+
     def set_charging(self, desired: bool) -> VehicleData:
         with self.screen_session():
             self.launch()
@@ -3284,29 +3534,27 @@ class VolkswagenReader:
         result.capabilities["climate.automatic-window-heating"] = (
             result.automaticWindowHeating is not None
         )
-        x, y = self.described_node_center_any(settings, ("Zonen", "Zones"))
-        self.shell("input", "tap", str(x), str(y))
-        time.sleep(self.detail_wait)
-        zones = self.dump_ui("vw-climate-zones.xml")
+        try:
+            zone_center = self.described_node_center_any(settings, ("Zonen", "Zones"))
+        except RuntimeError:
+            # Some vehicles expose climate settings without any zone controls.
+            zones = None
+        else:
+            self.shell("input", "tap", str(zone_center[0]), str(zone_center[1]))
+            time.sleep(self.detail_wait)
+            zones = self.dump_ui("vw-climate-zones.xml")
         for attribute, capability, labels in (
             ("climateZoneFrontLeft", "climate.zone-front-left", ("Vorne links", "Front left")),
             ("climateZoneFrontRight", "climate.zone-front-right", ("Vorne rechts", "Front right")),
         ):
             try:
-                setattr(result, attribute, self.option_state(zones, labels))
+                if zones is not None:
+                    setattr(result, attribute, self.option_state(zones, labels))
             except RuntimeError:
                 pass
             result.capabilities[capability] = getattr(result, attribute) is not None
 
-        self.launch()
-        overview = self.open_overview(self.VEHICLE_REPORT_LABELS)
-        x, y = self.vehicle_report_center(overview)
-        self.shell("input", "tap", str(x), str(y))
-        time.sleep(self.detail_wait)
-        report = self.dump_ui("vw-report.xml")
-        self.raise_for_lockout_state(report)
-        if not self.is_vehicle_report_page(report):
-            raise RuntimeError("Volkswagen vehicle health report did not open")
+        report = self.open_vehicle_report()
         self.parse_vehicle_report(report, result)
         self.collect_battery_health(report, result)
 
@@ -3330,6 +3578,28 @@ class VolkswagenReader:
             )
         )
         return result
+
+    def open_vehicle_report(self) -> ET.Element:
+        self.launch()
+        overview = self.open_overview(self.VEHICLE_REPORT_LABELS)
+        x, y = self.vehicle_report_center(overview)
+        self.shell("input", "tap", str(x), str(y))
+        time.sleep(self.detail_wait)
+        report = self.dump_ui("vw-report.xml")
+        self.raise_for_rate_limit_state(report)
+        self.raise_for_lockout_state(report)
+        if any(
+            phrase in text.casefold()
+            for text in self.strings(report)
+            for phrase in ("how do you like the volkswagen app?", "wie gefällt ihnen die volkswagen app?")
+        ):
+            raise TransientEndpointState(
+                "APP_INTERACTION_REQUIRED",
+                "Dismiss the Volkswagen feedback prompt on the phone to read the vehicle health report",
+            )
+        if not self.is_vehicle_report_page(report):
+            raise RuntimeError("Volkswagen vehicle health report did not open")
+        return report
 
     def read_details(self) -> DetailData:
         with self.screen_session():
@@ -4525,7 +4795,11 @@ class BackgroundCache(Generic[T]):
         self.error_retry_intervals = error_retry_intervals or {}
         self._load_persisted()
         if auto_refresh:
-            threading.Thread(target=self._worker, name=f"{name}-refresh", daemon=True).start()
+            self.start_worker()
+
+    def start_worker(self) -> None:
+        self.auto_refresh = True
+        threading.Thread(target=self._worker, name=f"{self.name}-refresh", daemon=True).start()
 
     def _load_persisted(self) -> None:
         if self.state_path is None:
@@ -4740,7 +5014,7 @@ class BackgroundCache(Generic[T]):
                 if clear_early_refresh:
                     self.early_refresh_requested = False
 
-    def get(self) -> T:
+    def get(self, *, trigger_refresh: bool = True) -> T:
         with self.lock:
             value = self.value
         rest = self.rest_mode
@@ -4752,14 +5026,14 @@ class BackgroundCache(Generic[T]):
                 errorCategory="REST_MODE_PAUSED" if rest.paused else "REST_MODE_RESUMING",
             )
         if value is None:
-            if self.auto_refresh:
+            if self.auto_refresh and trigger_refresh:
                 self.trigger()
             value = self.empty_factory()
             setattr(value, "error", "Cache is initializing" if self.auto_refresh else "Explicit refresh required")
             setattr(value, "errorCategory", "INITIALIZING" if self.auto_refresh else "NOT_OBSERVED")
             return value
         if self.age() >= self.interval(value):
-            if not self.auto_refresh:
+            if not self.auto_refresh or not trigger_refresh:
                 return replace(value, stale=True)
             self.trigger()
             deferred = self.shared_backoff_value()
@@ -5170,6 +5444,27 @@ class AppState:
                 value.sourceAgeMinutes is not None and not value.sourceStale
             ),
         )
+        trip_enabled = os.getenv("TRIP_POLL_ENABLED", "false").strip().lower() == "true"
+        self.latest_trip = None
+        if trip_enabled:
+            trip_interval = max(300.0, float(os.getenv("TRIP_INTERVAL_SECONDS", "3600")))
+
+            def load_trip() -> TripData:
+                with trip_cache.lock:
+                    previous = trip_cache.value
+                return self.reader.read_latest_trip(previous)
+
+            trip_cache = BackgroundCache(
+                "latest-trip", self.background_loader(load_trip, 2),
+                lambda _: trip_interval,
+                TripData, state_path=cache_dir / "latest-trip.json", auto_refresh=False,
+                initial_delay=60,
+                error_retry_interval=error_retry_interval,
+                error_retry_intervals={"TRIPS_NOT_EXPOSED": trip_interval},
+                rest_mode=self.rest_mode, shared_backoff=self.background_backoff,
+            )
+            self.latest_trip = trip_cache
+
         self.details = BackgroundCache(
             "details",
             self.background_loader(self.reader.read_details, 3, priority=True),
@@ -5218,6 +5513,13 @@ class AppState:
         if self.mqtt is not None:
             self.mqtt.start()
         self.action_jobs = ActionJobManager(self.action)
+        if self.latest_trip is not None:
+            self.latest_trip.start_worker()
+
+    def latest_trip_data(self) -> TripData:
+        if self.latest_trip is None:
+            return TripData(error="Trip polling is disabled", errorCategory="TRIPS_DISABLED")
+        return self.latest_trip.get(trigger_refresh=False)
 
     def _cache_updated(self, name: str, value: object) -> None:
         if self.mqtt is None:
@@ -5462,6 +5764,7 @@ class AppState:
                 "details": True,
                 "location": True,
                 "software": True,
+                "latestTrip": True,
                 "health": True,
                 "capabilities": True,
                 "metrics": True,
@@ -5480,6 +5783,7 @@ class AppState:
                 "appVersionVerified": health.appVersionVerified,
                 "mqtt": self.mqtt is not None,
                 "cachePersistence": True,
+                "tripPolling": getattr(self, "latest_trip", None) is not None,
                 "sourceFreshness": True,
                 "adaptiveTransientBackoff": True,
                 "asyncActions": True,
@@ -5999,6 +6303,8 @@ class AppState:
                 changed = self.rest_mode.set(paused)
         if not paused and changed:
             self.charge.request_early_refresh()
+            if getattr(self, "latest_trip", None) is not None:
+                self.latest_trip.request_early_refresh()
         if self.mqtt is not None:
             for name, value in self.mqtt_state().items():
                 self.mqtt.publish_state(name, value)
@@ -6172,6 +6478,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.send_error(400)
                 return
             self.send_json(self.state.diagnostics_index(limit), 200)
+            return
+        if path == "/trips/latest":
+            trip = self.state.latest_trip_data()
+            self.send_json(asdict(trip), 200 if trip.lastSuccessfulAt else 503)
             return
         caches: dict[str, BackgroundCache[object]] = {
             "/software": self.state.software,  # type: ignore[dict-item]

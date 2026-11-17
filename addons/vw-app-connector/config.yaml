@@ -29,6 +29,8 @@ options:
   charging_interval_seconds: 300
   idle_interval_seconds: 900
   detail_interval_seconds: 43200
+  trip_poll_enabled: false
+  trip_interval_seconds: 3600
   location_interval_seconds: 14400
   background_min_interval_seconds: 300
   background_error_retry_seconds: 900
@@ -65,6 +67,8 @@ schema:
   charging_interval_seconds: int(60,)
   idle_interval_seconds: int(60,)
   detail_interval_seconds: int(300,)
+  trip_poll_enabled: bool
+  trip_interval_seconds: int(300,)
   location_interval_seconds: int(300,)
   background_min_interval_seconds: int(0,)
   background_error_retry_seconds: int(60,)

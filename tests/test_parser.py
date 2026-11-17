@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
 from vw_app_connector import (
+    ActionPriority,
     ActionJobManager,
     ActionQuarantined,
     AppState,
@@ -1632,6 +1633,42 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.targetSoc, 100)
         self.assertEqual(result.chargingMode, "Sofortladen")
 
+    def test_spoken_remaining_charge_time_without_other_statistics(self):
+        cases = (
+            ("2 Stunden und. 10 Minuten Ladezeit verbleibend", 130),
+            ("Eine Stunde und eine Minute Ladezeit verbleibend", 61),
+            ("Null Stunden und\nEine Minute Ladezeit verbleibend", 1),
+            ("Eine Stunde und null Minuten Ladezeit verbleibend", 60),
+            ("10 Minuten Ladezeit verbleibend", 10),
+            ("2 hours and. 10 minutes of charging time left", 130),
+            ("One hour and one minute of charging time left", 61),
+            ("Zero hours and\nOne minute of charging time left", 1),
+            ("One hour and zero minutes of charging time left", 60),
+            ("10 minutes of charging time left", 10),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                result = VehicleData()
+                VolkswagenReader.parse_charging_details(text, result)
+                self.assertEqual(result.remainingChargeMinutes, expected)
+                self.assertIsNone(result.chargeRateKmH)
+                self.assertIsNone(result.chargePowerKw)
+                self.assertIsNone(result.targetSoc)
+
+    def test_spoken_remaining_charge_time_requires_charging_label(self):
+        for text in ("2 Stunden und 10 Minuten", "2 hours and 10 minutes"):
+            with self.subTest(text=text):
+                result = VehicleData()
+                VolkswagenReader.parse_charging_details(text, result)
+                self.assertIsNone(result.remainingChargeMinutes)
+
+    def test_compact_charge_time_takes_precedence_over_spoken_value(self):
+        result = VehicleData()
+        VolkswagenReader.parse_charging_details(
+            "2 hours and 10 minutes of charging time left\n2:09 h", result
+        )
+        self.assertEqual(result.remainingChargeMinutes, 129)
+
     def test_target_soc_without_active_charging(self):
         result = VehicleData()
         VolkswagenReader.parse_charging_details(
@@ -2519,6 +2556,64 @@ class ParserTests(unittest.TestCase):
             ("Automatische Scheibenheizung", "Automatic window heating"),
         )
         self.assertEqual(node.attrib["checked"], "true")
+
+    def test_detail_read_treats_climate_zones_as_optional(self):
+        cases = (
+            ("Settings", "Air conditioning using battery", None, None, None),
+            ("Einstellungen", "Klimatisierung über Batterie", None, None, None),
+            ("Settings", "Zones", True, "Front left", "Front right"),
+            ("Einstellungen", "Zonen", True, "Vorne links", "Vorne rechts"),
+            ("Settings", "Zones", False, None, None),
+        )
+        for settings_label, item, readable, front_left, front_right in cases:
+            with self.subTest(settings=settings_label, item=item, readable=readable):
+                reader = VolkswagenReader.__new__(VolkswagenReader)
+                reader.detail_wait = 0
+                reader.launch = Mock()
+                reader.shell = Mock()
+                reader.open_climate = Mock(return_value=ET.fromstring(
+                    f'<hierarchy><node text="{settings_label}" bounds="[0,0][40,40]"/></hierarchy>'
+                ))
+                reader.parse_target_temperature = Mock(return_value=20.0)
+                reader.open_overview = Mock(return_value=ET.fromstring(
+                    '<hierarchy><node text="Vehicle Health Report" bounds="[0,0][40,40]"/></hierarchy>'
+                ))
+                reader.collect_battery_health = Mock()
+                reader.open_departure_times = Mock(return_value=ET.Element("hierarchy"))
+                reader.parse_departure_times = Mock(return_value=[])
+                settings = ET.fromstring(
+                    f'<hierarchy><node text="{item}" bounds="[0,50][40,90]"/></hierarchy>'
+                )
+                report = ET.fromstring(
+                    '<hierarchy><node text="Total distance"/><node text="12,345 km"/></hierarchy>'
+                )
+                zones = ET.fromstring(
+                    f'<hierarchy><node content-desc="{front_left}" checkable="true" '
+                    'clickable="true" checked="true" bounds="[0,20][100,40]"/>'
+                    f'<node content-desc="{front_right}" checkable="true" '
+                    'clickable="true" checked="false" bounds="[0,60][100,80]"/></hierarchy>'
+                )
+                if readable is False:
+                    reader.dump_ui = Mock(side_effect=[settings, ActionPriority("preempted")])
+                    with self.assertRaises(ActionPriority):
+                        reader._read_details()
+                    reader.open_overview.assert_not_called()
+                    continue
+
+                reader.dump_ui = Mock(
+                    side_effect=[settings, zones, report] if readable else [settings, report]
+                )
+                details = reader._read_details()
+                self.assertEqual(details.odometerKm, 12345)
+                self.assertEqual(
+                    (details.climateZoneFrontLeft, details.climateZoneFrontRight),
+                    (True, False) if readable else (None, None),
+                )
+                self.assertIs(details.capabilities["climate.zone-front-left"], bool(readable))
+                self.assertIs(details.capabilities["climate.zone-front-right"], bool(readable))
+                self.assertEqual(
+                    call("vw-climate-zones.xml") in reader.dump_ui.call_args_list, bool(readable)
+                )
 
     def test_open_climate_waits_for_english_temperature_page(self):
         overview = ET.fromstring(

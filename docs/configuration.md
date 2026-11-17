@@ -30,6 +30,8 @@ the write-action quarantine.
 | `CHARGING_INTERVAL_SECONDS` | `300` | Charge refresh while charging |
 | `IDLE_INTERVAL_SECONDS` | `900` | Charge refresh while parked |
 | `DETAIL_INTERVAL_SECONDS` | `43200` | Vehicle-detail refresh |
+| `TRIP_POLL_ENABLED` | `false` | Read the latest single trip on the first odometer observation and after mileage increases |
+| `TRIP_INTERVAL_SECONDS` | `3600` | Interval for the independent trip and mileage check when enabled, minimum 300 seconds |
 | `LOCATION_INTERVAL_SECONDS` | `14400` | Location refresh and location-only retry |
 | `BACKGROUND_MIN_INTERVAL_SECONDS` | `300` | Minimum interval between background work |
 | `BACKGROUND_ERROR_RETRY_SECONDS` | `900` | Initial failure retry/backoff interval |
