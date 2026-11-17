@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.34
+
+- Add optional latest-trip polling for vehicles that expose Driving data.
+  `/trips/latest` returns the observed odometer and latest single trip in
+  the same response. Polling is off by default.
+- Keep the vehicle health report readable on vehicles whose climate settings
+  omit the Zones menu.
+- Read standalone German and English remaining-charge-time labels when other
+  charging statistics are unavailable.
+- Preserve unknown MQTT lock states as unavailable and rename the Home
+  Assistant lock sensor to clarify its meaning.
+- Verify paired trip updates and remaining charge time on a Golf 8 eHybrid
+  in English, and remaining charge time on an ID.7 in German.
+
 ## 0.1.33
 
 - Display empty connector-status and vehicle-data-warning lists as `None.` in
