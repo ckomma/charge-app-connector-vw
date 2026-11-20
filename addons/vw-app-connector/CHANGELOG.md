@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.36
 
 - Queue an early paired trip/mileage refresh when the visible Driving data
   summary changes during a normal charge read.
