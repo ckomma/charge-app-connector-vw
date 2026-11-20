@@ -34,10 +34,10 @@ the write-action quarantine.
 | `TRIP_INTERVAL_SECONDS` | `3600` | Interval for the independent trip and mileage check when enabled, minimum 300 seconds |
 | `LOCATION_INTERVAL_SECONDS` | `14400` | Location refresh and location-only retry |
 | `BACKGROUND_MIN_INTERVAL_SECONDS` | `300` | Minimum interval between background work |
-| `BACKGROUND_ERROR_RETRY_SECONDS` | `900` | Initial failure retry/backoff interval |
+| `BACKGROUND_ERROR_RETRY_SECONDS` | `900` | Initial failure retry/backoff interval; maximum pause for successfully read source-stale data |
 | `BACKGROUND_TRANSIENT_BACKOFF_MAX_SECONDS` | `7200` | Maximum shared exponential pause |
 | `SOURCE_STALE_AFTER_MINUTES` | `60` | Volkswagen source-stale threshold |
-| `BACKGROUND_DAILY_LIMIT` | `180` | Weighted daily background budget |
+| `BACKGROUND_DAILY_LIMIT` | `180` | Weighted daily background budget; optional reads preserve a reserve for charge polling until local midnight |
 | `ACTION_MIN_INTERVAL_SECONDS` | `60` | Minimum interval between actions |
 | `ACTION_DAILY_LIMIT` | `20` | Daily action budget |
 | `RATE_LIMIT_COOLDOWN_SECONDS` | `43200` | Explicit Volkswagen rate-limit cooldown |

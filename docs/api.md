@@ -84,8 +84,25 @@ mileage and after an increase. It reads both pages in one phone session
 and publishes the mileage and trip fields together in this endpoint.
 If mileage increases and the app still shows the previous trip, the previous
 pair remains available with `stale: true` and `TRIP_NOT_UPDATED`. The next
-attempt uses the background error retry interval. Existing cooldown,
+attempt waits at least the configured trip interval (one hour by default) and
+the background error retry interval. Missing trips and unavailable or older
+mileage use the same bounded retry policy. Existing cooldown,
 backoff and rest-mode rules also apply.
+
+If an existing charge refresh can see the Driving data summary in the vehicle
+overview, a change in its displayed distance or consumption queues an early
+trip check. The summary is only a trigger. No extra scroll or UI dump is
+needed to look for it. The configured trip interval still applies when the
+summary is absent or unchanged. Early checks use the same budget and cooldown
+rules as scheduled checks.
+
+Trip, detail and location reads preserve a charge-budget reserve based on the
+remaining time until the connector's local midnight and its current charge
+refresh interval. If an optional read would spend this reserve, it retains its
+cache and reports `BACKGROUND_BUDGET_RESERVED`, also exposed in
+`/health.dataWarnings`. Charge reads may use the reserve. The calculation adapts
+to charging/idle intervals; a later increase in polling demand, errors or a very
+small daily limit can still exhaust the budget. No budget or cooldown is bypassed.
 
 Use `odometerKmAtObservation` from this response as the automation trigger
 and consume the trip fields from the same response. `/details` continues
@@ -145,6 +162,10 @@ Does not wake the display. It reports connector status, machine-readable
 phone power telemetry, cache ages, usage counters, cooldown and shared backoff.
 Old but successfully read Volkswagen data is reported as `SOURCE_DATA_STALE`
 without automatically turning a healthy connector into a software failure.
+Its shared retry pause does not grow exponentially: it is capped at
+`BACKGROUND_ERROR_RETRY_SECONDS` (default 15 minutes), including old persisted
+pauses after restart. Normal refresh intervals, background budgets, minimum
+intervals and cooldowns still apply, so this is not a guaranteed update deadline.
 
 ### Other reads
 

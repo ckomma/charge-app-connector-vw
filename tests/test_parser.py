@@ -3742,6 +3742,180 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(snapshot["reason"], "SOURCE_DATA_STALE")
             self.assertGreaterEqual(snapshot["seconds"], 899)
 
+    def test_source_stale_pause_stays_bounded_after_repeated_reads(self):
+        with TemporaryDirectory() as directory:
+            backoff = BackgroundTransientBackoff(
+                Path(directory) / "backoff.json", 900, 7200, jitter_ratio=0.1
+            )
+            with patch("random.uniform", return_value=1.1):
+                for count in range(1, 10):
+                    backoff.record_failure("SOURCE_DATA_STALE")
+                    self.assertEqual(backoff.snapshot()["failureCount"], count)
+                    self.assertLessEqual(backoff.retry_in_seconds(), 900)
+                    self.assertGreater(backoff.retry_in_seconds(), 899)
+
+    def test_source_stale_pause_respects_configured_retry_interval(self):
+        with TemporaryDirectory() as directory:
+            backoff = BackgroundTransientBackoff(
+                Path(directory) / "backoff.json", 120, 7200, jitter_ratio=0
+            )
+            for _ in range(8):
+                backoff.record_failure("SOURCE_DATA_STALE")
+            self.assertEqual(backoff.snapshot()["seconds"], 120)
+
+    def test_source_stale_saved_long_pause_is_shortened_from_last_failure(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "backoff.json"
+            backoff = BackgroundTransientBackoff(path, 900, 7200, jitter_ratio=0)
+            backoff.record_failure("SOURCE_DATA_STALE")
+            saved = json.loads(path.read_text())
+            failed_at = time.time()
+            saved.update(failureCount=7, nextAttemptAt=failed_at + 7200)
+            path.write_text(json.dumps(saved))
+            for elapsed, expected in ((600, 300), (1200, 0)):
+                with self.subTest(elapsed=elapsed), patch(
+                    "time.time", return_value=failed_at + elapsed
+                ):
+                    restored = BackgroundTransientBackoff(path, 900, 7200, jitter_ratio=0)
+                    self.assertAlmostEqual(
+                        restored.retry_in_seconds(), expected, delta=1
+                    )
+                    self.assertEqual(restored.state["failureCount"], 7)
+
+    def test_source_stale_saved_pause_with_missing_timestamp_is_bounded(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "backoff.json"
+            path.write_text(json.dumps({
+                "failureCount": 7, "reason": "SOURCE_DATA_STALE",
+                "nextAttemptAt": time.time() + 7200,
+            }))
+            restored = BackgroundTransientBackoff(path, 900, 7200, jitter_ratio=0)
+            self.assertLessEqual(restored.retry_in_seconds(), 900)
+            self.assertGreater(restored.retry_in_seconds(), 899)
+
+    def test_other_transient_states_keep_exponential_pause(self):
+        with TemporaryDirectory() as directory:
+            for reason in ("APP_DATA_STALE", "APP_UNAVAILABLE", "ADB_UNAVAILABLE"):
+                with self.subTest(reason=reason):
+                    path = Path(directory) / reason
+                    backoff = BackgroundTransientBackoff(path, 900, 7200, jitter_ratio=0)
+                    for _ in range(7):
+                        backoff.record_failure(reason)
+                    self.assertEqual(backoff.snapshot()["seconds"], 7200)
+                    restored = BackgroundTransientBackoff(path, 900, 7200, jitter_ratio=0)
+                    self.assertGreater(restored.retry_in_seconds(), 7199)
+
+    def test_source_stale_rechecks_detect_new_soc_and_clear_pause(self):
+        with TemporaryDirectory() as directory:
+            backoff = BackgroundTransientBackoff(
+                Path(directory) / "backoff.json", 900, 7200, jitter_ratio=0
+            )
+            loader = Mock(side_effect=[
+                VehicleData(soc=78, sourceAgeMinutes=551, sourceStale=True),
+                VehicleData(soc=78, sourceAgeMinutes=566, sourceStale=True),
+                VehicleData(soc=58, sourceAgeMinutes=0, sourceStale=False),
+            ])
+            with patch("threading.Thread.start"):
+                cache = BackgroundCache(
+                    "charge", loader, lambda _: 900, VehicleData,
+                    shared_backoff=backoff,
+                    shared_backoff_reason=lambda value: (
+                        "SOURCE_DATA_STALE" if value.sourceStale else ""
+                    ),
+                    clears_shared_backoff=lambda value: (
+                        value.sourceAgeMinutes is not None and not value.sourceStale
+                    ),
+                )
+            now = time.time()
+            with patch("time.time", return_value=now):
+                self.assertEqual(cache.refresh().soc, 78)
+            with patch("time.time", return_value=now + 899):
+                deferred = cache.refresh()
+                self.assertEqual(deferred.soc, 78)
+                self.assertTrue(deferred.stale)
+                self.assertEqual(loader.call_count, 1)
+            with patch("time.time", return_value=now + 900):
+                self.assertEqual(cache.refresh().soc, 78)
+                self.assertEqual(backoff.snapshot()["seconds"], 900)
+            with patch("time.time", return_value=now + 1800):
+                fresh = cache.refresh()
+                self.assertEqual(fresh.soc, 58)
+                self.assertFalse(fresh.stale)
+                self.assertFalse(fresh.sourceStale)
+                self.assertEqual(fresh.errorCategory, "")
+                self.assertEqual(backoff.snapshot()["failureCount"], 0)
+            self.assertEqual(loader.call_count, 3)
+
+    def test_worker_rechecks_source_stale_when_short_pause_expires(self):
+        with TemporaryDirectory() as directory, patch("threading.Thread.start"):
+            backoff = BackgroundTransientBackoff(
+                Path(directory) / "backoff.json", 900, 7200, jitter_ratio=0
+            )
+            loader = Mock(return_value=VehicleData(soc=58))
+            cache = BackgroundCache(
+                "charge", loader, lambda _: 900, VehicleData,
+                shared_backoff=backoff,
+            )
+            cache.set_value(VehicleData(soc=78))
+            clock = time.time()
+            monotonic = time.monotonic()
+            with patch("time.time", return_value=clock):
+                for _ in range(7):
+                    backoff.record_failure("SOURCE_DATA_STALE")
+            cache.last_success_monotonic = monotonic
+
+            cache.wakeup.wait = Mock()
+            with (
+                patch("time.time", side_effect=lambda: clock),
+                patch("time.monotonic", side_effect=lambda: monotonic),
+            ):
+                def wait(delay):
+                    nonlocal clock, monotonic
+                    if cache.wakeup.wait.call_count == 1:
+                        self.assertEqual(delay, 900)
+                        loader.assert_not_called()
+                        clock += delay
+                        monotonic += delay
+                        return
+                    raise RuntimeError("stop worker")
+
+                cache.wakeup.wait.side_effect = wait
+                with self.assertRaisesRegex(RuntimeError, "stop worker"):
+                    cache._worker()
+            loader.assert_called_once()
+            self.assertEqual(cache.value.soc, 58)
+
+    def test_expired_source_stale_pause_preserves_usage_limits_and_cooldown(self):
+        with TemporaryDirectory() as directory:
+            for blocked_by in ("budget", "cooldown"):
+                with self.subTest(blocked_by=blocked_by), patch.dict("os.environ", {
+                    "USAGE_STATE_FILE": str(Path(directory) / blocked_by),
+                    "BACKGROUND_DAILY_LIMIT": "1",
+                    "BACKGROUND_MIN_INTERVAL_SECONDS": "300",
+                }):
+                    state = object.__new__(AppState)
+                    state.priority_lock = threading.Lock()
+                    state.priority_waiters = 0
+                    state.background_preflight_lock = threading.Lock()
+                    state.reader = Mock()
+                    state.reader.action_pending = threading.Event()
+                    state.usage = UsageLimiter()
+                    if blocked_by == "budget":
+                        state.usage.acquire_background(1)
+                    else:
+                        state.usage.record_rate_limit("TOO_MANY_REQUESTS")
+                    state.background_backoff = BackgroundTransientBackoff(
+                        Path(directory) / (blocked_by + "-backoff"), 900, 7200,
+                        jitter_ratio=0,
+                    )
+                    state.background_backoff.record_failure("SOURCE_DATA_STALE")
+                    loader = Mock()
+                    with patch("time.time", return_value=time.time() + 901):
+                        with self.assertRaises(UsageLimit):
+                            state.background_loader(loader, 1)()
+                    loader.assert_not_called()
+                    self.assertEqual(state.usage.background_min_interval, 300)
+
     def test_cache_update_observes_new_shared_backoff_state(self):
         with TemporaryDirectory() as directory:
             backoff = BackgroundTransientBackoff(

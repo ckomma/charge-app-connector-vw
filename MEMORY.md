@@ -65,7 +65,9 @@ coordinates, screenshots, raw UI dumps, and private network details.
   the immediate UI/ADB recovery retry. `APP_DATA_STALE` and `APP_UNAVAILABLE`
   share a persisted exponential background backoff across charge, details and
   location. A successfully parsed charge read whose source age remains above
-  the configured threshold also advances that backoff. It clears only when the
+  the configured threshold starts a shared pause capped at
+  `BACKGROUND_ERROR_RETRY_SECONDS`, without exponential growth; existing saved
+  source-stale pauses are shortened on startup. It clears only when the
   app-reported source age is below `SOURCE_STALE_AFTER_MINUTES`; explicit
   actions remain available.
 - Action-result cache patches preserve the timestamp of the last complete UI
@@ -73,6 +75,14 @@ coordinates, screenshots, raw UI dumps, and private network details.
   the updated backoff state, including transient refresh failures.
 - Due detail/location work retains priority, but routine charge work yields for
   no longer than one configured background minimum interval.
+- Trip, detail and location background reads reserve enough budget for one
+  charge read per current charge interval until the next local midnight.
+  Reserved work reports `BACKGROUND_BUDGET_RESERVED` without consuming a unit
+  or starting a shared backoff. Charge reads remain subject to daily limits
+  and cooldowns. Forecasts cannot guarantee coverage after demand changes.
+- Missing/unupdated trip cards and unavailable/regressed mileage retry no
+  sooner than the greater of the trip interval and background error interval.
+  An early overview trigger queues work without bypassing that retry pause.
 - Charge responses expose additive source-age/freshness fields. The localized
   intelligent power-saving overview notice is still dismissed, but its last
   observation is retained as telemetry and is not classified as a server rate

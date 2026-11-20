@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Queue an early paired trip/mileage refresh when the visible Driving data
+  summary changes during a normal charge read.
+- Cap successfully read source-stale data pauses at the configured error retry
+  interval, including old persisted pauses after restart.
+- Retry unavailable or unchanged trip data at the configured trip interval
+  instead of repeatedly spending budget every 15 minutes.
+- Reserve background capacity for charge polling until local midnight.
+  Deferred optional reads report `BACKGROUND_BUDGET_RESERVED`.
+
 ## 0.1.35
 
 - Report the Volkswagen thumbs-up/thumbs-down feedback dialog as

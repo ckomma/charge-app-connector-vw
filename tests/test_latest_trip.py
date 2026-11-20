@@ -24,6 +24,74 @@ def trip_screen(*labels):
 
 
 class LatestTripTests(unittest.TestCase):
+    def test_driving_data_overview_summary_supports_both_languages_and_layouts(self):
+        for title, subtitle, description in (
+            ("Driving Data", "6.0 km • 1.8 l/100 km",
+             "Driving data. Last driven: 6.0 kilometres. Average consumption: 1.8 litres per 100 kilometres."),
+            ("Fahrdaten", "6,0 km · 1,8 l/100 km",
+             "Fahrdaten. Zuletzt 6,0 Kilometer gefahren. Durchschnittlicher Verbrauch: 1,8 Liter pro 100 Kilometer."),
+        ):
+            with self.subTest(title=title):
+                root = ET.Element("hierarchy")
+                row = ET.SubElement(root, "node", clickable="true")
+                ET.SubElement(row, "node", text=title)
+                ET.SubElement(row, "node", text=subtitle)
+                self.assertEqual(VolkswagenReader.driving_data_summary(root), "6 km 1.8 l/100km")
+                row.clear()
+                row.set("content-desc", description)
+                self.assertEqual(VolkswagenReader.driving_data_summary(root), "6 km 1.8 l/100km")
+                row.set("visible-to-user", "false")
+                self.assertEqual(VolkswagenReader.driving_data_summary(root), "")
+
+    def test_driving_data_summary_ignores_unrelated_subtitle(self):
+        root = trip_screen("Driving Data", "6.0 km • 1.8 l/100 km")
+        self.assertEqual(VolkswagenReader.driving_data_summary(root), "")
+
+    def test_charge_overview_change_coalesces_early_trip_refresh(self):
+        state = AppState.__new__(AppState)
+        state.latest_trip = None
+        state._last_driving_data_summary = ""
+        state.observe_driving_data_summary("ignored")
+        self.assertEqual(state._last_driving_data_summary, "")
+        loader = Mock(return_value=TripData())
+        cache = BackgroundCache("latest-trip", loader, lambda _: 3600, TripData,
+                                auto_refresh=False)
+        cache.set_value(TripData())
+        state.latest_trip = cache
+        state.observe_driving_data_summary("first")
+        state.observe_driving_data_summary("")
+        state.observe_driving_data_summary("first")
+        self.assertFalse(cache.refresh_due())
+        state.observe_driving_data_summary("second")
+        state.observe_driving_data_summary("second")
+        state.observe_driving_data_summary("third")
+        self.assertTrue(cache.refresh_due())
+        loader.assert_not_called()
+        cache.refresh()
+        self.assertFalse(cache.refresh_due())
+        loader.assert_called_once_with()
+        with patch.object(cache, "age", return_value=3600):
+            self.assertTrue(cache.refresh_due())
+
+    def test_charge_reader_observes_only_the_existing_overview(self):
+        reader = VolkswagenReader.__new__(VolkswagenReader)
+        reader.screen_session = nullcontext
+        reader.launch = Mock()
+        overview = trip_screen("Driving Data. 6 km • 1.8 l/100 km")
+        reader.open_overview = Mock(return_value=overview)
+        reader.range_tile_center = Mock(return_value=(12, 34))
+        reader.wait_for_charge_detail = Mock(
+            return_value=trip_screen("Battery 55%", "Charging")
+        )
+        reader.shell = Mock()
+        reader.detail_wait = 0
+        observe = Mock()
+        self.assertEqual(reader.read(on_driving_data=observe).soc, 55)
+        observe.assert_called_once_with("6 km 1.8 l/100km", None)
+        reader.open_overview.assert_called_once_with()
+        reader.wait_for_charge_detail.assert_called_once_with("vw-detail.xml")
+        reader.shell.assert_called_once_with("input", "tap", "12", "34")
+
     def test_endpoint_is_cache_only_and_serves_stale_trip(self):
         handler = RequestHandler.__new__(RequestHandler)
         handler.path = "/trips/latest"

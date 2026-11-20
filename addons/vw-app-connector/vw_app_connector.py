@@ -9,6 +9,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import math
 import os
 import queue
 import random
@@ -176,6 +177,7 @@ class UsageLimiter:
         cost: int,
         yield_to: Callable[[], bool] | None = None,
         bypass_cooldown: bool = False,
+        reserve: Callable[[], int] | None = None,
     ) -> None:
         while True:
             with self.lock:
@@ -191,6 +193,13 @@ class UsageLimiter:
                 if used + cost > self.background_daily_limit:
                     raise UsageLimit(
                         "Volkswagen background daily budget exhausted"
+                    )
+                if reserve is not None and (
+                    used + cost + max(0, reserve()) > self.background_daily_limit
+                ):
+                    raise TransientEndpointState(
+                        "BACKGROUND_BUDGET_RESERVED",
+                        "Remaining background budget reserved for charge refreshes",
                     )
                 wait = (
                     0.25
@@ -522,6 +531,34 @@ class VolkswagenReader:
         "Vehicle status report",
     )
     DRIVING_DATA_LABELS = ("Fahrdaten", "Driving data")
+    DRIVING_DATA_UNITS = {
+        "kilowatt hours per 100 kilometres": "kwh/100km",
+        "kilowattstunden pro 100 kilometer": "kwh/100km",
+        "litres per 100 kilometres": "l/100km",
+        "liter pro 100 kilometer": "l/100km",
+        "miles per gallon": "mpg",
+        "meilen pro gallone": "mpg",
+        "miles per kilowatt hour": "mi/kwh",
+        "meilen pro kilowattstunde": "mi/kwh",
+        "kilometres per kilowatt hour": "km/kwh",
+        "kilometer pro kilowattstunde": "km/kwh",
+        "kilometres per litre": "km/l",
+        "kilometer pro liter": "km/l",
+    }
+    DRIVING_DATA_DESCRIPTION = re.compile(
+        r"\b(?:Last driven:\s*(?P<distance_en>\d[\d., ]*)\s*(?P<unit_en>kilometres|miles)"
+        r"\s*[.,]?\s*Average consumption:|"
+        r"Zuletzt\s+(?P<distance_de>\d[\d., ]*)\s*(?P<unit_de>Kilometer|Meilen)\s+gefahren"
+        r"\s*[.,]?\s*Durchschnittlicher Verbrauch:)\s*"
+        r"(?P<consumption>[-−]?\d+(?:[.,]\d+)?)\s+"
+        r"(?P<unit>" + "|".join(map(re.escape, DRIVING_DATA_UNITS)) + r")\b",
+        re.I,
+    )
+    DRIVING_DATA_SUBTITLE = re.compile(
+        r"\b(\d[\d., ]*)\s*(km|mi)\s*[·•]\s*([-−]?\d+(?:[.,]\d+)?)\s*"
+        r"(kwh\s*/\s*100\s*km|l\s*/\s*100\s*km|mpg|(?:km|mi)\s*/\s*(?:kwh|l))\b",
+        re.I,
+    )
     SINGLE_TRIP_LABEL = re.compile(r"\b(?:Letzte Einzelfahrt|Last single trip)\b", re.I)
     TRIP_CARD_END = re.compile(
         r"\b(?:Alle Einzelfahrten|All single trips|Letzte Langstrecke|"
@@ -2562,9 +2599,13 @@ class VolkswagenReader:
             finally:
                 self.sleep_screen()
 
-    def read(self) -> VehicleData:
+    def read(
+        self, *, on_driving_data: Callable[[str, int | None], None] | None = None
+    ) -> VehicleData:
         with self.screen_session():
-            return self.with_retries(self._read, "CHARGE")
+            if on_driving_data is None:
+                return self.with_retries(self._read, "CHARGE")
+            return self.with_retries(lambda: self._read(on_driving_data), "CHARGE")
 
     def with_retries(self, operation: Callable[[], T], category: str) -> T:
         last_error: Exception | None = None
@@ -2674,7 +2715,9 @@ class VolkswagenReader:
             )
         return health
 
-    def _read(self) -> VehicleData:
+    def _read(
+        self, on_driving_data: Callable[[str, int | None], None] | None = None
+    ) -> VehicleData:
         self.launch()
         overview = self.open_overview()
         overview_text = "\n".join(self.strings(overview))
@@ -2744,6 +2787,10 @@ class VolkswagenReader:
         ):
             result.status = "B"
 
+        if on_driving_data is not None:
+            summary = self.driving_data_summary(overview)
+            if summary:
+                on_driving_data(summary, result.syncAgeMinutes)
         return result
 
     def set_locked(self, desired: bool) -> VehicleData:
@@ -3057,6 +3104,44 @@ class VolkswagenReader:
                 observedAt=datetime.now().astimezone().isoformat(timespec="seconds"),
             )
         return None
+
+    @classmethod
+    def driving_data_summary(cls, root: ET.Element) -> str:
+        """Use only a Driving data row already exposed in the overview dump."""
+        title = re.compile(r"^(?:Fahrdaten|Driving data)(?=$|[\s.,:])", re.I)
+
+        def summary(distance: str, distance_unit: str, consumption: str, unit: str) -> str:
+            def normalize(value: str) -> str:
+                value = re.sub(r"\s+", "", value).replace(",", ".").replace("−", "-")
+                return value.rstrip("0").rstrip(".") if value.count(".") == 1 else value
+
+            return f"{normalize(distance)} {distance_unit} {normalize(consumption)} {unit}"
+
+        for node in root.iter("node"):
+            if node.get("visible-to-user") == "false" or node.get("enabled") == "false":
+                continue
+            labels = (node.get("text", ""), node.get("content-desc", ""))
+            named = any(title.match(label.strip()) for label in labels)
+            if not named and node.get("clickable") != "true":
+                continue
+            values = cls.strings(node)
+            if not named and not any(title.fullmatch(value) for value in values):
+                continue
+            for value in values:
+                # The app can merge a spoken description into the row, or
+                # expose the compact subtitle as a separate child.
+                value = " ".join(value.casefold().split())
+                if match := cls.DRIVING_DATA_DESCRIPTION.search(value):
+                    distance = match["distance_en"] or match["distance_de"]
+                    unit = match["unit_en"] or match["unit_de"]
+                    return summary(
+                        distance, "mi" if unit in ("miles", "meilen") else "km",
+                        match["consumption"], cls.DRIVING_DATA_UNITS[match["unit"]],
+                    )
+                if match := cls.DRIVING_DATA_SUBTITLE.search(value):
+                    distance, distance_unit, consumption, unit = match.groups()
+                    return summary(distance, distance_unit, consumption, unit.replace(" ", ""))
+        return ""
 
     @classmethod
     def driving_data_tile_center(cls, root: ET.Element) -> tuple[int, int] | None:
@@ -4631,6 +4716,20 @@ class BackgroundTransientBackoff:
             self.state["reason"] = str(value.get("reason", ""))
             self.state["nextAttemptAt"] = float(value.get("nextAttemptAt", 0.0))
             self.state["lastFailureAt"] = str(value.get("lastFailureAt", ""))
+            if self.state["reason"] == "SOURCE_DATA_STALE":
+                # Upgrade persisted exponential pauses without restarting the
+                # full retry interval on every connector restart.
+                try:
+                    failed_at = datetime.fromisoformat(
+                        str(self.state["lastFailureAt"])
+                    ).timestamp()
+                except (ValueError, OverflowError, OSError):
+                    failed_at = time.time()
+                self.state["nextAttemptAt"] = min(
+                    float(self.state["nextAttemptAt"]),
+                    failed_at + self.base_seconds,
+                    time.time() + self.base_seconds,
+                )
         except (
             FileNotFoundError,
             KeyError,
@@ -4654,13 +4753,14 @@ class BackgroundTransientBackoff:
 
     def _record_failure_locked(self, reason: str) -> None:
         count = int(self.state["failureCount"]) + 1
-        delay = min(
-            self.max_seconds,
-            self.base_seconds * (2 ** min(count - 1, 30)),
-        )
+        # Successfully read old data is not a failed app request. Recheck at
+        # the normal error interval so newly available SoC is not hidden for
+        # hours. Other transient states retain exponential protection.
+        limit = self.base_seconds if reason == "SOURCE_DATA_STALE" else self.max_seconds
+        delay = min(limit, self.base_seconds * (2 ** min(count - 1, 30)))
         if self.jitter_ratio:
             delay *= random.uniform(1 - self.jitter_ratio, 1 + self.jitter_ratio)
-            delay = min(self.max_seconds, delay)
+            delay = min(limit, delay)
         self.state.update(
             {
                 "failureCount": count,
@@ -5328,7 +5428,8 @@ class AppState:
             return self.priority_waiters > 0
 
     def background_loader(
-        self, loader: Callable[[], T], cost: int, priority: bool = False
+        self, loader: Callable[[], T], cost: int, priority: bool = False,
+        reserve_charge_budget: bool = False,
     ) -> Callable[[], T]:
         def run() -> T:
             rest = getattr(self, "rest_mode", None)
@@ -5365,6 +5466,7 @@ class AppState:
                 self.usage.acquire_background(
                     cost,
                     yield_to=yield_background,
+                    reserve=self.charge_budget_reserve if reserve_charge_budget else None,
                 )
                 self.reader.context.background = True
                 try:
@@ -5383,6 +5485,18 @@ class AppState:
                         self.priority_waiters -= 1
 
         return run
+
+    def charge_budget_reserve(self) -> int:
+        """Keep one charge-budget unit per scheduled interval until local midnight."""
+        with self.charge.lock:
+            value = self.charge.value
+        interval = max(1.0, self.charge.interval(value))
+        now = datetime.now().astimezone()
+        midnight = datetime.combine(
+            now.date() + timedelta(days=1), datetime.min.time()
+        ).astimezone()
+        remaining = max(0.0, midnight.timestamp() - now.timestamp())
+        return math.ceil(remaining / interval)
 
     def __init__(self) -> None:
         self.mqtt: MqttPublisher | None = None
@@ -5420,6 +5534,16 @@ class AppState:
         self.background_preflight_lock = threading.Lock()
 
         charge_interval = ChargeRefreshInterval(charging_interval, idle_interval)
+        trip_enabled = os.getenv("TRIP_POLL_ENABLED", "false").strip().lower() == "true"
+        self.latest_trip = None
+        self._last_driving_data_summary = ""
+
+        def read_charge_with_trip_hint() -> VehicleData:
+            def observe(summary: str, source_age: int | None) -> None:
+                if source_age is None or source_age < source_stale_after_minutes:
+                    self.observe_driving_data_summary(summary)
+
+            return self.reader.read(on_driving_data=observe)
 
         def annotate_charge(
             value: VehicleData, previous: VehicleData | None
@@ -5438,7 +5562,9 @@ class AppState:
 
         self.charge = BackgroundCache(
             "charge",
-            self.background_loader(self.reader.read, 1),
+            self.background_loader(
+                read_charge_with_trip_hint if trip_enabled else self.reader.read, 1
+            ),
             charge_interval,
             VehicleData,
             rest_mode=self.rest_mode,
@@ -5454,8 +5580,6 @@ class AppState:
                 value.sourceAgeMinutes is not None and not value.sourceStale
             ),
         )
-        trip_enabled = os.getenv("TRIP_POLL_ENABLED", "false").strip().lower() == "true"
-        self.latest_trip = None
         if trip_enabled:
             trip_interval = max(300.0, float(os.getenv("TRIP_INTERVAL_SECONDS", "3600")))
 
@@ -5465,19 +5589,27 @@ class AppState:
                 return self.reader.read_latest_trip(previous)
 
             trip_cache = BackgroundCache(
-                "latest-trip", self.background_loader(load_trip, 2),
+                "latest-trip", self.background_loader(load_trip, 2, reserve_charge_budget=True),
                 lambda _: trip_interval,
                 TripData, state_path=cache_dir / "latest-trip.json", auto_refresh=False,
                 initial_delay=60,
                 error_retry_interval=error_retry_interval,
-                error_retry_intervals={"TRIPS_NOT_EXPOSED": trip_interval},
+                error_retry_intervals={
+                    category: max(trip_interval, error_retry_interval)
+                    for category in (
+                        "TRIPS_NOT_EXPOSED", "TRIP_NOT_UPDATED", "TRIP_NOT_AVAILABLE",
+                        "TRIP_ODOMETER_UNAVAILABLE", "TRIP_ODOMETER_REGRESSED",
+                    )
+                },
                 rest_mode=self.rest_mode, shared_backoff=self.background_backoff,
             )
             self.latest_trip = trip_cache
 
         self.details = BackgroundCache(
             "details",
-            self.background_loader(self.reader.read_details, 3, priority=True),
+            self.background_loader(
+                self.reader.read_details, 3, priority=True, reserve_charge_budget=True
+            ),
             lambda _: detail_interval,
             DetailData,
             rest_mode=self.rest_mode,
@@ -5489,7 +5621,9 @@ class AppState:
         )
         self.location = BackgroundCache(
             "location",
-            self.background_loader(self.reader.read_location, 1, priority=True),
+            self.background_loader(
+                self.reader.read_location, 1, priority=True, reserve_charge_budget=True
+            ),
             lambda _: location_interval,
             LocationData,
             rest_mode=self.rest_mode,
@@ -5530,6 +5664,14 @@ class AppState:
         if self.latest_trip is None:
             return TripData(error="Trip polling is disabled", errorCategory="TRIPS_DISABLED")
         return self.latest_trip.get(trigger_refresh=False)
+
+    def observe_driving_data_summary(self, summary: str) -> None:
+        if self.latest_trip is None or not summary:
+            return
+        previous = self._last_driving_data_summary
+        self._last_driving_data_summary = summary
+        if previous and summary != previous:
+            self.latest_trip.request_early_refresh()
 
     def _cache_updated(self, name: str, value: object) -> None:
         if self.mqtt is None:
@@ -6446,6 +6588,13 @@ class AppState:
         value.dataWarnings = (
             ("SOURCE_DATA_STALE",) if value.vehicleSourceStale else ()
         )
+        if any(
+            getattr(cache, "last_error_category", "") == "BACKGROUND_BUDGET_RESERVED"
+            for cache in (
+                self.details, self.location, getattr(self, "latest_trip", None),
+            )
+        ):
+            value.dataWarnings += ("BACKGROUND_BUDGET_RESERVED",)
         return value
 
 
