@@ -4,6 +4,28 @@ The connector serves cached reads on port `9920` by default. Reading a `GET`
 endpoint does not directly open the Volkswagen app. Background workers refresh
 the caches according to the configured intervals and budgets.
 
+Cached charge, details, location, software and latest-trip payloads also report
+live refresh activity:
+
+- `refreshing`: a refresh is running, including protected waits for app access
+  or the minimum background interval.
+- `refreshRequested`: an early refresh is queued or still being processed.
+- `refreshStartedAt`: start time of the running refresh, otherwise empty.
+- `retryInSeconds`: remaining local/shared retry pause, otherwise zero. This
+  is not the countdown to the next normal periodic read.
+
+For example, `/trips/latest` can show `refreshing: true` while still returning
+the previous paired trip and odometer. `observedAt` and `lastSuccessfulAt`
+continue to describe that previous measurement until the new read succeeds.
+Progress never marks the vehicle data fresh or changes its timestamps.
+An initial read still returns HTTP 503 until the first successful reading.
+
+`/health.refreshActivity` groups the live state for `charge`, `details`,
+`location`, `trips` and `software`. Each entry contains the fields above and a
+`state` of `running`, `waiting`, `queued`, `idle` or `disabled`.
+`/capabilities.caches` exposes the same activity metadata for enabled caches.
+Activity is process-local and is not restored as a running job after restart.
+
 ## Read Endpoints
 
 ### `GET /charge`

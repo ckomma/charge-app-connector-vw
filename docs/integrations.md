@@ -9,9 +9,20 @@ for `paho-mqtt`, then configure `MQTT_HOST` and optional credentials. Home
 Assistant creates one `Volkswagen App Connector` device with charge, range,
 charging, climate, lock, vehicle-detail, health, usage and location entities.
 
-MQTT publishes retained copies only when caches update or the client connects.
+MQTT publishes retained copies when caches update, refresh activity changes,
+or the client connects.
 It never triggers a Volkswagen app operation and is intentionally read-only.
 Vehicle actions remain authenticated REST calls.
+
+Diagnostic **Charge refresh**, **Trip refresh**, **Vehicle details refresh**,
+**Location refresh** and **Software refresh** sensors show `queued`,
+`running`, `waiting`, `idle` or `disabled`. Their attributes include the start
+time and retry pause. The retained `activity` topic is updated when a refresh is
+queued, starts or finishes. Retry seconds are a snapshot at publication time.
+An active refresh may include waiting for the existing minimum operation
+interval; the vehicle measurements still describe the last successful read.
+The REST package example exposes equivalent activity attributes and
+`refreshActivity` on the existing connector sensor without renaming entities.
 
 Connector health, Volkswagen source age/staleness and background backoff are
 separate entities. MQTT discovery also exposes connector `statusReasons` and

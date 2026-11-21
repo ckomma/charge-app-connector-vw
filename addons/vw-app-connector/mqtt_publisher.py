@@ -142,6 +142,14 @@ class MqttPublisher:
             ("sensor", "cooldown", "Rate limit cooldown", "health", "usageCooldownSeconds", "s", "duration", "measurement", None),
             ("binary_sensor", "phone_powered", "Phone powered", "health", "phonePowered", None, "power", None, None),
         ]
+        entities.extend(
+            ("sensor", f"{key}_refresh", f"{label} refresh", "activity",
+             f"{key}.state", None, None, None, "mdi:progress-clock")
+            for key, label in (
+                ("charge", "Charge"), ("details", "Vehicle details"),
+                ("location", "Location"), ("trips", "Trip"), ("software", "Software"),
+            )
+        )
         for component, object_id, name, state_name, key, unit, device_class, state_class, icon in entities:
             binary_value_template = (
                 # HA's lock class uses OFF for locked; its MQTT unknown payload
@@ -164,6 +172,12 @@ class MqttPublisher:
             }
             if unit:
                 config["unit_of_measurement"] = unit
+            if state_name == "activity":
+                config["entity_category"] = "diagnostic"
+                config["json_attributes_topic"] = config["state_topic"]
+                config["json_attributes_template"] = (
+                    "{{ value_json.%s | tojson }}" % key.split(".")[0]
+                )
             if object_id in ("status_reasons", "data_warnings"):
                 # HA MQTT treats the exact string "None" as an unknown state.
                 config["value_template"] = (

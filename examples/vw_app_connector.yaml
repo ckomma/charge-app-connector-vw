@@ -49,6 +49,10 @@ rest:
           - stale
           - lastSuccessfulAt
           - refreshDurationSeconds
+          - refreshing
+          - refreshRequested
+          - refreshStartedAt
+          - retryInSeconds
 
   - resource: "http://CONNECTOR_HOST:9920/details"
     scan_interval: 300
@@ -73,6 +77,10 @@ rest:
           - stale
           - lastSuccessfulAt
           - refreshDurationSeconds
+          - refreshing
+          - refreshRequested
+          - refreshStartedAt
+          - retryInSeconds
 
   - resource: "http://CONNECTOR_HOST:9920/health"
     scan_interval: 60
@@ -103,6 +111,7 @@ rest:
           - chargeLastSuccessfulAt
           - chargeAgeSeconds
           - chargeRefreshing
+          - refreshActivity
           - detailLastSuccessfulAt
           - detailAgeSeconds
           - locationLastSuccessfulAt
@@ -131,6 +140,10 @@ rest:
           - stale
           - lastSuccessfulAt
           - refreshDurationSeconds
+          - refreshing
+          - refreshRequested
+          - refreshStartedAt
+          - retryInSeconds
 
 rest_command:
   volkswagen_app_rest_pause:

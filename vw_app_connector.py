@@ -378,6 +378,10 @@ class VehicleData:
     lastSuccessfulAt: str = ""
     refreshDurationSeconds: float | None = None
     capabilities: dict[str, bool] | None = None
+    refreshing: bool = False
+    refreshRequested: bool = False
+    refreshStartedAt: str = ""
+    retryInSeconds: int = 0
 
 
 @dataclass
@@ -417,6 +421,10 @@ class LocationData:
     stale: bool = False
     lastSuccessfulAt: str = ""
     refreshDurationSeconds: float | None = None
+    refreshing: bool = False
+    refreshRequested: bool = False
+    refreshStartedAt: str = ""
+    retryInSeconds: int = 0
 
 
 @dataclass
@@ -444,6 +452,10 @@ class DetailData:
     lastSuccessfulAt: str = ""
     refreshDurationSeconds: float | None = None
     capabilities: dict[str, bool] | None = None
+    refreshing: bool = False
+    refreshRequested: bool = False
+    refreshStartedAt: str = ""
+    retryInSeconds: int = 0
 
 
 @dataclass
@@ -459,6 +471,10 @@ class SoftwareData:
     stale: bool = False
     lastSuccessfulAt: str = ""
     refreshDurationSeconds: float | None = None
+    refreshing: bool = False
+    refreshRequested: bool = False
+    refreshStartedAt: str = ""
+    retryInSeconds: int = 0
 
 
 @dataclass
@@ -476,6 +492,10 @@ class TripData:
     stale: bool = False
     lastSuccessfulAt: str = ""
     refreshDurationSeconds: float | None = None
+    refreshing: bool = False
+    refreshRequested: bool = False
+    refreshStartedAt: str = ""
+    retryInSeconds: int = 0
 
 
 @dataclass
@@ -529,6 +549,7 @@ class HealthData:
     usageCooldownReason: str = ""
     usageCooldownUntil: str = ""
     usageCooldownProbeAvailableInSeconds: int = 0
+    refreshActivity: dict[str, dict[str, object]] | None = None
 
 
 class VolkswagenReader:
@@ -4906,6 +4927,8 @@ class RestMode:
 
 
 class BackgroundCache(Generic[T]):
+    ACTIVITY_FIELDS = ("refreshing", "refreshRequested", "refreshStartedAt", "retryInSeconds")
+
     def __init__(
         self,
         name: str,
@@ -4923,6 +4946,7 @@ class BackgroundCache(Generic[T]):
         error_retry_intervals: dict[str, float] | None = None,
         auto_refresh: bool = True,
         rest_mode: RestMode | None = None,
+        on_refresh_state: Callable[[], None] | None = None,
     ) -> None:
         self.name = name
         self.loader = loader
@@ -4937,6 +4961,7 @@ class BackgroundCache(Generic[T]):
         self.last_error = ""
         self.last_error_category = ""
         self.refreshing = False
+        self.refresh_started_at = ""
         self.early_refresh_requested = False
         self.next_attempt_monotonic = 0.0
         self.wakeup = threading.Event()
@@ -4944,6 +4969,7 @@ class BackgroundCache(Generic[T]):
         self.error_retry_interval = error_retry_interval
         self.state_path = state_path
         self.on_update = on_update
+        self.on_refresh_state = on_refresh_state
         self.prepare_value = prepare_value
         self.shared_backoff = shared_backoff
         self.shared_backoff_reason = shared_backoff_reason
@@ -4966,7 +4992,7 @@ class BackgroundCache(Generic[T]):
             raw_value = payload["value"]
             value = self.empty_factory()
             for key in vars(value):
-                if key in raw_value:
+                if key in raw_value and key not in self.ACTIVITY_FIELDS:
                     setattr(value, key, raw_value[key])
             last_success_at = str(getattr(value, "lastSuccessfulAt", ""))
             saved_at = datetime.fromisoformat(last_success_at)
@@ -4988,8 +5014,11 @@ class BackgroundCache(Generic[T]):
             return
         self.state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         temporary = self.state_path.with_suffix(".tmp")
+        payload = asdict(value)
+        for key in self.ACTIVITY_FIELDS:
+            payload.pop(key, None)
         temporary.write_text(
-            json.dumps({"version": 1, "value": asdict(value)}),
+            json.dumps({"version": 1, "value": payload}),
             encoding="utf-8",
         )
         temporary.chmod(0o600)
@@ -5045,11 +5074,35 @@ class BackgroundCache(Generic[T]):
                 self.early_refresh_requested = True
                 request_state = "queued"
         self.wakeup.set()
+        if request_state == "queued":
+            self.notify_refresh_state()
         return {
             "status": "accepted",
             "state": request_state,
             "cache": self.name,
         }
+
+    def activity(self) -> dict[str, object]:
+        with self.lock:
+            active = self.refreshing
+            requested = self.early_refresh_requested
+            started_at = self.refresh_started_at
+            retry = max(0.0, self.next_attempt_monotonic - time.monotonic())
+        if self.shared_backoff is not None:
+            retry = max(retry, self.shared_backoff.retry_in_seconds())
+        return {
+            "refreshing": active,
+            "refreshRequested": requested,
+            "refreshStartedAt": started_at if active else "",
+            "retryInSeconds": math.ceil(retry),
+        }
+
+    def notify_refresh_state(self) -> None:
+        if self.on_refresh_state is not None:
+            try:
+                self.on_refresh_state()
+            except Exception:
+                LOG.exception("%s refresh-state notification failed", self.name)
 
     def shared_backoff_value(self) -> T | None:
         if self.shared_backoff is None:
@@ -5096,6 +5149,8 @@ class BackgroundCache(Generic[T]):
             if self.refreshing:
                 return self.value or self.empty_factory()
             self.refreshing = True
+            self.refresh_started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        self.notify_refresh_state()
         clear_early_refresh = True
         started = time.monotonic()
         try:
@@ -5178,10 +5233,16 @@ class BackgroundCache(Generic[T]):
         finally:
             with self.lock:
                 self.refreshing = False
+                self.refresh_started_at = ""
                 if clear_early_refresh:
                     self.early_refresh_requested = False
+            self.notify_refresh_state()
 
     def get(self, *, trigger_refresh: bool = True) -> T:
+        value = self._get_value(trigger_refresh=trigger_refresh)
+        return replace(value, **self.activity())
+
+    def _get_value(self, *, trigger_refresh: bool = True) -> T:
         with self.lock:
             value = self.value
         rest = self.rest_mode
@@ -5671,6 +5732,7 @@ class AppState:
             clears_shared_backoff=lambda value: (
                 value.sourceAgeMinutes is not None and not value.sourceStale
             ),
+            on_refresh_state=lambda: self._refresh_state_updated("charge"),
         )
         if trip_enabled:
             def load_trip() -> TripData:
@@ -5695,6 +5757,7 @@ class AppState:
                     )
                 },
                 rest_mode=self.rest_mode, shared_backoff=self.background_backoff,
+                on_refresh_state=lambda: self._refresh_state_updated("latest-trip"),
             )
             self.latest_trip = trip_cache
 
@@ -5713,6 +5776,7 @@ class AppState:
             on_update=self._cache_updated,
             shared_backoff=self.background_backoff,
             error_retry_intervals={"VEHICLE_REPORT_NOT_READY": max(3600, error_retry_interval)},
+            on_refresh_state=lambda: self._refresh_state_updated("details"),
         )
         self.location = BackgroundCache(
             "location",
@@ -5734,12 +5798,14 @@ class AppState:
                 "LOCATION_MAPS_UNAVAILABLE": location_interval,
                 "LOCATION_GPS_UNAVAILABLE": location_interval,
             },
+            on_refresh_state=lambda: self._refresh_state_updated("location"),
         )
         self.software = BackgroundCache(
             "software", self.reader.read_software, lambda _: detail_interval,
             SoftwareData, state_path=cache_dir / "software.json", auto_refresh=False,
             rest_mode=self.rest_mode,
             on_update=self._cache_updated,
+            on_refresh_state=lambda: self._refresh_state_updated("software"),
         )
 
         # A persisted charge cache can still be younger than the parked
@@ -5778,6 +5844,38 @@ class AppState:
         except Exception:
             LOG.exception("MQTT update failed for %s", name)
 
+    def refresh_activity(self) -> dict[str, dict[str, object]]:
+        result = {}
+        for name, attribute in (
+            ("charge", "charge"), ("details", "details"), ("location", "location"),
+            ("trips", "latest_trip"), ("software", "software"),
+        ):
+            cache = getattr(self, attribute, None)
+            activity = (
+                cache.activity() if isinstance(cache, BackgroundCache) else {
+                    "refreshing": False, "refreshRequested": False,
+                    "refreshStartedAt": "", "retryInSeconds": 0,
+                }
+            )
+            activity["state"] = (
+                "disabled" if cache is None else
+                "running" if activity["refreshing"] else
+                "waiting" if activity["retryInSeconds"] else
+                "queued" if activity["refreshRequested"] else "idle"
+            )
+            result[name] = activity
+        return result
+
+    def _refresh_state_updated(self, name: str) -> None:
+        if self.mqtt is None:
+            return
+        self.mqtt.publish_state("activity", self.refresh_activity())
+        cache = getattr(self, "latest_trip" if name == "latest-trip" else name, None)
+        if isinstance(cache, BackgroundCache):
+            # Publish live progress without taking a new UI reading or changing
+            # the timestamps on the retained vehicle measurement.
+            self.mqtt.publish_state(name, cache.get(trigger_refresh=False))
+
     def mqtt_state(self) -> dict[str, object]:
         return {
             "charge": self.charge.get(),
@@ -5785,6 +5883,7 @@ class AppState:
             "location": self.location.get(),
             "software": self.software.get(),
             "health": self.health(),
+            "activity": self.refresh_activity(),
         }
 
     @staticmethod
@@ -5793,8 +5892,6 @@ class AppState:
             value = cache.value
             last_success_at = cache.last_success_at
             last_error_category = cache.last_error_category
-            refreshing = cache.refreshing
-            next_attempt = cache.next_attempt_monotonic
         return {
             "available": value is not None and bool(last_success_at),
             "lastSuccessfulAt": last_success_at,
@@ -5803,13 +5900,8 @@ class AppState:
                 bool(getattr(value, "stale", False))
                 or (not cache.auto_refresh and cache.age() >= cache.interval(value))
             ) if value is not None else False,
-            "refreshing": refreshing,
+            **cache.activity(),
             "lastErrorCategory": last_error_category,
-            "retryInSeconds": (
-                max(0, round(next_attempt - time.monotonic()))
-                if next_attempt
-                else 0
-            ),
         }
 
     def capabilities(self) -> dict[str, object]:
@@ -6062,6 +6154,8 @@ class AppState:
                 "details": self._cache_snapshot(self.details),  # type: ignore[arg-type]
                 "location": self._cache_snapshot(self.location),  # type: ignore[arg-type]
                 **({"software": self._cache_snapshot(self.software)} if hasattr(self, "software") else {}),
+                **({"trips": self._cache_snapshot(self.latest_trip)}
+                   if getattr(self, "latest_trip", None) is not None else {}),
             },
             "usage": self.usage.snapshot(),
         }
@@ -6579,6 +6673,7 @@ class AppState:
             round(self.charge.age()) if self.charge.last_success_at else None
         )
         value.chargeRefreshing = self.charge.refreshing
+        value.refreshActivity = self.refresh_activity()
         value.detailLastSuccessfulAt = self.details.last_success_at
         value.detailAgeSeconds = (
             round(self.details.age()) if self.details.last_success_at else None

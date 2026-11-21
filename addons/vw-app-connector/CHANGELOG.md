@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.38
+
+- Show running and queued refreshes, start times and retry pauses in cached API
+  responses without changing the last successful vehicle measurement.
+- Add per-cache refresh activity to health/capabilities and diagnostic MQTT
+  sensors. Publish progress when work is queued, starts and finishes.
+- Expose activity attributes in the HA REST example while preserving existing
+  entity identities, refresh intervals and usage protection.
+
 ## 0.1.37
 
 - Fix trip starvation caused by reserving the entire remaining day for charge
