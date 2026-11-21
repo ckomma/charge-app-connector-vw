@@ -65,9 +65,12 @@ class TransientTransportState(TransientBackgroundState):
 class TransientEndpointState(UsageLimit):
     """Expected endpoint-local Volkswagen state that must not pause other caches."""
 
-    def __init__(self, reason: str, message: str) -> None:
+    def __init__(
+        self, reason: str, message: str, retry_after_seconds: float | None = None
+    ) -> None:
         super().__init__(message)
         self.reason = reason
+        self.retry_after_seconds = retry_after_seconds
 
 
 class CooldownProbeRejected(RuntimeError):
@@ -124,6 +127,7 @@ class UsageLimiter:
             "backgroundUsed": 0,
             "actionsUsed": 0,
             "lastBackgroundAt": 0.0,
+            "backgroundLastByName": {},
             "lastActionAt": 0.0,
             "cooldownUntil": 0.0,
             "cooldownReason": "",
@@ -178,6 +182,8 @@ class UsageLimiter:
         yield_to: Callable[[], bool] | None = None,
         bypass_cooldown: bool = False,
         reserve: Callable[[], int] | None = None,
+        budget_name: str = "",
+        schedule: Callable[[], dict[str, tuple[int, float]]] | None = None,
     ) -> None:
         while True:
             with self.lock:
@@ -194,6 +200,26 @@ class UsageLimiter:
                     raise UsageLimit(
                         "Volkswagen background daily budget exhausted"
                     )
+                if budget_name and schedule is not None:
+                    intervals = schedule()
+                    remaining = self.background_daily_limit - used
+                    horizon = self.seconds_until_midnight(now)
+                    demand = sum(
+                        weight * horizon / max(1.0, interval)
+                        for weight, interval in intervals.values()
+                    )
+                    # Stretch all schedules together under pressure. Do not
+                    # reserve the entire day exclusively for charge reads.
+                    factor = max(1.0, demand / max(1, remaining - 2))
+                    last = float(self.state["backgroundLastByName"].get(budget_name, 0))
+                    interval = intervals[budget_name][1]
+                    wait = last + max(1.0, interval) * factor - now
+                    if factor > 1 and last and wait > 0:
+                        raise TransientEndpointState(
+                            "BACKGROUND_BUDGET_PACED",
+                            "Background refresh paced to share remaining daily budget",
+                            retry_after_seconds=min(wait, horizon),
+                        )
                 if reserve is not None and (
                     used + cost + max(0, reserve()) > self.background_daily_limit
                 ):
@@ -210,9 +236,19 @@ class UsageLimiter:
                 if wait <= 0:
                     self.state["backgroundUsed"] = used + cost
                     self.state["lastBackgroundAt"] = now
+                    if budget_name:
+                        self.state["backgroundLastByName"][budget_name] = now
                     self._save()
                     return
             time.sleep(min(wait, 5))
+
+    @staticmethod
+    def seconds_until_midnight(now: float) -> float:
+        local = datetime.fromtimestamp(now).astimezone()
+        midnight = datetime.combine(
+            local.date() + timedelta(days=1), datetime.min.time()
+        ).astimezone()
+        return max(0.0, midnight.timestamp() - now)
 
     def acquire_action(self, cost: int = 1) -> None:
         while True:
@@ -3689,12 +3725,22 @@ class VolkswagenReader:
         x, y = self.vehicle_report_center(overview)
         self.shell("input", "tap", str(x), str(y))
         time.sleep(self.detail_wait)
-        report = self.dump_ui("vw-report.xml")
-        self.raise_for_rate_limit_state(report)
-        self.raise_for_lockout_state(report)
-        if not self.is_vehicle_report_page(report):
-            raise RuntimeError("Volkswagen vehicle health report did not open")
-        return report
+        deadline = time.monotonic() + self.ui_update_timeout
+        while True:
+            report = self.dump_ui("vw-report.xml")
+            self.raise_for_rate_limit_state(report)
+            self.raise_for_lockout_state(report)
+            if self.is_vehicle_report_page(report):
+                return report
+            text = "\n".join(self.strings(report)).casefold()
+            if not any(label.casefold() in text for label in self.VEHICLE_REPORT_LABELS):
+                raise RuntimeError("Volkswagen vehicle health report did not open")
+            if time.monotonic() >= deadline:
+                raise TransientEndpointState(
+                    "VEHICLE_REPORT_NOT_READY",
+                    "Volkswagen vehicle health report is open but contains no data",
+                )
+            time.sleep(0.5)
 
     def read_details(self) -> DetailData:
         with self.screen_session():
@@ -4903,6 +4949,7 @@ class BackgroundCache(Generic[T]):
         self.shared_backoff_reason = shared_backoff_reason
         self.clears_shared_backoff = clears_shared_backoff
         self.error_retry_intervals = error_retry_intervals or {}
+        self.last_read_error_category = ""
         self._load_persisted()
         if auto_refresh:
             self.start_worker()
@@ -5069,6 +5116,7 @@ class BackgroundCache(Generic[T]):
                 self.last_success_at = now
                 self.last_error = ""
                 self.last_error_category = ""
+                self.last_read_error_category = ""
                 self.next_attempt_monotonic = 0.0
             self._save_persisted(value)
             self.update_shared_backoff(value)
@@ -5102,9 +5150,18 @@ class BackgroundCache(Generic[T]):
             with self.lock:
                 self.last_error = str(exc)
                 self.last_error_category = category
+                if category not in (
+                    "BACKGROUND_BUDGET_PACED", "BACKGROUND_BUDGET_RESERVED", "TRIP_REFRESH_PENDING",
+                ):
+                    self.last_read_error_category = category
                 retry_interval = self.error_retry_intervals.get(
                     category, self.error_retry_interval
                 )
+                explicit_retry = getattr(exc, "retry_after_seconds", None)
+                if explicit_retry is not None:
+                    retry_interval = max(1.0, explicit_retry)
+                if category in ("BACKGROUND_BUDGET_PACED", "BACKGROUND_BUDGET_RESERVED"):
+                    clear_early_refresh = False
                 self.next_attempt_monotonic = time.monotonic() + retry_interval
                 value = self.value or self.empty_factory()
                 setattr(value, "error", str(exc))
@@ -5167,6 +5224,7 @@ class BackgroundCache(Generic[T]):
             self.last_success_at = now
             self.last_error = ""
             self.last_error_category = ""
+            self.last_read_error_category = ""
         self._save_persisted(value)
         self.update_shared_backoff(value)
         if self.on_update is not None:
@@ -5430,6 +5488,7 @@ class AppState:
     def background_loader(
         self, loader: Callable[[], T], cost: int, priority: bool = False,
         reserve_charge_budget: bool = False,
+        budget_name: str = "",
     ) -> Callable[[], T]:
         def run() -> T:
             rest = getattr(self, "rest_mode", None)
@@ -5447,6 +5506,19 @@ class AppState:
                     self.priority_waiters += 1
             try:
                 yield_background()
+                trip = getattr(self, "latest_trip", None)
+                if budget_name in ("details", "location") and isinstance(trip, BackgroundCache):
+                    with trip.lock:
+                        trip_pending = (
+                            trip.early_refresh_requested
+                            and trip.next_attempt_monotonic <= time.monotonic()
+                        )
+                    if trip_pending:
+                        raise TransientEndpointState(
+                            "TRIP_REFRESH_PENDING",
+                            "Routine read yielded to an early trip refresh",
+                            retry_after_seconds=60,
+                        )
                 while self.reader.action_pending.is_set():
                     time.sleep(0.25)
                 with self.background_preflight_lock:
@@ -5467,6 +5539,8 @@ class AppState:
                     cost,
                     yield_to=yield_background,
                     reserve=self.charge_budget_reserve if reserve_charge_budget else None,
+                    **({"budget_name": budget_name, "schedule": self.background_schedule}
+                       if budget_name else {}),
                 )
                 self.reader.context.background = True
                 try:
@@ -5487,16 +5561,25 @@ class AppState:
         return run
 
     def charge_budget_reserve(self) -> int:
-        """Keep one charge-budget unit per scheduled interval until local midnight."""
-        with self.charge.lock:
-            value = self.charge.value
-        interval = max(1.0, self.charge.interval(value))
-        now = datetime.now().astimezone()
-        midnight = datetime.combine(
-            now.date() + timedelta(days=1), datetime.min.time()
-        ).astimezone()
-        remaining = max(0.0, midnight.timestamp() - now.timestamp())
-        return math.ceil(remaining / interval)
+        """Protect a short charge buffer without reserving the entire day."""
+        interval = self.background_schedule()["charge"][1]
+        return min(2, math.ceil(UsageLimiter.seconds_until_midnight(time.time()) / interval))
+
+    def background_schedule(self) -> dict[str, tuple[int, float]]:
+        schedule = dict(self.background_intervals)
+        charge = getattr(self, "charge", None)
+        if charge is not None:
+            with charge.lock:
+                value = charge.value
+            schedule["charge"] = (1, max(1.0, charge.interval(value)))
+        details = getattr(self, "details", None)
+        if getattr(details, "last_read_error_category", "") == "VEHICLE_REPORT_NOT_READY":
+            # Give an empty report a paced recovery attempt, rather than
+            # excluding it for the full normal 12-hour details interval.
+            schedule["details"] = (
+                3, details.error_retry_intervals["VEHICLE_REPORT_NOT_READY"],
+            )
+        return schedule
 
     def __init__(self) -> None:
         self.mqtt: MqttPublisher | None = None
@@ -5513,6 +5596,15 @@ class AppState:
         idle_interval = float(os.getenv("IDLE_INTERVAL_SECONDS", "900"))
         detail_interval = float(os.getenv("DETAIL_INTERVAL_SECONDS", "43200"))
         location_interval = float(os.getenv("LOCATION_INTERVAL_SECONDS", "14400"))
+        trip_enabled = os.getenv("TRIP_POLL_ENABLED", "false").strip().lower() == "true"
+        trip_interval = max(300.0, float(os.getenv("TRIP_INTERVAL_SECONDS", "3600")))
+        self.background_intervals = {
+            "charge": (1, max(1.0, idle_interval)),
+            "details": (3, max(1.0, detail_interval)),
+            "location": (1, max(1.0, location_interval)),
+        }
+        if trip_enabled:
+            self.background_intervals["latest-trip"] = (2, trip_interval)
         error_retry_interval = float(
             os.getenv("BACKGROUND_ERROR_RETRY_SECONDS", "900")
         )
@@ -5534,7 +5626,6 @@ class AppState:
         self.background_preflight_lock = threading.Lock()
 
         charge_interval = ChargeRefreshInterval(charging_interval, idle_interval)
-        trip_enabled = os.getenv("TRIP_POLL_ENABLED", "false").strip().lower() == "true"
         self.latest_trip = None
         self._last_driving_data_summary = ""
 
@@ -5563,7 +5654,8 @@ class AppState:
         self.charge = BackgroundCache(
             "charge",
             self.background_loader(
-                read_charge_with_trip_hint if trip_enabled else self.reader.read, 1
+                read_charge_with_trip_hint if trip_enabled else self.reader.read, 1,
+                budget_name="charge",
             ),
             charge_interval,
             VehicleData,
@@ -5581,15 +5673,15 @@ class AppState:
             ),
         )
         if trip_enabled:
-            trip_interval = max(300.0, float(os.getenv("TRIP_INTERVAL_SECONDS", "3600")))
-
             def load_trip() -> TripData:
                 with trip_cache.lock:
                     previous = trip_cache.value
                 return self.reader.read_latest_trip(previous)
 
             trip_cache = BackgroundCache(
-                "latest-trip", self.background_loader(load_trip, 2, reserve_charge_budget=True),
+                "latest-trip", self.background_loader(
+                    load_trip, 2, reserve_charge_budget=True, budget_name="latest-trip"
+                ),
                 lambda _: trip_interval,
                 TripData, state_path=cache_dir / "latest-trip.json", auto_refresh=False,
                 initial_delay=60,
@@ -5599,6 +5691,7 @@ class AppState:
                     for category in (
                         "TRIPS_NOT_EXPOSED", "TRIP_NOT_UPDATED", "TRIP_NOT_AVAILABLE",
                         "TRIP_ODOMETER_UNAVAILABLE", "TRIP_ODOMETER_REGRESSED",
+                        "VEHICLE_REPORT_NOT_READY",
                     )
                 },
                 rest_mode=self.rest_mode, shared_backoff=self.background_backoff,
@@ -5608,7 +5701,8 @@ class AppState:
         self.details = BackgroundCache(
             "details",
             self.background_loader(
-                self.reader.read_details, 3, priority=True, reserve_charge_budget=True
+                self.reader.read_details, 3, priority=True, reserve_charge_budget=True,
+                budget_name="details",
             ),
             lambda _: detail_interval,
             DetailData,
@@ -5618,11 +5712,13 @@ class AppState:
             state_path=cache_dir / "details.json",
             on_update=self._cache_updated,
             shared_backoff=self.background_backoff,
+            error_retry_intervals={"VEHICLE_REPORT_NOT_READY": max(3600, error_retry_interval)},
         )
         self.location = BackgroundCache(
             "location",
             self.background_loader(
-                self.reader.read_location, 1, priority=True, reserve_charge_budget=True
+                self.reader.read_location, 1, priority=True, reserve_charge_budget=True,
+                budget_name="location",
             ),
             lambda _: location_interval,
             LocationData,
@@ -6584,6 +6680,23 @@ class AppState:
             add_status_reason("APP_INTERACTION_REQUIRED")
             if value.status == "ok":
                 value.status = "degraded"
+        for name, cache in (
+            ("DETAIL", self.details), ("LOCATION", self.location),
+            ("TRIP", getattr(self, "latest_trip", None)),
+        ):
+            if (
+                getattr(cache, "last_error_category", "") == "VEHICLE_REPORT_NOT_READY"
+                or getattr(cache, "last_read_error_category", "") == "VEHICLE_REPORT_NOT_READY"
+            ):
+                add_status_reason("VEHICLE_REPORT_NOT_READY")
+            if (
+                isinstance(cache, BackgroundCache)
+                and (cache.last_success_at or cache.last_error_category)
+                and cache.age() >= max(3600, 2 * cache.interval(cache.value))
+            ):
+                add_status_reason(f"{name}_DATA_STALE")
+        if status_reasons and value.status == "ok":
+            value.status = "degraded"
         value.statusReasons = tuple(status_reasons)
         value.dataWarnings = (
             ("SOURCE_DATA_STALE",) if value.vehicleSourceStale else ()
@@ -6595,6 +6708,13 @@ class AppState:
             )
         ):
             value.dataWarnings += ("BACKGROUND_BUDGET_RESERVED",)
+        if any(
+            getattr(cache, "last_error_category", "") == "BACKGROUND_BUDGET_PACED"
+            for cache in (
+                self.charge, self.details, self.location, getattr(self, "latest_trip", None),
+            )
+        ):
+            value.dataWarnings += ("BACKGROUND_BUDGET_PACED",)
         return value
 
 

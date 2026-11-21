@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.37
+
+- Fix trip starvation caused by reserving the entire remaining day for charge
+  polling. Keep a short charge buffer and share scarce budget by spacing all
+  background schedules further apart. Preserve admission times across restarts.
+- Give eligible early trip requests priority over routine detail/location work.
+- Wait for contents when the vehicle health report opens empty. Report
+  `VEHICLE_REPORT_NOT_READY` and avoid immediate relaunch/retry loops.
+- Report empty vehicle reports and prolonged trip/detail/location outages in
+  connector health so existing HA problem sensors can show these failures.
+
 ## 0.1.36
 
 - Queue an early paired trip/mileage refresh when the visible Driving data

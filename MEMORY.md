@@ -75,11 +75,17 @@ coordinates, screenshots, raw UI dumps, and private network details.
   the updated backoff state, including transient refresh failures.
 - Due detail/location work retains priority, but routine charge work yields for
   no longer than one configured background minimum interval.
-- Trip, detail and location background reads reserve enough budget for one
-  charge read per current charge interval until the next local midnight.
-  Reserved work reports `BACKGROUND_BUDGET_RESERVED` without consuming a unit
-  or starting a shared backoff. Charge reads remain subject to daily limits
-  and cooldowns. Forecasts cannot guarantee coverage after demand changes.
+- Trip, detail and location reads keep a buffer of at most two charge units.
+  When configured schedules exceed remaining budget until local midnight, all
+  four read types are paced proportionally to their intervals and costs.
+  Admission timestamps survive restarts; deferred work consumes no budget.
+  `BACKGROUND_BUDGET_PACED` and `BACKGROUND_BUDGET_RESERVED` are endpoint-local.
+  Pending eligible early trip work precedes routine detail/location work.
+  Charge reads remain subject to hard daily limits and cooldowns.
+- An empty but opened vehicle report waits for contents, then reports
+  `VEHICLE_REPORT_NOT_READY` without immediate relaunch. Details wait at least
+  one hour before retrying. This state and prolonged optional-cache failures
+  degrade health so existing HA problem sensors can show the outage.
 - Missing/unupdated trip cards and unavailable/regressed mileage retry no
   sooner than the greater of the trip interval and background error interval.
   An early overview trigger queues work without bypassing that retry pause.

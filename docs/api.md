@@ -96,13 +96,29 @@ needed to look for it. The configured trip interval still applies when the
 summary is absent or unchanged. Early checks use the same budget and cooldown
 rules as scheduled checks.
 
-Trip, detail and location reads preserve a charge-budget reserve based on the
-remaining time until the connector's local midnight and its current charge
-refresh interval. If an optional read would spend this reserve, it retains its
-cache and reports `BACKGROUND_BUDGET_RESERVED`, also exposed in
-`/health.dataWarnings`. Charge reads may use the reserve. The calculation adapts
-to charging/idle intervals; a later increase in polling demand, errors or a very
-small daily limit can still exhaust the budget. No budget or cooldown is bypassed.
+Trip, detail and location reads preserve a short buffer of at most two charge
+budget units. If remaining budget cannot cover the configured schedules until
+local midnight, the connector spaces all four background read types further
+apart, weighted by their configured intervals and costs. It reports
+`BACKGROUND_BUDGET_PACED` while waiting and preserves admission timestamps across
+restarts. SoC polling may consequently run less often than the configured
+interval. An early trip request takes priority over routine detail/location
+work when eligible; it cannot bypass pacing or a pending retry.
+
+An optional read that would spend the short charge buffer reports
+`BACKGROUND_BUDGET_RESERVED`. Both budget categories are exposed in
+`/health.dataWarnings`. No daily limit or cooldown is bypassed, counters are not
+reset, and extremely small or already exhausted budgets cannot guarantee fresh
+data for every endpoint.
+
+An opened vehicle health report with no contents is checked for a bounded
+period, then reported as `VEHICLE_REPORT_NOT_READY` without immediately reopening
+the app. Details retry after at least one hour; trip retries use at least the
+trip interval. This state degrades connector health. Optional trip, detail and
+location caches also degrade health after twice their normal interval without a
+successful read (at least one hour), using `TRIP_DATA_STALE`,
+`DETAIL_DATA_STALE` or `LOCATION_DATA_STALE`. Existing HA problem sensors that
+check connector health therefore show these prolonged failures.
 
 Use `odometerKmAtObservation` from this response as the automation trigger
 and consume the trip fields from the same response. `/details` continues

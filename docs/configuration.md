@@ -37,7 +37,7 @@ the write-action quarantine.
 | `BACKGROUND_ERROR_RETRY_SECONDS` | `900` | Initial failure retry/backoff interval; maximum pause for successfully read source-stale data |
 | `BACKGROUND_TRANSIENT_BACKOFF_MAX_SECONDS` | `7200` | Maximum shared exponential pause |
 | `SOURCE_STALE_AFTER_MINUTES` | `60` | Volkswagen source-stale threshold |
-| `BACKGROUND_DAILY_LIMIT` | `180` | Weighted daily background budget; optional reads preserve a reserve for charge polling until local midnight |
+| `BACKGROUND_DAILY_LIMIT` | `180` | Weighted daily background budget; scarce budget stretches background schedules and optional reads preserve a short charge buffer |
 | `ACTION_MIN_INTERVAL_SECONDS` | `60` | Minimum interval between actions |
 | `ACTION_DAILY_LIMIT` | `20` | Daily action budget |
 | `RATE_LIMIT_COOLDOWN_SECONDS` | `43200` | Explicit Volkswagen rate-limit cooldown |

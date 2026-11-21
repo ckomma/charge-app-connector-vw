@@ -2,7 +2,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -77,18 +77,21 @@ class BackgroundBudgetTests(unittest.TestCase):
     def test_reserve_tracks_remaining_day_and_current_charge_interval(self):
         state = AppState.__new__(AppState)
         policy = ChargeRefreshInterval(300, 900)
+        state.background_intervals = {"charge": (1, 900)}
         state.charge = SimpleNamespace(
             lock=threading.Lock(), value=VehicleData(status="A"), interval=policy,
         )
         for hour, minute, status, expected in (
-            (18, 0, "A", 24), (18, 0, "C", 72),
-            (23, 59, "A", 1), (0, 0, "A", 96),
+            (18, 0, "A", 2), (18, 0, "C", 2),
+            (23, 59, "A", 1), (0, 0, "A", 2),
         ):
             with self.subTest(hour=hour, minute=minute, status=status):
                 state.charge.value = VehicleData(status=status)
                 policy.observe(state.charge.value)
-                with patch("vw_app_connector.datetime", wraps=datetime) as clock:
-                    clock.now.return_value = datetime(2026, 11, 20, hour, minute).astimezone()
+                with patch(
+                    "time.time",
+                    return_value=datetime(2026, 11, 20, hour, minute).astimezone().timestamp(),
+                ):
                     self.assertEqual(state.charge_budget_reserve(), expected)
 
     def test_health_exposes_reserve_as_warning_without_connector_failure(self):
@@ -116,6 +119,27 @@ class BackgroundBudgetTests(unittest.TestCase):
         self.assertEqual(health.status, "ok")
         self.assertEqual(health.statusReasons, ())
         self.assertEqual(health.dataWarnings, ("BACKGROUND_BUDGET_RESERVED",))
+        state.details.last_error_category = "VEHICLE_REPORT_NOT_READY"
+        health = state.health()
+        self.assertEqual(health.status, "degraded")
+        self.assertIn("VEHICLE_REPORT_NOT_READY", health.statusReasons)
+
+        for name, attribute, interval in (
+            ("TRIP", "latest_trip", 3600), ("DETAIL", "details", 43200),
+            ("LOCATION", "location", 14400),
+        ):
+            with self.subTest(name=name):
+                state.details.last_error_category = ""
+                cache = BackgroundCache(
+                    attribute, Mock(), lambda _, seconds=interval: seconds,
+                    VehicleData, auto_refresh=False,
+                )
+                cache.set_value(VehicleData())
+                cache.last_success_monotonic = time.monotonic() - 2 * interval - 1
+                setattr(state, attribute, cache)
+                health = state.health()
+                self.assertEqual(health.status, "degraded")
+                self.assertIn(name + "_DATA_STALE", health.statusReasons)
 
     def test_background_loader_skips_ui_and_preserves_cache_when_reserved(self):
         with TemporaryDirectory() as directory:
@@ -147,32 +171,17 @@ class BackgroundBudgetTests(unittest.TestCase):
             self.assertEqual(state.priority_waiters, 0)
             state.usage.acquire_background(1)
 
-    def test_full_day_preserves_idle_soc_checks_under_heavy_optional_demand(self):
+    def test_short_charge_buffer_leaves_room_for_trip_with_reported_morning_usage(self):
         with TemporaryDirectory() as directory:
             limiter = self.limiter(directory, limit=180)
             state = AppState.__new__(AppState)
+            state.background_intervals = {"charge": (1, 900)}
             state.charge = SimpleNamespace(
                 lock=threading.Lock(), value=VehicleData(status="A"), interval=lambda _: 900,
             )
-            start = datetime(2026, 11, 20)
-            deferred = 0
-            with patch.object(UsageLimiter, "today", return_value="2026-11-20"):
-                # Supply optional work every 15 minutes, more often than the
-                # hourly trip fallback, to exercise actual exhaustion pressure.
-                for slot in range(96):
-                    current = (start + timedelta(minutes=15 * slot)).astimezone()
-                    with (
-                        patch("time.time", return_value=current.timestamp()),
-                        patch("vw_app_connector.datetime", wraps=datetime) as clock,
-                    ):
-                        clock.now.return_value = current
-                        limiter.acquire_background(1)
-                        try:
-                            limiter.acquire_background(2, reserve=state.charge_budget_reserve)
-                        except TransientEndpointState:
-                            deferred += 1
-                self.assertGreater(deferred, 0)
-                self.assertLessEqual(limiter.snapshot()["backgroundUsed"], 180)
+            limiter.acquire_background(111)
+            limiter.acquire_background(2, reserve=state.charge_budget_reserve)
+            self.assertEqual(limiter.snapshot()["backgroundUsed"], 113)
 
     def test_trip_retry_policy_and_reserve_are_wired_into_app_state(self):
         with (
@@ -197,6 +206,7 @@ class BackgroundBudgetTests(unittest.TestCase):
             for category in (
                 "TRIP_NOT_UPDATED", "TRIP_NOT_AVAILABLE",
                 "TRIP_ODOMETER_UNAVAILABLE", "TRIP_ODOMETER_REGRESSED",
+                "VEHICLE_REPORT_NOT_READY",
             ):
                 with self.subTest(category=category):
                     reader.read_latest_trip.side_effect = TransientEndpointState(category, "Waiting")
@@ -213,15 +223,63 @@ class BackgroundBudgetTests(unittest.TestCase):
             reader.read_latest_trip.assert_not_called()
             self.assertGreater(state.latest_trip.wakeup.wait.call_args.args[0], 3590)
 
+            state.latest_trip.next_attempt_monotonic = 0
+            state.latest_trip.early_refresh_requested = True
+            before = state.usage.snapshot()["backgroundUsed"]
+            self.assertEqual(state.details.refresh().errorCategory, "TRIP_REFRESH_PENDING")
+            self.assertEqual(state.usage.snapshot()["backgroundUsed"], before)
+            state.latest_trip.early_refresh_requested = False
+
             # Optional trip, details and location reads all respect the reserve.
             with state.usage.lock:
                 state.usage.state["backgroundUsed"] = 175
                 state.usage._save()
             state.charge_budget_reserve = Mock(return_value=6)
+            state.usage.state["backgroundLastByName"] = {}
             for cache in (state.latest_trip, state.details, state.location):
                 with self.subTest(cache=cache.name):
                     self.assertEqual(cache.refresh().errorCategory, "BACKGROUND_BUDGET_RESERVED")
             self.assertEqual(state.usage.snapshot()["backgroundUsed"], 175)
+
+    def test_pacing_survives_restart_and_does_not_consume_budget_when_deferred(self):
+        with TemporaryDirectory() as directory:
+            limiter = self.limiter(directory, limit=180)
+            limiter.acquire_background(111)
+            schedule = lambda: {
+                "charge": (1, 900), "latest-trip": (2, 3600),
+                "details": (3, 43200), "location": (1, 14400),
+            }
+            limiter.acquire_background(2, budget_name="latest-trip", schedule=schedule)
+            restored = self.limiter(directory, limit=180)
+            with self.assertRaises(TransientEndpointState) as caught:
+                restored.acquire_background(2, budget_name="latest-trip", schedule=schedule)
+            self.assertEqual(caught.exception.reason, "BACKGROUND_BUDGET_PACED")
+            self.assertGreater(caught.exception.retry_after_seconds, 0)
+            self.assertEqual(restored.snapshot()["backgroundUsed"], 113)
+
+    def test_pacing_retains_ui_failure_and_early_request_until_success(self):
+        loader = Mock(side_effect=[
+            TransientEndpointState("VEHICLE_REPORT_NOT_READY", "Empty report"),
+            TransientEndpointState("BACKGROUND_BUDGET_PACED", "Wait", retry_after_seconds=123),
+            VehicleData(soc=50),
+        ])
+        cache = BackgroundCache(
+            "details", loader, lambda _: 900, VehicleData, auto_refresh=False,
+        )
+        cache.set_value(VehicleData(soc=60))
+        cache.refresh()
+        cache.request_early_refresh()
+        before = time.monotonic()
+        deferred = cache.refresh()
+        self.assertEqual(deferred.soc, 60)
+        self.assertEqual(cache.last_read_error_category, "VEHICLE_REPORT_NOT_READY")
+        self.assertEqual(cache.last_error_category, "BACKGROUND_BUDGET_PACED")
+        self.assertGreaterEqual(cache.next_attempt_monotonic, before + 123)
+        self.assertTrue(cache.early_refresh_requested)
+        cache.refresh()
+        self.assertEqual(cache.last_read_error_category, "")
+        self.assertEqual(cache.last_error_category, "")
+        self.assertFalse(cache.early_refresh_requested)
 
 
 if __name__ == "__main__":

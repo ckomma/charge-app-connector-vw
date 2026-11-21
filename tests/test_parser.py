@@ -2569,6 +2569,7 @@ class ParserTests(unittest.TestCase):
             with self.subTest(settings=settings_label, item=item, readable=readable):
                 reader = VolkswagenReader.__new__(VolkswagenReader)
                 reader.detail_wait = 0
+                reader.ui_update_timeout = 8
                 reader.launch = Mock()
                 reader.shell = Mock()
                 reader.open_climate = Mock(return_value=ET.fromstring(
