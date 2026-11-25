@@ -6113,6 +6113,7 @@ class AppState:
             "administrativeEndpoints": {
                 "cooldownProbe": "/admin/cooldown/probe",
                 "chargeRefresh": "/admin/refresh/charge",
+                "tripRefresh": "/admin/refresh/trips",
             },
             "features": {
                 "adbMode": health.adbMode,
@@ -6636,6 +6637,20 @@ class AppState:
         result["backgroundBackoffPreserved"] = True
         return result
 
+    def request_trip_refresh(self) -> dict[str, object]:
+        trip = getattr(self, "latest_trip", None)
+        if trip is None:
+            return {"status": "disabled", "reason": "TRIPS_DISABLED"}
+        if getattr(self, "rest_mode", None) is not None and self.rest_mode.paused:
+            return {"status": "paused", "reason": "REST_MODE_PAUSED"}
+        result = trip.request_early_refresh()
+        result["budgetCost"] = 2
+        result["minimumIntervalPreserved"] = True
+        result["cooldownPreserved"] = True
+        result["backgroundBackoffPreserved"] = True
+        result["budgetPacingPreserved"] = True
+        return result
+
     def set_rest_mode(self, paused: bool) -> dict[str, object]:
         # Drain an already-running background read before acknowledging pause.
         # Synchronize with the usage guard so a waiting worker cannot debit
@@ -6892,6 +6907,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             LOG.info("Early charge refresh requested")
             self.send_json(self.state.request_charge_refresh(), 202)
+            return
+        if parsed.path == "/admin/refresh/trips":
+            if not self.authenticated():
+                self.send_error(401)
+                return
+            result = self.state.request_trip_refresh()
+            LOG.info("Early trip refresh request: %s", result["status"])
+            self.send_json(result, 202 if result["status"] == "accepted" else 409)
             return
         if parsed.path == "/admin/cooldown/probe":
             if not self.authenticated():

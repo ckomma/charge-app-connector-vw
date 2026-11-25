@@ -340,6 +340,32 @@ event from evcc, a wallbox or Home Assistant. Concurrent requests are
 coalesced. The operation consumes normal background budget and preserves the
 minimum interval, cooldown, shared backoff and action priority.
 
+### `POST /admin/refresh/trips`
+
+Requires `X-API-Key` and enabled trip polling (`TRIP_POLL_ENABLED=true`).
+Queues an early paired mileage/trip check even when the overview summary is
+unchanged, for example after a Home Assistant arrival or charging event.
+
+Returns HTTP 202 with `status: accepted`, `state: queued` (or `coalesced` when
+already queued/running), `cache: latest-trip` and `budgetCost: 2`. The request
+itself performs no app read and consumes no budget; the background worker
+performs the existing odometer-triggered read under its normal usage guard.
+Repeated requests do not create a queue of duplicate reads.
+
+Returns HTTP 409 with `reason: TRIPS_DISABLED` when trip polling is disabled,
+or `reason: REST_MODE_PAUSED` during manual rest mode. Budgets, pacing,
+minimum intervals, retry pauses, shared backoff, cooldowns and action priority
+remain active. Acceptance therefore does not promise an immediate update.
+The existing consistent-pair checks still apply to the available app data.
+
+Follow progress in `/trips/latest` or `/health.refreshActivity.trips`.
+The HA REST example exposes `rest_command.volkswagen_app_trip_refresh`.
+
+```bash
+curl -X POST -H 'X-API-Key: <API_KEY>' \
+  http://CONNECTOR_HOST:9920/admin/refresh/trips
+```
+
 ### `POST /admin/cooldown/probe`
 
 After correcting a local ADB or phone problem, this endpoint performs one

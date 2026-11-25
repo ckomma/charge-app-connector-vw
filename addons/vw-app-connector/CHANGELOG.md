@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.39
+
+- Add authenticated `POST /admin/refresh/trips` to queue an early paired
+  mileage/trip check when the overview summary stays unchanged.
+- Coalesce duplicate requests and preserve background cost, pacing, minimum
+  intervals, cooldowns, retries and action priority. Reject disabled trip
+  polling and manual rest mode with HTTP 409.
+- Add a Home Assistant REST command example and expose the endpoint in
+  capabilities. Progress uses the existing refresh activity fields.
+
 ## 0.1.38
 
 - Show running and queued refreshes, start times and retry pauses in cached API

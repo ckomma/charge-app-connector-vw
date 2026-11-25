@@ -164,6 +164,12 @@ rest_command:
     timeout: 10
     headers:
       X-API-Key: !secret vw_app_connector_api_key
+  volkswagen_app_trip_refresh:
+    url: "http://CONNECTOR_HOST:9920/admin/refresh/trips"
+    method: post
+    timeout: 10
+    headers:
+      X-API-Key: !secret vw_app_connector_api_key
 
   volkswagen_app_lock:
     url: "http://CONNECTOR_HOST:9920/action/lock"
